@@ -1,0 +1,8 @@
+dist/
+coverage/
+node_modules/
+results/
+LICENSE
+package-lock.json
+docs/superpowers/
+.superpowers/
