@@ -27,6 +27,7 @@ describe('package contract', () => {
     });
     expect(document.devDependencies['@modelcontextprotocol/client']).toBe('2.0.0-beta.4');
     expect(document.devDependencies['@modelcontextprotocol/conformance']).toBe('0.2.0-alpha.9');
+    expect(document.devDependencies.vitest).toBe('4.1.10');
   });
 
   it('contains no forbidden internal MCP dependency', async () => {

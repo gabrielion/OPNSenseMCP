@@ -6,7 +6,7 @@
 
 **Architecture:** A transport-neutral `buildServer(context): McpServer` factory registers every primary v2 tool from one typed capability catalog and routes every call through one policy envelope. Stdio uses the dual-era `serveStdio` factory entry, HTTP uses `createMcpHandler` behind the official Node and Express adapters, and signed request state carries elicitation confirmation across protocol rounds without trusting caller booleans. One default-off compatibility module owns all deprecated v1 SSE server and transport types; it re-registers only catalog metadata and calls the same transport-neutral dispatch facade, never passing a v1 transport to a v2 server. The foundation exposes only a read-only server status capability; mutation fixtures exist only under `tests/` until backup and audit enforcement are present.
 
-**Tech Stack:** Node.js 22.19.0, TypeScript 5.9.3 strict ESM, Zod 4.2.0, `@modelcontextprotocol/server@2.0.0-beta.4`, `@modelcontextprotocol/client@2.0.0-beta.4` for tests, `@modelcontextprotocol/node@2.0.0-beta.4`, `@modelcontextprotocol/express@2.0.0-beta.4`, isolated deprecated-SSE compatibility through `@modelcontextprotocol/sdk@1.29.0`, Express 5.2.1, Vitest 4.0.15, official MCP conformance `0.2.0-alpha.9`.
+**Tech Stack:** Node.js 22.19.0, TypeScript 5.9.3 strict ESM, Zod 4.2.0, `@modelcontextprotocol/server@2.0.0-beta.4`, `@modelcontextprotocol/client@2.0.0-beta.4` for tests, `@modelcontextprotocol/node@2.0.0-beta.4`, `@modelcontextprotocol/express@2.0.0-beta.4`, isolated deprecated-SSE compatibility through `@modelcontextprotocol/sdk@1.29.0`, Express 5.2.1, Vitest 4.1.10, official MCP conformance `0.2.0-alpha.9`.
 
 ## Global Constraints
 
@@ -142,6 +142,7 @@ Capability handlers depend only on `CapabilityExecutionContext`; they never depe
 - Create: `eslint.config.js`
 - Create: `prettier.config.js`
 - Create: `vitest.config.ts`
+- Create: `src/index.ts`
 - Create: `scripts/check-license-headers.mjs`
 - Create: `scripts/clean.mjs`
 - Create: `tests/foundation/package-contract.test.ts`
@@ -277,7 +278,7 @@ Create `package.json`:
     "prettier": "3.6.2",
     "typescript": "5.9.3",
     "typescript-eslint": "8.48.1",
-    "vitest": "4.0.15"
+    "vitest": "4.1.10"
   }
 }
 ```
@@ -341,6 +342,13 @@ Create `tsconfig.build.json`:
 }
 ```
 
+Create `src/index.ts`:
+
+```ts
+// SPDX-License-Identifier: AGPL-3.0-or-later
+export {};
+```
+
 Create `eslint.config.js`:
 
 ```js
@@ -399,6 +407,7 @@ results/
 LICENSE
 package-lock.json
 docs/superpowers/
+.superpowers/
 ```
 
 Create `vitest.config.ts`:
@@ -528,6 +537,7 @@ describe('package contract', () => {
     expect(document.devDependencies['@modelcontextprotocol/conformance']).toBe(
       '0.2.0-alpha.9'
     );
+    expect(document.devDependencies.vitest).toBe('4.1.10');
   });
 
   it('contains no forbidden internal MCP dependency', async () => {
@@ -561,13 +571,18 @@ Run:
 
 ```bash
 npx vitest run tests/foundation/package-contract.test.ts
+npm run build
 npm run typecheck
 npm run lint
 npm run format:check
 npm run license:check
+npm test
+npm run verify
+npm audit --audit-level=high
+git diff --check
 ```
 
-Expected: three package tests pass; typecheck, lint, formatting, and the source-header gate exit `0`.
+Expected: three package tests pass; build, typecheck, lint, formatting, the source-header gate, test, verify, the high-severity audit gate, and the whitespace check exit `0`.
 
 - [ ] **Step 8: Commit the bootstrap atomically**
 
@@ -575,7 +590,8 @@ Expected: three package tests pass; typecheck, lint, formatting, and the source-
 git add .gitignore .node-version .npmrc .prettierignore AGENTS.md CLAUDE.md \
   package.json package-lock.json \
   tsconfig.json tsconfig.build.json eslint.config.js prettier.config.js vitest.config.ts \
-  scripts/check-license-headers.mjs scripts/clean.mjs tests/foundation/package-contract.test.ts
+  src/index.ts scripts/check-license-headers.mjs scripts/clean.mjs \
+  tests/foundation/package-contract.test.ts
 git commit -m "chore: bootstrap AGPL MCP v2 foundation"
 ```
 
@@ -865,7 +881,7 @@ git commit -m "feat: add fail-closed runtime configuration"
 - Create: `src/capabilities/foundation/server-status.ts`
 - Create: `tests/fixtures/capabilities.ts`
 - Create: `tests/capabilities/catalog.test.ts`
-- Create: `src/index.ts`
+- Modify: `src/index.ts`
 
 **Interfaces:**
 - Consumes: `FeatureFlag` from `src/config/feature-flags.ts`.
