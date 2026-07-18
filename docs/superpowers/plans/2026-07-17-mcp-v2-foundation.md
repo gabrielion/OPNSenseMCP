@@ -2494,486 +2494,1082 @@ git add package.json src/app/default-application.ts src/app/application-context.
   tests/integration/process-lifecycle.test.ts tests/architecture/execution-boundary.test.ts
 git commit -m "feat: add owned hardened MCP entrypoints"
 ~~~
-### Task 7b: Add isolated default-off deprecated SSE compatibility
+### Task 7b: Add isolated default-off deprecated SSE transport compatibility
 
 **Files:**
 - Create: `src/http/legacy-sse.ts`
 - Create: `tests/http/legacy-sse.test.ts`
 - Create: `scripts/check-legacy-sse-dependency.mjs`
+- Modify: `src/http/limits.ts`
 - Modify: `src/http/runtime.ts`
+- Modify: `tests/http/runtime.test.ts`
+- Modify: `tests/integration/process-lifecycle.test.ts`
+- Modify: `tests/architecture/execution-boundary.test.ts`
 - Modify: `tests/foundation/package-contract.test.ts`
 - Modify: `package.json`
 - Modify: `package-lock.json`
 
-**Interfaces:**
-- `@modelcontextprotocol/sdk@1.29.0` is the exact, installable legacy dependency and the only source of deprecated `McpServer`, `SSEServerTransport`, and test `SSEClientTransport` types. No v1 object is passed to `@modelcontextprotocol/server@2.0.0-beta.4`.
-- `buildLegacySseServer(application)` is private to `src/http/legacy-sse.ts`; it derives listed tools through
-  the narrow `listApplicationCapabilities(application, 'http')` helper and calls the shared
-  `dispatchCapability` facade with `{ application, transport: 'http', ... }`. It contains no firewall or
-  business handler. The architecture allow-list permits this one additional listing-helper import; it still
-  receives no dispatcher or settlement authority.
-- Legacy SSE has no safe elicitation continuation channel. Before registration it omits every sealed
-  definition whose `policy.confirmation !== 'none'`; it never dispatches a call merely to translate an
-  unusable confirmation challenge. This prevents deprecated clients from filling the process-wide
-  confirmation ledger.
-- `mountLegacySseCompatibility(...)` adds authenticated `GET /sse` and `POST /messages` only when `MCP_LEGACY_SSE_ENABLED=true`. The routes sit behind the same global Host, exact-Origin, body, concurrency, and deadline middleware as `/mcp`, enforce bearer authentication on both requests, cap sessions at 8, expire idle sessions after 2 minutes, and use the normal HTTP policy context.
-- `startHttp` still exposes Streamable HTTP at `/mcp`; the deprecated package is dynamically imported only when compatibility is enabled.
-- `npm run release:check:legacy-sse` is a networked pre-release drift gate. It fails if the registry's sole `latest` tag differs from the exact approved pin; release review must also decide whether the adapter can be removed and run `npm audit --omit=dev`.
+**Interfaces and non-negotiable boundaries:**
+- Pin `@modelcontextprotocol/sdk` exactly to `1.29.0` as a production dependency. The npm
+  package is not registry-deprecated, and neither its package nor its high-level `McpServer` may be
+  described as deprecated. This dependency exists only to support the package's deprecated
+  `SSEServerTransport` and test-only `SSEClientTransport`.
+- Production v1 imports are confined to `src/http/legacy-sse.ts`: low-level `Server` from
+  `@modelcontextprotocol/sdk/server/index.js`, `SSEServerTransport` from
+  `@modelcontextprotocol/sdk/server/sse.js`, and request schemas/result metadata types from
+  `@modelcontextprotocol/sdk/types.js`. The focused test alone may additionally import
+  `Client` and `SSEClientTransport` from the v1 client subpaths. No v1 object or transport is
+  passed to the beta.4 server. Architecture scanning treats both the package root and every
+  subpath as v1 imports, then requires exactly those three production specifiers and two test
+  specifiers; a root-package or unapproved-subpath import fails the gate.
+- Do not use v1 `McpServer.registerTool()`. It parses and transforms arguments before its callback
+  and validates output again, which would make the sealed kernel parse a transformed value a second
+  time. Install low-level `ListToolsRequestSchema` and `CallToolRequestSchema` handlers instead.
+  The call handler looks up prepared metadata and passes
+  `request.params.arguments ?? {}` directly to `dispatchCapability()`; the kernel remains the
+  sole capability-schema parser.
+- Prepare all v1 tool metadata exactly once while mounting, before the TCP listener starts. Convert
+  input schemas with `z.toJSONSchema(schema, { io: 'input' })` and output schemas with
+  `z.toJSONSchema(schema, { io: 'output' })`. A runtime type predicate must require an object
+  schema, object-valued entries in `properties`, and a string-only `required` array. A conversion
+  throw or guard failure rejects startup with the fixed message
+  `Legacy SSE capability schema is not representable`. Never use
+  `unrepresentable: 'any'`, because it silently degrades a schema to `{}`.
+- Filter every definition whose `policy.confirmation !== 'none'` before JSON Schema conversion and
+  before building the name map. Legacy SSE has no safe confirmation continuation. A forged call to a
+  filtered or nonexistent name returns the project's fixed
+  `UNKNOWN_CAPABILITY` `CallToolResult` and never dispatches. Do not assert JSON-RPC
+  method-not-found: v1's high-level server resolves the call as
+  `{ content: [{ type: 'text', text: 'MCP error -32602: Tool sealed_tool not found' }], isError: true }`.
+  This adapter deliberately replaces that InvalidParams-style text with the project's stable refusal.
+- Add `maxLegacySseSessions` and `legacySessionIdleTimeoutMs` to `HttpLimits`, with defaults
+  `8` and `120_000`. Resolve and validate them with every other HTTP limit, add the idle timeout
+  to Task 7's timer-valued limit set so the Node maximum of `2_147_483_647` ms still applies, and
+  pass the resolved values into the compatibility store; `legacy-sse.ts` must not import defaults.
+- Enabled legacy `GET /sse` and `POST /messages` share the existing global Host, exact-Origin,
+  concurrent-request, body-receipt, declared-size, JSON-body, and response-deadline middleware.
+  Both routes then apply the same bearer middleware as `/mcp`. The modern endpoint remains
+  `/mcp`, and its handler is usable concurrently with legacy sessions.
+- Refactor Task 7's `withResponseDeadline(handler, limits, clock)` into generic
+  `responseDeadline(limits, clock)` middleware plus a thin `invokeNodeHandler(handler)` adapter.
+  Preserve `DeadlineClock` as the fourth `buildHttpExpressApplication()` argument and add the
+  compatibility mount hook separately rather than replacing that injectable clock.
+  Mount the generic deadline before both protocol route families. Execution timeout applies to
+  ordinary GET and POST responses; the first `text/event-stream` write switches to the absolute
+  stream-lifetime timer.
+- Add an injectable `loadLegacySse()` runtime dependency whose default is
+  `() => import('./legacy-sse.js')`. It is never called when the flag is false. Legacy close,
+  beta handler close, and Node server close are independently settled on normal close and partial
+  startup failure, with deterministic `AggregateError` ordering. Cleanup invocation stays behind
+  Task 7's delayed `Promise.resolve().then(operation)` boundary so a synchronous legacy close throw
+  cannot prevent later handler or Node-server cleanup.
+- `npm run release:check:legacy-sse` is a networked release gate. It validates the package and lock
+  exact pin, unique lock node and approved integrity, then checks registry version metadata and the
+  exact `latest` tag. Release review must also run `npm audit --omit=dev` and decide whether the
+  compatibility adapter can be removed.
 
-- [ ] **Step 1: Write the default-off, security, capacity, and compatibility tests first**
+- [ ] **Step 1: Write static package, limit, and architecture tests first**
 
-In addition to transport tests, inject one confirmed-write definition. Prove it is absent from legacy
-`tools/list`, a forged legacy call is method-not-found, repeated attempts allocate no pending confirmation,
-and a subsequent modern/stdio confirmation still succeeds when tested at ledger capacity. Ordinary
-registered legacy calls must still traverse dispatchCapability().
-
-Create `tests/http/legacy-sse.test.ts`:
+Extend the exact limits assertion in `tests/http/runtime.test.ts` before changing production code:
 
 ```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import { request as nodeRequest } from 'node:http';
-import { Client as LegacyClient } from '@modelcontextprotocol/sdk/client/index.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-import { afterEach, describe, expect, it } from 'vitest';
-import { createApplicationContext } from '../../src/app/application-context.js';
-import { loadRuntimeConfig } from '../../src/config/runtime-config.js';
-import { DEFAULT_HTTP_LIMITS } from '../../src/http/limits.js';
-import { startHttp, type HttpRuntime } from '../../src/http/runtime.js';
-
-const token = '0123456789abcdef0123456789abcdef';
-const browserOrigin = 'https://console.example:8443';
-const open: HttpRuntime[] = [];
-afterEach(async () => Promise.all(open.splice(0).map((runtime) => runtime.close())));
-
-function legacyApplication() {
-  return createApplicationContext(
-    loadRuntimeConfig({
-      MCP_HTTP_ENABLED: 'true',
-      MCP_HTTP_TOKEN: token,
-      MCP_ALLOWED_ORIGINS: browserOrigin,
-      MCP_LEGACY_SSE_ENABLED: 'true'
-    })
-  );
-}
-
-async function rawGetStatus(url: URL, headers: Record<string, string>): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const request = nodeRequest(url, { method: 'GET', headers }, (response) => {
-      response.resume();
-      resolve(response.statusCode ?? 0);
-    });
-    request.on('error', reject);
-    request.end();
-  });
-}
-
-describe('deprecated SSE compatibility', () => {
-  it('is absent by default while Streamable HTTP remains mounted', async () => {
-    const application = createApplicationContext(
-      loadRuntimeConfig({ MCP_HTTP_ENABLED: 'true', MCP_HTTP_TOKEN: token })
-    );
-    const runtime = await startHttp(application, { port: 0 });
-    open.push(runtime);
-
-    expect(
-      (
-        await fetch(new URL('/sse', runtime.url), {
-          headers: { authorization: `Bearer ${token}` }
-        })
-      ).status
-    ).toBe(404);
-    expect(runtime.url.pathname).toBe('/mcp');
-  });
-
-  it('applies the same bearer, exact-Origin, Host, and session lookup gates', async () => {
-    const runtime = await startHttp(legacyApplication(), { port: 0 });
-    open.push(runtime);
-    const sseUrl = new URL('/sse', runtime.url);
-
-    expect((await fetch(sseUrl, { headers: { origin: browserOrigin } })).status).toBe(401);
-    expect(
-      (
-        await fetch(sseUrl, {
-          headers: {
-            authorization: `Bearer ${token}`,
-            origin: 'https://console.example:9443'
-          }
-        })
-      ).status
-    ).toBe(403);
-    expect(
-      await rawGetStatus(sseUrl, {
-        authorization: `Bearer ${token}`,
-        origin: browserOrigin,
-        host: 'foreign.example'
-      })
-    ).toBe(403);
-    expect(
-      (
-        await fetch(new URL('/messages?sessionId=missing-session-1', runtime.url), {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${token}`,
-            origin: browserOrigin,
-            'content-type': 'application/json'
-          },
-          body: '{}'
-        })
-      ).status
-    ).toBe(404);
-  });
-
-  it('caps open deprecated sessions at the declared finite limit', async () => {
-    const runtime = await startHttp(legacyApplication(), { port: 0 });
-    open.push(runtime);
-    const sseUrl = new URL('/sse', runtime.url);
-    const headers = { authorization: `Bearer ${token}`, origin: browserOrigin };
-    const streams: Response[] = [];
-
-    for (let index = 0; index < DEFAULT_HTTP_LIMITS.maxLegacySseSessions; index += 1) {
-      const response = await fetch(sseUrl, { headers });
-      expect(response.status).toBe(200);
-      streams.push(response);
-    }
-    expect((await fetch(sseUrl, { headers })).status).toBe(503);
-    await Promise.all(streams.map(async (response) => response.body?.cancel()));
-  });
-
-  it('serves shared catalog tools through the isolated v1 transport', async () => {
-    const runtime = await startHttp(legacyApplication(), { port: 0 });
-    open.push(runtime);
-    const transport = new SSEClientTransport(new URL('/sse', runtime.url), {
-      requestInit: {
-        headers: { authorization: `Bearer ${token}`, origin: browserOrigin }
-      }
-    });
-    const client = new LegacyClient({ name: 'legacy-sse-test', version: '1.0.0' });
-
-    await client.connect(transport);
-    try {
-      expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual([
-        'server_status'
-      ]);
-      const result = await client.callTool({ name: 'server_status', arguments: {} });
-      expect(result.isError).not.toBe(true);
-      expect(result.structuredContent).toEqual({ status: 'ok', readOnly: true, version: '0.1.0' });
-    } finally {
-      await client.close();
-    }
-  });
+expect(DEFAULT_HTTP_LIMITS).toEqual({
+  bodyBytes: 256 * 1024,
+  maxConcurrentRequests: 32,
+  maxSubscriptions: 16,
+  maxLegacySseSessions: 8,
+  legacySessionIdleTimeoutMs: 120_000,
+  bodyReceiptTimeoutMs: 10_000,
+  executionTimeoutMs: 30_000,
+  streamLifetimeMs: 5 * 60_000,
+  headersTimeoutMs: 5_000,
+  keepAliveTimeoutMs: 5_000,
+  maxRequestsPerSocket: 100
 });
 ```
 
-Add this assertion to `tests/foundation/package-contract.test.ts` inside the exact-pin test:
+Also add invalid override cases for both new fields. In particular, assert that
+`legacySessionIdleTimeoutMs: 2_147_483_647` is accepted and `2_147_483_648` is rejected, while
+`maxLegacySseSessions` remains a positive safe integer rather than a timer-valued limit:
 
 ```ts
-expect(document.dependencies['@modelcontextprotocol/sdk']).toBe('1.29.0');
+expect(
+  resolveHttpLimits({ legacySessionIdleTimeoutMs: 2_147_483_647 })
+    .legacySessionIdleTimeoutMs
+).toBe(2_147_483_647);
+expect(() =>
+  resolveHttpLimits({ legacySessionIdleTimeoutMs: 2_147_483_648 })
+).toThrow('Invalid HTTP limit: legacySessionIdleTimeoutMs');
 ```
 
-Run:
+Extend `tests/foundation/package-contract.test.ts` to parse both manifests and assert the complete
+root and lock contract:
 
-```bash
-npx vitest run tests/foundation/package-contract.test.ts tests/http/legacy-sse.test.ts
+```ts
+interface LockPackage {
+  readonly version?: string;
+  readonly resolved?: string;
+  readonly integrity?: string;
+  readonly dev?: boolean;
+}
+
+interface LockDocument {
+  readonly packages: Record<string, LockPackage & {
+    readonly dependencies?: Record<string, string>;
+  }>;
+}
+
+expect(document.dependencies).toMatchObject({
+  '@modelcontextprotocol/express': '2.0.0-beta.4',
+  '@modelcontextprotocol/node': '2.0.0-beta.4',
+  '@modelcontextprotocol/server': '2.0.0-beta.4',
+  '@modelcontextprotocol/sdk': '1.29.0',
+  express: '5.2.1',
+  zod: '4.2.0'
+});
+expect(document.devDependencies['@modelcontextprotocol/client']).toBe('2.0.0-beta.4');
+expect(document.scripts['release:check:legacy-sse']).toBe(
+  'node scripts/check-legacy-sse-dependency.mjs'
+);
+
+const lock = JSON.parse(await readFile('package-lock.json', 'utf8')) as LockDocument;
+expect(lock.packages['']?.dependencies?.['@modelcontextprotocol/sdk']).toBe('1.29.0');
+const sdkNodes = Object.entries(lock.packages).filter(([path]) =>
+  /(?:^|\/)node_modules\/@modelcontextprotocol\/sdk$/u.test(path)
+);
+expect(sdkNodes.map(([path]) => path)).toEqual(['node_modules/@modelcontextprotocol/sdk']);
+expect(sdkNodes[0]?.[1]).toMatchObject({
+  version: '1.29.0',
+  resolved: 'https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.29.0.tgz',
+  integrity:
+    'sha512-zo37mZA9hJWpULgkRpowewez1y6ML5GsXJPY8FI0tBBCd77HEvza4jDqRKOXgHNn867PVGCyTdzqpz0izu5ZjQ=='
+});
+expect(sdkNodes[0]?.[1].dev).toBeUndefined();
 ```
 
-Expected: FAIL because the exact legacy dependency and compatibility module are absent.
+Extend `tests/architecture/execution-boundary.test.ts` with all of these static assertions:
 
-- [ ] **Step 2: Add only the exact approved deprecated transport dependency**
+1. Add `src/http/legacy-sse.ts` to the exact `listApplicationCapabilities` helper allow-list.
+2. Parse import specifiers in production TypeScript and classify a v1 import when the specifier is
+   exactly `@modelcontextprotocol/sdk` **or** starts with `@modelcontextprotocol/sdk/`. Sort and
+   require the complete `(file, specifier)` set to equal exactly these three entries:
+   `src/http/legacy-sse.ts` with `@modelcontextprotocol/sdk/server/index.js`,
+   `@modelcontextprotocol/sdk/server/sse.js`, and `@modelcontextprotocol/sdk/types.js`.
+3. Apply the same root-equality-or-subpath classification to test TypeScript. Sort and require the
+   complete set to equal exactly two entries, both in `tests/http/legacy-sse.test.ts`:
+   `@modelcontextprotocol/sdk/client/index.js` and
+   `@modelcontextprotocol/sdk/client/sse.js`.
+4. Assert the legacy source contains none of `@modelcontextprotocol/server`, `buildServer`,
+   `createServerFactory`, `settleApplicationConfirmation`, or
+   `handleConfirmationCall`.
+5. Assert the source contains no cast from a v1 SSE transport to a beta transport type. The legacy
+   module may import only catalog metadata, `dispatchCapability`, neutral capability types, shared
+   instructions, Express types, HTTP limits, Zod, and the v1 low-level server/transport/types paths.
 
-Add this exact entry to `package.json` dependencies; do not change the four beta.4 imports or pins:
+Use the existing recursive `sourceFiles()` helper, and compare exact normalized file/specifier tuples
+rather than substring counts. This must fail on a bare root-package import, any sixth v1 import, or an
+approved specifier imported from a second file.
 
-```json
-"@modelcontextprotocol/sdk": "1.29.0"
-```
+- [ ] **Step 2: Write the full legacy behavior and lifecycle tests before implementation**
 
-Regenerate and install the lockfile without lifecycle scripts:
-
-```bash
-npm install --package-lock-only --ignore-scripts
-npm ci --ignore-scripts
-```
-
-Expected: both commands exit `0`; `package-lock.json` resolves `@modelcontextprotocol/sdk@1.29.0` exactly and retains all four official v2 packages at `2.0.0-beta.4`.
-
-- [ ] **Step 3: Implement the isolated v1 assembly, transport, and bounded session store**
-
-Create `src/http/legacy-sse.ts`:
+Create `tests/http/legacy-sse.test.ts` with the v1 imports below. The single `requestInit.headers`
+object is intentional: executable v1.29 verification showed it reaches both the EventSource GET and
+the recurring POST.
 
 ```ts
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { McpServer as LegacyMcpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { request as httpRequest } from 'node:http';
+import { Client as LegacyClient } from '@modelcontextprotocol/sdk/client/index.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { Client, StreamableHTTPClientTransport, type ElicitResult } from '@modelcontextprotocol/client';
+import * as z from 'zod/v4';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  createApplicationContext,
+  type ApplicationContext
+} from '../../src/app/application-context.js';
+import { CAPABILITY_CATALOG, CapabilityCatalog } from '../../src/capabilities/catalog.js';
+import { dispatchCapability } from '../../src/capabilities/dispatch.js';
+import { defineCapability } from '../../src/capabilities/kernel.js';
+import { loadRuntimeConfig } from '../../src/config/runtime-config.js';
+import { startHttp, type HttpRuntime } from '../../src/http/runtime.js';
+import { connectLegacy } from '../helpers/connect.js';
+
+const TOKEN = 'LEGACY_SSE_SENTINEL_TOKEN_0123456789';
+const ORIGIN = 'https://console.example:8443';
+const openRuntimes = new Set<HttpRuntime>();
+
+function legacyHeaders(): Record<string, string> {
+  return {
+    authorization: `Bearer ${TOKEN}`,
+    origin: ORIGIN
+  };
+}
+
+async function connectLegacySse(runtime: HttpRuntime) {
+  const transport = new SSEClientTransport(new URL('/sse', runtime.url), {
+    requestInit: { headers: legacyHeaders() }
+  });
+  const client = new LegacyClient(
+    { name: 'legacy-sse-test', version: '0.1.0' },
+    { capabilities: {} }
+  );
+  await client.connect(transport);
+  return {
+    client,
+    transport,
+    close: () => Promise.allSettled([client.close(), transport.close()])
+  };
+}
+
+function application(
+  catalog: CapabilityCatalog = CAPABILITY_CATALOG,
+  enabled = true
+): ApplicationContext {
+  return createApplicationContext(
+    loadRuntimeConfig({
+      READ_ONLY: 'false',
+      MCP_HTTP_ENABLED: 'true',
+      MCP_HTTP_TOKEN: TOKEN,
+      MCP_ALLOWED_ORIGINS: ORIGIN,
+      MCP_LEGACY_SSE_ENABLED: enabled ? 'true' : 'false'
+    }),
+    catalog
+  );
+}
+```
+
+Keep a teardown that closes clients first and then all runtimes with `Promise.allSettled`. Add raw
+HTTP helpers that can: send GET or POST with an explicit Host, stream until the v1
+`event: endpoint` frame yields its `sessionId`, leave an SSE response open, destroy that response,
+send declared-oversize and headers-only slow bodies, and wait for the stream's `close` event. Those
+helpers must reject unexpected socket errors and must not swallow response status codes.
+
+Implement these exact test cases:
+
+1. **Default-off and coexistence.** With the flag false, authenticated `GET /sse` and JSON
+   `POST /messages?sessionId=valid-but-absent` both return 404. A beta
+   `StreamableHTTPClientTransport` connected to `runtime.url` still lists
+   `server_status`. With the flag true, keep a beta client and a v1 SSE client connected
+   concurrently; both list exactly `server_status`, both call it successfully, and
+   `runtime.url` remains a string ending in `/mcp`.
+2. **GET and POST route guards.** For each route, missing and wrong bearer values return 401; a wrong
+   exact Origin and a foreign Host return 403. For POST, a malformed session identifier such as
+   `../escape` returns 400 and a valid absent identifier returns 404. A declared body larger than
+   `bodyBytes` returns 413 before authentication, and a headers-only slow POST returns 408 before
+   authentication. Assert neither response body nor captured diagnostics contains `TOKEN`.
+3. **Shared concurrency.** Start with `maxConcurrentRequests: 2`, open two authenticated SSE GETs,
+   and prove a third request to `/mcp` and a third request to `/messages` each return 503 with
+   `{ error: 'request_limit_reached' }`. Close one stream and prove a modern `/mcp` tools/list
+   request succeeds, showing capacity is reclaimed.
+4. **Bounded sessions and reclamation.** Open exactly eight sessions under default limits; the ninth
+   authenticated `GET /sse` returns 503. Destroy one of the eight streams, wait for its close
+   processing, then open a replacement successfully. Do not merely close the whole runtime to prove
+   reclamation.
+5. **Idle expiry.** Start with
+   `legacySessionIdleTimeoutMs: 25` and `streamLifetimeMs: 1_000`. Capture a session ID from a raw
+   SSE stream, wait for the server to end it, then assert POST to that old ID returns 404.
+6. **Absolute stream expiry.** Start with
+   `streamLifetimeMs: 25` and `legacySessionIdleTimeoutMs: 1_000`. Prove the same stream closure
+   and old-session 404. This independently proves the generic deadline recognizes
+   `text/event-stream`.
+7. **One sealed parse.** Define a read capability whose input string has one `refine` and one
+   `transform(Number)`, and whose output has one `refine`. Call it through the v1 client with
+   raw `{ port: '443' }`; assert output success and counters
+   `{ inputRefine: 1, inputTransform: 1, outputRefine: 1, handler: 1 }`. Then call an unknown name
+   and assert the exact fixed result below while all counters remain unchanged:
+
+   ```ts
+   expect(unknown).toEqual({
+     isError: true,
+     content: [{ type: 'text', text: 'Capability is not available.' }],
+     structuredContent: { code: 'UNKNOWN_CAPABILITY' }
+   });
+   ```
+
+8. **Fail-closed metadata.** Define an otherwise exposed capability whose output schema contains a
+   transform. Enabling legacy SSE must make `startHttp(..., { port: 0 })` reject with exactly
+   `Legacy SSE capability schema is not representable` before a listener exists. Repeat with a
+   deliberately non-object top-level schema. Do not accept `{}` metadata.
+9. **Confirmation filtering, forged calls, and ledger capacity.** Use
+   `createMutationFixture(onCall, { id: 'test.sealed', mcpName: 'sealed_tool' })` plus the normal
+   catalog, with `READ_ONLY=false`. Assert legacy `tools/list` omits `sealed_tool`. Fill 1023 of
+   the kernel's default 1024 ledger slots with direct, unique stdio dispatches:
+
+   ```ts
+   for (let sequence = 0; sequence < 1023; sequence += 1) {
+     const issued = await dispatchCapability(
+       { name: 'sealed_tool', arguments: { value: String(sequence) } },
+       {
+         application: sealedApplication,
+         transport: 'stdio',
+         principalId: 'stdio:local-connection'
+       }
+     );
+     expect(issued.kind).toBe('confirmation-required');
+   }
+   ```
+
+   Make sixteen forged v1 calls to `sealed_tool`; every call must equal the fixed
+   `UNKNOWN_CAPABILITY` result above, and `onCall` remains untouched. Then connect with the
+   existing beta `connectLegacy()` helper, advertise `{ elicitation: { form: {} } }`, register
+   `elicitation/create` to return
+   `{ action: 'accept', content: { confirm: true } } satisfies ElicitResult`, and call
+   `sealed_tool` with `{ value: '1023' }`. It must temporarily consume the final available slot,
+   settle only its own fresh confirmation, return `{ accepted: '1023' }`, and invoke `onCall`
+   exactly once. Then issue a new direct stdio dispatch with unique arguments
+   `{ value: 'ledger-final-pending' }`; it must return `confirmation-required` and occupy the one
+   remaining slot. A subsequent direct dispatch with `{ value: 'ledger-overflow' }` must return the
+   exact refusal code `CONFIRMATION_UNAVAILABLE`. This final capacity proof demonstrates that the
+   original 1023 confirmations remain pending: forged legacy calls neither allocate nor settle
+   confirmation state, while the beta acceptance settled only the confirmation it created.
+10. **Owned shutdown.** Open multiple raw SSE sessions, call `runtime.close()` twice concurrently,
+    assert both callers receive the same promise, every stream ends, every old session is gone, and a
+    later close returns the already-settled promise.
+
+Extend `tests/http/runtime.test.ts` with a unit test for the refactored
+`responseDeadline(limits, clock)`: it calls `next` without invoking an MCP handler, uses the
+execution timeout for an ordinary response, switches exactly once to `streamLifetimeMs` on an SSE
+`writeHead`, and clears the active timer on both `finish` and `close`. Update existing adapter
+tests to call `invokeNodeHandler(handler)` separately. Preserve Task 7's constructor spy assertion:
+`createNodeServer` receives the complete timeout options object and the Express listener in one call,
+including `connectionsCheckingInterval: Math.min(1_000, headersTimeoutMs)` and
+`requestTimeout: Math.max(bodyReceiptTimeoutMs, headersTimeoutMs)`. Keep the real partial-header
+socket test proving the configured deadline is effective; property assignment after construction is
+not an acceptable substitute.
+
+Extend `tests/integration/process-lifecycle.test.ts` with injectable-loader tests:
+
+- `loadLegacySse` is a spy that is not called when `legacySseEnabled=false`.
+- Loader rejection and mount-time schema rejection close the already-created beta handler.
+- After a successful mount, a Node construction failure closes the legacy handle and beta handler
+  once each. A later listen failure closes the legacy handle, beta handler, and Node server once each.
+- On normal shutdown, make legacy close **throw synchronously** with `legacy-close`, beta handler
+  close reject `handler-close`, and Node close reject `server-close`. Assert one `AggregateError` with
+  `.errors` exactly `[legacyFailure, handlerFailure, serverFailure]`, even for concurrent close
+  callers, and assert every cleanup was attempted once. This must use the real aggregate settler,
+  not a mock that turns the synchronous throw into a rejected promise first.
+- On failed startup, repeat the synchronous legacy close throw while later beta-handler and Node
+  close operations reject. Assert all later cleanup functions were still invoked once and the
+  primary startup error precedes the independently collected
+  `[legacyFailure, handlerFailure, serverFailure]` errors.
+
+- [ ] **Step 3: Run the new tests and record the expected red state**
+
+Use the repository's required Node 22 toolchain:
+
+```bash
+export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+npx vitest run   tests/http/legacy-sse.test.ts   tests/http/runtime.test.ts   tests/integration/process-lifecycle.test.ts   tests/architecture/execution-boundary.test.ts   tests/foundation/package-contract.test.ts
+```
+
+Expected: failures report the missing legacy module, loader, two limit fields, exact root production
+pin, and route behavior. Do not weaken an assertion because the pre-existing dev-only transitive copy
+makes v1 client imports resolvable.
+
+- [ ] **Step 4: Add only the exact approved v1 dependency**
+
+```bash
+export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+npm install --save-exact @modelcontextprotocol/sdk@1.29.0
+npm ls @modelcontextprotocol/sdk --all
+```
+
+Expected lock review:
+
+- one `node_modules/@modelcontextprotocol/sdk` node at `1.29.0`;
+- integrity
+  `sha512-zo37mZA9hJWpULgkRpowewez1y6ML5GsXJPY8FI0tBBCd77HEvza4jDqRKOXgHNn867PVGCyTdzqpz0izu5ZjQ==`;
+- the existing conformance `^1.29.0` edge reuses that one node;
+- the root lock dependency becomes exact and the SDK node is production-reachable;
+- the beta.4 MCP roots, `express@5.2.1`, and `zod@4.2.0` do not move.
+
+The expected lock churn promotes the existing SDK graph from dev-only reachability; it must not add a
+second SDK version. Review every unrelated lock change before continuing.
+
+- [ ] **Step 5: Implement the low-level v1 adapter and bounded store**
+
+Create `src/http/legacy-sse.ts` with this low-level shape. Keep the result formatter structural so no
+beta MCP type enters this file.
+
+```ts
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { Server as LegacyServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import type { CallToolResult as LegacyCallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import {
+  CallToolRequestSchema,
+  ListToolsRequestSchema,
+  type CallToolResult as LegacyCallToolResult,
+  type Tool as LegacyTool
+} from '@modelcontextprotocol/sdk/types.js';
 import type { Express, RequestHandler } from 'express';
+import * as z from 'zod/v4';
 import {
   listApplicationCapabilities,
   type ApplicationContext
 } from '../app/application-context.js';
 import { dispatchCapability } from '../capabilities/dispatch.js';
+import type {
+  CapabilityDefinition,
+  CapabilityResult,
+  ServerContext
+} from '../capabilities/types.js';
 import { SERVER_INSTRUCTIONS } from '../mcp/instructions.js';
-import { DEFAULT_HTTP_LIMITS } from './limits.js';
+import type { HttpLimits } from './limits.js';
 
-type DispatchOutcome = Awaited<ReturnType<typeof dispatchCapability>>;
-
-interface LegacySseSession {
-  readonly server: LegacyMcpServer;
-  readonly transport: SSEServerTransport;
-  idleTimer: ReturnType<typeof setTimeout>;
-}
+export const LEGACY_SCHEMA_ERROR = 'Legacy SSE capability schema is not representable';
 
 export interface LegacySseHandle {
-  readonly close: () => Promise<void>;
+  close(): Promise<void>;
 }
 
-function legacyResult(outcome: DispatchOutcome): LegacyCallToolResult {
-  if (outcome.kind === 'success') {
+export interface LegacySseMountOptions {
+  readonly application: ApplicationContext;
+  readonly authenticate: RequestHandler;
+  readonly limits: Pick<
+    HttpLimits,
+    'maxLegacySseSessions' | 'legacySessionIdleTimeoutMs'
+  >;
+  readonly onerror: (error: Error) => void;
+}
+
+interface PreparedLegacyTool {
+  readonly definition: CapabilityDefinition;
+  readonly listed: LegacyTool;
+}
+
+interface LegacySession {
+  readonly server: LegacyServer;
+  readonly transport: SSEServerTransport;
+  idleTimer: ReturnType<typeof setTimeout> | undefined;
+}
+
+function toError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
+}
+
+function flattenError(value: unknown): Error[] {
+  return value instanceof AggregateError
+    ? value.errors.flatMap(flattenError)
+    : [toError(value)];
+}
+
+function rejectedErrors(results: readonly PromiseSettledResult<void>[]): Error[] {
+  return results.flatMap((result) =>
+    result.status === 'rejected' ? flattenError(result.reason) : []
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isLegacyObjectSchema(value: unknown): value is LegacyTool['inputSchema'] {
+  if (!isRecord(value) || value.type !== 'object') return false;
+  if (
+    value.properties !== undefined &&
+    (!isRecord(value.properties) || !Object.values(value.properties).every(isRecord))
+  ) {
+    return false;
+  }
+  return (
+    value.required === undefined ||
+    (Array.isArray(value.required) &&
+      value.required.every((entry): entry is string => typeof entry === 'string'))
+  );
+}
+
+function toLegacyObjectSchema(
+  schema: z.ZodType,
+  io: 'input' | 'output'
+): LegacyTool['inputSchema'] {
+  let converted: unknown;
+  try {
+    converted = z.toJSONSchema(schema, { io });
+  } catch {
+    throw new Error(LEGACY_SCHEMA_ERROR);
+  }
+  if (!isLegacyObjectSchema(converted)) throw new Error(LEGACY_SCHEMA_ERROR);
+  return converted;
+}
+
+function prepareLegacyTools(application: ApplicationContext): readonly PreparedLegacyTool[] {
+  const prepared = listApplicationCapabilities(application, 'http')
+    .filter((definition) => definition.policy.confirmation === 'none')
+    .map((definition): PreparedLegacyTool => {
+      const listed: LegacyTool = {
+        name: definition.mcpName,
+        title: definition.title,
+        description: definition.description,
+        inputSchema: toLegacyObjectSchema(definition.inputSchema, 'input'),
+        outputSchema: toLegacyObjectSchema(definition.outputSchema, 'output'),
+        annotations: { ...definition.annotations }
+      };
+      return Object.freeze({ definition, listed: Object.freeze(listed) });
+    });
+  return Object.freeze(prepared);
+}
+
+function unknownLegacyResult(): LegacyCallToolResult {
+  return {
+    isError: true,
+    content: [{ type: 'text', text: 'Capability is not available.' }],
+    structuredContent: { code: 'UNKNOWN_CAPABILITY' }
+  };
+}
+
+function formatLegacyResult(result: CapabilityResult): LegacyCallToolResult {
+  if (result.kind === 'success') {
     return {
-      content: [{ type: 'text', text: JSON.stringify(outcome.output) }],
-      structuredContent: outcome.output
+      content: [{ type: 'text', text: JSON.stringify(result.output) }],
+      structuredContent: result.output
     };
   }
-  if (outcome.kind === 'refused') {
+  if (result.kind === 'refused') {
     return {
       isError: true,
-      content: [{ type: 'text', text: outcome.message }],
-      structuredContent: { code: outcome.code }
+      content: [{ type: 'text', text: result.message }],
+      structuredContent: { code: result.code }
     };
   }
   return {
     isError: true,
-    content: [{ type: 'text', text: 'The requested operation is unavailable on deprecated SSE.' }],
-    structuredContent: { code: 'CONFIRMATION_INVALID' }
+    content: [{ type: 'text', text: 'Capability confirmation is unavailable.' }],
+    structuredContent: { code: 'CONFIRMATION_UNAVAILABLE' }
   };
 }
 
-function buildLegacySseServer(application: ApplicationContext): LegacyMcpServer {
-  const server = new LegacyMcpServer(
-    { name: 'opnsense-mcp-legacy-sse', version: '0.1.0' },
+function buildLegacySseServer(
+  application: ApplicationContext,
+  prepared: readonly PreparedLegacyTool[],
+  onerror: (error: Error) => void
+): LegacyServer {
+  const byName = new Map(prepared.map((entry) => [entry.definition.mcpName, entry] as const));
+  const server = new LegacyServer(
+    { name: 'opnsense-mcp', version: '0.1.0' },
     { instructions: SERVER_INSTRUCTIONS }
   );
-
-  for (const capability of listApplicationCapabilities(application, 'http')) {
-    if (capability.policy.confirmation !== 'none') continue;
-    server.registerTool(
-      capability.mcpName,
-      {
-        title: capability.title,
-        description: capability.description,
-        inputSchema: capability.inputSchema,
-        outputSchema: capability.outputSchema,
-        annotations: capability.annotations
-      },
-      async (rawInput, extra) => {
-        const principalId = extra.authInfo?.clientId;
-        const outcome = await dispatchCapability(
-          { name: capability.mcpName, arguments: rawInput },
-          {
-            application,
-            transport: 'http',
-            signal: extra.signal,
-            ...(principalId === undefined ? {} : { principalId })
-          }
-        );
-        return legacyResult(outcome);
-      }
+  server.onerror = onerror;
+  server.registerCapabilities({ tools: {} });
+  server.setRequestHandler(ListToolsRequestSchema, () =>
+    Promise.resolve({ tools: prepared.map(({ listed }) => listed) })
+  );
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    const entry = byName.get(request.params.name);
+    if (entry === undefined) return unknownLegacyResult();
+    const context: ServerContext = {
+      application,
+      transport: 'http',
+      signal: extra.signal,
+      principalId: extra.authInfo?.clientId ?? 'http:local-bearer'
+    };
+    return formatLegacyResult(
+      await dispatchCapability(
+        {
+          name: entry.definition.mcpName,
+          arguments: request.params.arguments ?? {}
+        },
+        context
+      )
     );
-  }
+  });
   return server;
 }
 
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error('Legacy SSE failure');
-}
-
 export function mountLegacySseCompatibility(
-  app: Express,
-  application: ApplicationContext,
-  authentication: RequestHandler,
-  onerror: (error: Error) => void
+  router: Express,
+  options: LegacySseMountOptions
 ): LegacySseHandle {
-  const sessions = new Map<string, LegacySseSession>();
+  const prepared = prepareLegacyTools(options.application);
+  const sessions = new Map<string, LegacySession>();
+  let closing = false;
+  let closePromise: Promise<void> | undefined;
+
+  function forgetSession(sessionId: string): void {
+    const session = sessions.get(sessionId);
+    if (session === undefined) return;
+    sessions.delete(sessionId);
+    if (session.idleTimer !== undefined) clearTimeout(session.idleTimer);
+    session.idleTimer = undefined;
+  }
 
   async function closeSession(sessionId: string): Promise<void> {
     const session = sessions.get(sessionId);
     if (session === undefined) return;
-    sessions.delete(sessionId);
-    clearTimeout(session.idleTimer);
+    forgetSession(sessionId);
     await session.server.close();
   }
 
-  function armIdleTimeout(sessionId: string, session: LegacySseSession): void {
-    clearTimeout(session.idleTimer);
-    session.idleTimer = setTimeout(() => {
-      void closeSession(sessionId).catch(onerror);
-    }, DEFAULT_HTTP_LIMITS.legacySessionIdleTimeoutMs);
-    session.idleTimer.unref();
+  function touchSession(sessionId: string): void {
+    const session = sessions.get(sessionId);
+    if (session === undefined) return;
+    if (session.idleTimer !== undefined) clearTimeout(session.idleTimer);
+    const idleTimer = setTimeout(() => {
+      void closeSession(sessionId).catch(options.onerror);
+    }, options.limits.legacySessionIdleTimeoutMs);
+    idleTimer.unref();
+    session.idleTimer = idleTimer;
   }
 
-  app.get('/sse', authentication, (request, response) => {
+  router.get('/sse', options.authenticate, (_request, response, next) => {
     void (async () => {
-      if (sessions.size >= DEFAULT_HTTP_LIMITS.maxLegacySseSessions) {
-        response.status(503).json({ error: 'legacy_session_capacity_exceeded' });
+      if (closing || sessions.size >= options.limits.maxLegacySseSessions) {
+        response.status(503).json({ error: 'legacy_sse_capacity_reached' });
         return;
       }
-
       const transport = new SSEServerTransport('/messages', response);
-      const server = buildLegacySseServer(application);
+      const server = buildLegacySseServer(options.application, prepared, options.onerror);
       const sessionId = transport.sessionId;
-      const idleTimer = setTimeout(() => {
-        void closeSession(sessionId).catch(onerror);
-      }, DEFAULT_HTTP_LIMITS.legacySessionIdleTimeoutMs);
-      idleTimer.unref();
-      const session: LegacySseSession = { server, transport, idleTimer };
+      const session: LegacySession = { server, transport, idleTimer: undefined };
       sessions.set(sessionId, session);
-      response.once('close', () => void closeSession(sessionId).catch(onerror));
-
+      server.onclose = () => {
+        forgetSession(sessionId);
+      };
       try {
         await server.connect(transport);
-      } catch (error) {
-        await closeSession(sessionId);
-        throw error;
+        touchSession(sessionId);
+      } catch (startupFailure) {
+        const cleanup = await Promise.allSettled([closeSession(sessionId)]);
+        const cleanupFailures = rejectedErrors(cleanup);
+        if (cleanupFailures.length > 0) {
+          throw new AggregateError(
+            [...flattenError(startupFailure), ...cleanupFailures],
+            'Legacy SSE session startup and cleanup failed'
+          );
+        }
+        throw startupFailure;
       }
-    })().catch((error) => {
-      onerror(asError(error));
-      if (response.headersSent) response.destroy();
-      else response.status(500).json({ error: 'legacy_sse_failed' });
-    });
+    })().catch(next);
   });
 
-  app.post('/messages', authentication, (request, response) => {
+  router.post('/messages', options.authenticate, (request, response, next) => {
     void (async () => {
-      const rawSessionId = request.query.sessionId;
-      if (
-        typeof rawSessionId !== 'string' ||
-        !/^[A-Za-z0-9_-]{16,128}$/.test(rawSessionId)
-      ) {
-        response.status(400).json({ error: 'invalid_session' });
+      const candidate = request.query.sessionId;
+      if (typeof candidate !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(candidate)) {
+        response.status(400).json({ error: 'invalid_legacy_session' });
         return;
       }
-      const session = sessions.get(rawSessionId);
+      const session = sessions.get(candidate);
       if (session === undefined) {
-        response.status(404).json({ error: 'unknown_session' });
+        response.status(404).json({ error: 'legacy_session_not_found' });
         return;
       }
-      armIdleTimeout(rawSessionId, session);
-      await session.transport.handlePostMessage(request, response, request.body);
-    })().catch((error) => {
-      onerror(asError(error));
-      if (response.headersSent) response.destroy();
-      else response.status(500).json({ error: 'legacy_message_failed' });
-    });
+      touchSession(candidate);
+      const parsedBody = (request as unknown as { readonly body?: unknown }).body;
+      await session.transport.handlePostMessage(request, response, parsedBody);
+      touchSession(candidate);
+    })().catch(next);
   });
 
-  return {
-    close: async () => {
-      const results = await Promise.allSettled(
-        [...sessions.keys()].map((sessionId) => closeSession(sessionId))
-      );
-      const failures = results
-        .filter((result) => result.status === 'rejected')
-        .map((result) => result.reason);
-      if (failures.length > 0) {
-        throw new AggregateError(failures, 'Legacy SSE cleanup failed.');
-      }
+  return Object.freeze({
+    close() {
+      closePromise ??= (async () => {
+        closing = true;
+        const results = await Promise.allSettled([...sessions.keys()].map(closeSession));
+        const failures = rejectedErrors(results);
+        if (failures.length > 0) {
+          throw new AggregateError(failures, 'Legacy SSE cleanup failed');
+        }
+      })();
+      return closePromise;
     }
+  });
+}
+```
+
+The steady-state owner closes each session through `LegacyServer.close()`; v1 `Server` owns its
+transport and closes it. Do not double-close the transport or cast it to a beta transport.
+
+- [ ] **Step 6: Integrate resolved limits, the generic deadline, dynamic loading, and aggregate cleanup**
+
+Add the two owned limits in `src/http/limits.ts`:
+
+```ts
+export interface HttpLimits {
+  readonly bodyBytes: number;
+  readonly maxConcurrentRequests: number;
+  readonly maxSubscriptions: number;
+  readonly maxLegacySseSessions: number;
+  readonly legacySessionIdleTimeoutMs: number;
+  readonly bodyReceiptTimeoutMs: number;
+  readonly executionTimeoutMs: number;
+  readonly streamLifetimeMs: number;
+  readonly headersTimeoutMs: number;
+  readonly keepAliveTimeoutMs: number;
+  readonly maxRequestsPerSocket: number;
+}
+
+export const DEFAULT_HTTP_LIMITS: HttpLimits = Object.freeze({
+  bodyBytes: 256 * 1024,
+  maxConcurrentRequests: 32,
+  maxSubscriptions: 16,
+  maxLegacySseSessions: 8,
+  legacySessionIdleTimeoutMs: 120_000,
+  bodyReceiptTimeoutMs: 10_000,
+  executionTimeoutMs: 30_000,
+  streamLifetimeMs: 5 * 60_000,
+  headersTimeoutMs: 5_000,
+  keepAliveTimeoutMs: 5_000,
+  maxRequestsPerSocket: 100
+});
+```
+
+Preserve Task 7's positive-safe-integer loop and maximum timer guard. Add only the new timer-valued
+field to the existing set; `maxLegacySseSessions` deliberately does not belong in it:
+
+```ts
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const TIMER_LIMIT_NAMES = new Set<keyof HttpLimits>([
+  'legacySessionIdleTimeoutMs',
+  'bodyReceiptTimeoutMs',
+  'executionTimeoutMs',
+  'streamLifetimeMs',
+  'headersTimeoutMs',
+  'keepAliveTimeoutMs'
+]);
+```
+
+`resolveHttpLimits()` must continue rejecting any timer above `MAX_TIMER_DELAY_MS`; do not rely on
+Node's overflowing-timer clamp.
+
+In `src/http/runtime.ts`, replace `withResponseDeadline` with these two composable middleware
+functions. Preserve Task 7's current content-type detection and clock abstraction exactly.
+
+```ts
+export function responseDeadline(
+  limits: Pick<HttpLimits, 'executionTimeoutMs' | 'streamLifetimeMs'>,
+  clock: DeadlineClock = SYSTEM_CLOCK
+): RequestHandler {
+  return (_request, response, next) => {
+    const projected = response as unknown as WritableResponseProjection;
+    const originalWriteHead = projected.writeHead;
+    let deadline = clock.set(() => {
+      projected.destroy();
+    }, limits.executionTimeoutMs);
+    let cleared = false;
+    let streaming = false;
+    const clear = () => {
+      if (cleared) return;
+      cleared = true;
+      clock.clear(deadline);
+    };
+    projected.once('finish', clear);
+    projected.once('close', clear);
+    projected.writeHead = (...arguments_: unknown[]) => {
+      const contentType = contentTypeFromWriteHead(arguments_);
+      if (
+        !streaming &&
+        contentType?.split(';', 1)[0]?.trim().toLowerCase() === 'text/event-stream'
+      ) {
+        streaming = true;
+        clock.clear(deadline);
+        deadline = clock.set(() => {
+          projected.destroy();
+        }, limits.streamLifetimeMs);
+      }
+      return Reflect.apply(originalWriteHead, response, arguments_);
+    };
+    next();
+  };
+}
+
+export function invokeNodeHandler(handler: NodeMcpRequestHandler): RequestHandler {
+  return (request, response, next) => {
+    const parsedBody = (request as unknown as { readonly body?: unknown }).body;
+    void handler(request, response, parsedBody).catch(next);
   };
 }
 ```
 
-The deprecated SDK imports are confined to this file. In particular, do not cast `SSEServerTransport` to a beta.4 `Transport` and do not call the beta.4 `buildServer` with it. Catalog exposure and `dispatchCapability` are the shared seams, so read-only, feature, allow-list, timeout, output-validation, and confirmation refusal policy remain authoritative.
-
-- [ ] **Step 4: Dynamically mount compatibility without replacing `/mcp`**
-
-In `src/http/runtime.ts`, replace the authentication and route-mounting block with:
+Define structural loader contracts in `runtime.ts`; do not statically import the v1 module. Preserve
+Task 7's `RequestListener` and `ServerOptions` type imports from `node:http` so Node timeout options
+remain constructor-time invariants:
 
 ```ts
-const authentication = http.authenticate;
-app.use(exactOriginValidation(http.allowedOrigins));
-app.use(enforceHttpLimits());
-const legacySse = http.legacySseEnabled
-  ? (await import('./legacy-sse.js')).mountLegacySseCompatibility(
-      app,
-      application,
-      authentication,
-      onerror
-    )
-  : { close: () => Promise.resolve() };
-app.use('/mcp', authentication);
-app.all('/mcp', (request, response) => {
-  void nodeHandler(request, response, request.body);
+interface LegacySseHandle {
+  close(): Promise<void>;
+}
+
+interface LegacySseModule {
+  readonly mountLegacySseCompatibility: (
+    router: Express,
+    options: {
+      readonly application: ApplicationContext;
+      readonly authenticate: RequestHandler;
+      readonly limits: Pick<
+        HttpLimits,
+        'maxLegacySseSessions' | 'legacySessionIdleTimeoutMs'
+      >;
+      readonly onerror: (error: Error) => void;
+    }
+  ) => LegacySseHandle;
+}
+
+export interface HttpRuntimeDependencies {
+  readonly createHandler: typeof createMcpHandler;
+  readonly adaptHandler: typeof toNodeHandler;
+  readonly createNodeServer: (options: ServerOptions, listener: RequestListener) => Server;
+  readonly listen: (server: Server, port: number, host: string) => Promise<AddressInfo>;
+  readonly loadLegacySse: () => Promise<LegacySseModule>;
+}
+
+function listenNodeServer(server: Server, port: number, host: string): Promise<AddressInfo> {
+  return new Promise<AddressInfo>((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        reject(new Error('HTTP server did not expose a TCP address'));
+        return;
+      }
+      resolve(address);
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port, host);
+  });
+}
+
+const DEFAULT_DEPENDENCIES: HttpRuntimeDependencies = Object.freeze({
+  createHandler: createMcpHandler,
+  adaptHandler: toNodeHandler,
+  createNodeServer: (options: ServerOptions, listener: RequestListener) =>
+    createServer(options, listener),
+  listen: listenNodeServer,
+  loadLegacySse: () => import('./legacy-sse.js')
 });
 ```
 
-Add `legacySse.close()` as another independently settled operation in Task 7's existing idempotent aggregate
-close path beside `handler.close()` and the listener-close promise. Never replace that path with sequential
-awaits: every owned resource is attempted exactly once and all failures are retained in one AggregateError.
-`runtime.url` remains `/mcp`, proving Streamable HTTP has not been replaced.
+Keep Task 7's injectable clock as the fourth argument, add the optional synchronous mount hook as a
+separate fifth argument, and use this exact order:
 
-- [ ] **Step 5: Add the explicit pre-release dependency-drift gate**
+```ts
+export function buildHttpExpressApplication(
+  security: ApplicationHttpSecurity,
+  limits: HttpLimits,
+  handler: NodeMcpRequestHandler,
+  clock: DeadlineClock = SYSTEM_CLOCK,
+  mountCompatibility?: (application: Express) => void
+): Express {
+  const application = express();
+  application.use(exactHostValidation(security.allowedHosts));
+  application.use(exactOriginValidation(security.allowedOrigins));
+  application.use(concurrentRequestLimit(limits.maxConcurrentRequests));
+  application.use(bodyReceiptDeadline(limits.bodyReceiptTimeoutMs));
+  application.use(bodyTypeAndDeclaredSize(limits.bodyBytes));
+  application.use(express.json({ limit: limits.bodyBytes }));
+  application.use(bodyErrorHandler);
+  application.use(stopAfterAnswered);
+  application.use(responseDeadline(limits, clock));
+  mountCompatibility?.(application);
+  application.all('/mcp', security.authenticate, invokeNodeHandler(handler));
+  application.use(terminalErrorHandler);
+  return application;
+}
+```
+
+Update `startHttpWithDependencies()` in its current Task 7 location, not a parallel runtime. Create the
+beta handler first, dynamically load only when enabled, and capture the legacy handle through the mount
+hook before Node server construction:
+
+```ts
+let handler: McpHttpHandler | undefined;
+let legacy: LegacySseHandle | undefined;
+let server: Server | undefined;
+try {
+  handler = dependencies.createHandler(createServerFactory(application, 'http'), {
+    legacy: 'stateless',
+    maxSubscriptions: limits.maxSubscriptions,
+    onerror: diagnose
+  });
+  const nodeHandler = dependencies.adaptHandler(handler, { onerror: diagnose });
+  let mountCompatibility: ((expressApplication: Express) => void) | undefined;
+  if (security.legacySseEnabled) {
+    const legacyModule = await dependencies.loadLegacySse();
+    mountCompatibility = (expressApplication) => {
+      legacy = legacyModule.mountLegacySseCompatibility(expressApplication, {
+        application,
+        authenticate: security.authenticate,
+        limits,
+        onerror: diagnose
+      });
+    };
+  }
+  const expressApplication = buildHttpExpressApplication(
+    security,
+    limits,
+    nodeHandler,
+    SYSTEM_CLOCK,
+    mountCompatibility
+  );
+  server = dependencies.createNodeServer(
+    {
+      connectionsCheckingInterval: Math.min(1_000, limits.headersTimeoutMs),
+      headersTimeout: limits.headersTimeoutMs,
+      keepAliveTimeout: limits.keepAliveTimeoutMs,
+      requestTimeout: Math.max(limits.bodyReceiptTimeoutMs, limits.headersTimeoutMs)
+    },
+    expressApplication
+  );
+  server.maxRequestsPerSocket = limits.maxRequestsPerSocket;
+  const address = await dependencies.listen(server, port, security.host);
+
+  const ownedLegacy = legacy;
+  const ownedHandler = handler;
+  const ownedServer = server;
+  const close = createAggregateClose([
+    ...(ownedLegacy === undefined ? [] : [() => ownedLegacy.close()]),
+    () => ownedHandler.close(),
+    () => closeNodeServer(ownedServer)
+  ]);
+  return Object.freeze({
+    url: `http://${security.host}:${String(address.port)}/mcp`,
+    limits,
+    close
+  });
+} catch (startupFailure) {
+  const operations: (() => Promise<void>)[] = [];
+  if (legacy !== undefined) {
+    const initializedLegacy = legacy;
+    operations.push(() => initializedLegacy.close());
+  }
+  if (handler !== undefined) {
+    const initializedHandler = handler;
+    operations.push(() => initializedHandler.close());
+  }
+  if (server !== undefined) {
+    const initializedServer = server;
+    operations.push(() => closeNodeServer(initializedServer));
+  }
+  const cleanupFailures = await settleOperations(operations);
+  if (cleanupFailures.length > 0) {
+    throw new AggregateError(
+      [...flattenFailure(startupFailure), ...cleanupFailures],
+      'HTTP startup and cleanup failed'
+    );
+  }
+  throw startupFailure;
+}
+```
+
+Real `mountLegacySseCompatibility()` performs all fallible metadata preparation before registering
+routes, so a mount failure has no unreturned session owner. A failure after the mount returns is owned
+by the captured legacy handle and is aggregated by the existing startup path.
+
+- [ ] **Step 7: Add the exact registry drift and audit release contract**
 
 Create `scripts/check-legacy-sse-dependency.mjs`:
 
 ```js
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
-import { promisify } from 'node:util';
 
-const execFileAsync = promisify(execFile);
-const document = JSON.parse(await readFile('package.json', 'utf8'));
-const pinned = document.dependencies?.['@modelcontextprotocol/sdk'];
-if (pinned !== '1.29.0') {
-  throw new Error('Deprecated SSE dependency is not at its reviewed exact pin.');
+const PACKAGE_NAME = '@modelcontextprotocol/sdk';
+const APPROVED_VERSION = '1.29.0';
+const APPROVED_INTEGRITY =
+  'sha512-zo37mZA9hJWpULgkRpowewez1y6ML5GsXJPY8FI0tBBCd77HEvza4jDqRKOXgHNn867PVGCyTdzqpz0izu5ZjQ==';
+const LOCK_PATH = 'node_modules/@modelcontextprotocol/sdk';
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
 }
 
-const { stdout } = await execFileAsync(
-  'npm',
-  ['view', '@modelcontextprotocol/sdk', 'dist-tags.latest', '--json'],
-  { encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 }
+const packageDocument = JSON.parse(await readFile('package.json', 'utf8'));
+const lockDocument = JSON.parse(await readFile('package-lock.json', 'utf8'));
+assert(
+  packageDocument.dependencies?.[PACKAGE_NAME] === APPROVED_VERSION,
+  'Legacy SSE dependency must be an exact production pin'
 );
-const latest = JSON.parse(stdout);
-if (latest !== pinned) {
-  throw new Error('Deprecated SSE dependency drifted; re-review or remove compatibility.');
-}
+assert(
+  lockDocument.packages?.['']?.dependencies?.[PACKAGE_NAME] === APPROVED_VERSION,
+  'Legacy SSE root lock pin must be exact'
+);
+const sdkNodes = Object.entries(lockDocument.packages).filter(([path]) =>
+  /(?:^|\/)node_modules\/@modelcontextprotocol\/sdk$/u.test(path)
+);
+assert(
+  sdkNodes.length === 1 && sdkNodes[0]?.[0] === LOCK_PATH,
+  'Legacy SSE lock must contain one root SDK node'
+);
+const locked = sdkNodes[0]?.[1];
+assert(locked?.version === APPROVED_VERSION, 'Legacy SSE lock version drifted');
+assert(locked?.integrity === APPROVED_INTEGRITY, 'Legacy SSE lock integrity drifted');
+assert(locked?.dev === undefined, 'Legacy SSE SDK must be production-reachable');
+
+const response = await fetch('https://registry.npmjs.org/@modelcontextprotocol%2Fsdk');
+assert(response.ok, `Registry request failed with HTTP ${String(response.status)}`);
+const metadata = await response.json();
+assert(
+  JSON.stringify(metadata['dist-tags']) === JSON.stringify({ latest: APPROVED_VERSION }),
+  'Legacy SSE registry dist-tags drifted'
+);
+const approved = metadata.versions?.[APPROVED_VERSION];
+assert(approved?.version === APPROVED_VERSION, 'Approved registry version is missing');
+assert(approved?.dist?.integrity === APPROVED_INTEGRITY, 'Approved registry integrity drifted');
+assert(approved?.engines?.node === '>=18', 'Approved registry Node engine drifted');
+assert(
+  !Object.hasOwn(metadata, 'deprecated') && !Object.hasOwn(approved, 'deprecated'),
+  'Approved registry package is deprecated'
+);
+process.stdout.write('Legacy SSE dependency contract is current\n');
 ```
 
-Add this exact script to `package.json`:
+Add the exact package script:
 
 ```json
 "release:check:legacy-sse": "node scripts/check-legacy-sse-dependency.mjs"
 ```
 
-Also add this assertion to the package contract test:
-
-```ts
-expect(document.scripts['release:check:legacy-sse']).toBe(
-  'node scripts/check-legacy-sse-dependency.mjs'
-);
-```
-
-- [ ] **Step 6: Run focused, static, regression, and current drift gates**
-
-Run:
+Run the focused static and networked gates immediately:
 
 ```bash
-npx vitest run tests/http/legacy-sse.test.ts tests/http/runtime.test.ts \
-  tests/foundation/package-contract.test.ts
+export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+npx vitest run   tests/http/legacy-sse.test.ts   tests/http/runtime.test.ts   tests/integration/process-lifecycle.test.ts   tests/architecture/execution-boundary.test.ts   tests/foundation/package-contract.test.ts
 npm run typecheck
-npm run lint
-npm test
 npm run release:check:legacy-sse
+npm audit --omit=dev
 ```
 
-Expected: default-off returns 404 without affecting `/mcp`; all legacy route guard checks return their specified statuses; the ninth open SSE session returns 503; the v1 test client lists and calls the same policy-backed `server_status`; the four beta.4 packages and isolated SDK 1.29.0 remain exact; all deterministic gates pass; and the registry still reports 1.29.0 as the sole `latest` tag.
+Expected: all tests and typecheck pass, the registry script prints its one success line, and the
+production audit reports zero vulnerabilities. Any registry tag, metadata, integrity, duplicate-node,
+or audit change blocks release and requires explicit review; do not update the pin automatically.
 
-Before any public release, rerun `npm run release:check:legacy-sse` and `npm audit --omit=dev`, inspect whether beta.4's stable replacement has gained an approved compatibility mechanism, and either remove this adapter or explicitly re-approve its exact pin. This networked release check does not become part of offline `npm run verify`.
-
-- [ ] **Step 7: Commit deprecated compatibility atomically**
+- [ ] **Step 8: Run all deterministic gates and commit the compatibility slice atomically**
 
 ```bash
-git add package.json package-lock.json scripts/check-legacy-sse-dependency.mjs \
-  src/http/legacy-sse.ts src/http/runtime.ts tests/http/legacy-sse.test.ts \
-  tests/foundation/package-contract.test.ts
+export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+npm run format:check
+npm run lint
+npm run typecheck
+npm run license:check
+npm test
+npm audit --omit=dev
+npm run release:check:legacy-sse
+git diff --check
+git status --short
+```
+
+Expected: every deterministic gate passes; the networked dependency gate still confirms the approved
+registry state; only the eleven Task 7b files named above are part of this slice. Do not run against a
+production firewall.
+
+```bash
+git add \
+  src/http/legacy-sse.ts \
+  src/http/limits.ts \
+  src/http/runtime.ts \
+  tests/http/legacy-sse.test.ts \
+  tests/http/runtime.test.ts \
+  tests/integration/process-lifecycle.test.ts \
+  tests/architecture/execution-boundary.test.ts \
+  tests/foundation/package-contract.test.ts \
+  scripts/check-legacy-sse-dependency.mjs \
+  package.json \
+  package-lock.json
 git commit -m "feat: add isolated legacy SSE compatibility"
 ```
 
