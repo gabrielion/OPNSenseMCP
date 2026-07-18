@@ -14,6 +14,22 @@ export interface TestConnection {
   close(): Promise<void>;
 }
 
+export type TestConnector = (
+  application: ApplicationContext,
+  options?: ClientOptions,
+  authInfo?: AuthInfo
+) => Promise<TestConnection>;
+
+export interface McpEraCase {
+  readonly label: string;
+  readonly connect: TestConnector;
+  /**
+   * The 2025 compatibility shim completes retries inside the SDK and does not expose signed
+   * requestState or permit a caller to substitute the retried tool. The 2026 protocol does.
+   */
+  readonly continuationSurface: 'sdk-managed' | 'caller-visible-request-state';
+}
+
 const CLIENT_INFO = Object.freeze({ name: 'opnsense-mcp-tests', version: '0.1.0' });
 
 export async function connectLegacy(
@@ -62,3 +78,16 @@ export async function connectModern(
     }
   };
 }
+
+export const MCP_ERAS: readonly McpEraCase[] = Object.freeze([
+  Object.freeze({
+    label: '2025 legacy shim',
+    connect: connectLegacy,
+    continuationSurface: 'sdk-managed' as const
+  }),
+  Object.freeze({
+    label: '2026 request state',
+    connect: connectModern,
+    continuationSurface: 'caller-visible-request-state' as const
+  })
+]);

@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import type { McpServer, RequestStateCodec } from '@modelcontextprotocol/server';
+import type {
+  McpServer,
+  RequestStateCodec,
+  ServerContext as McpServerContext
+} from '@modelcontextprotocol/server';
 import {
   listApplicationCapabilities,
   type ApplicationContext
@@ -13,6 +17,14 @@ import {
   type ConfirmationState
 } from './confirmation.js';
 import { formatCapabilityResult } from './results.js';
+
+function requestCarriesContinuation(context: McpServerContext): boolean {
+  return (
+    context.mcpReq.requestState() !== undefined ||
+    context.mcpReq.inputResponses !== undefined ||
+    (context.mcpReq.droppedInputResponseKeys?.length ?? 0) > 0
+  );
+}
 
 export function registerCapabilities(
   server: McpServer,
@@ -35,16 +47,8 @@ export function registerCapabilities(
           name: definition.mcpName,
           arguments: argumentsValue
         };
-        if (definitionUsesElicitation(definition)) {
-          return handleConfirmationCall(
-            server,
-            application,
-            definition,
-            request,
-            transport,
-            codec,
-            mcpContext
-          );
+        if (requestCarriesContinuation(mcpContext) || definitionUsesElicitation(definition)) {
+          return handleConfirmationCall(server, application, request, transport, codec, mcpContext);
         }
         const context: ServerContext = {
           application,

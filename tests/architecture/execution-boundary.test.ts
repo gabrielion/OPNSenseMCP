@@ -153,6 +153,23 @@ describe('closed capability execution boundary', () => {
     }
   });
 
+  it('keeps continuation routing local to capability registration', async () => {
+    const files = await sourceFiles('src');
+    const sources = await Promise.all(
+      files.map(async (path) => ({
+        path: relative('.', path),
+        source: await readFile(path, 'utf8')
+      }))
+    );
+    expect(
+      sources
+        .filter(({ source }) => source.includes('requestCarriesContinuation'))
+        .map(({ path }) => path)
+    ).toEqual(['src/mcp/register-capabilities.ts']);
+    const registration = await readFile('src/mcp/register-capabilities.ts', 'utf8');
+    expect(registration).not.toMatch(/export\s+function\s+requestCarriesContinuation/u);
+  });
+
   it('keeps CapabilityDefinition metadata-only and transport contracts authority-free', async () => {
     const types = await readFile('src/capabilities/types.ts', 'utf8');
     const definition = /export interface CapabilityDefinition \{(?<body>[\s\S]*?)\n\}/u.exec(types)

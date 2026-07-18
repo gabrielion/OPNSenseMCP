@@ -97,7 +97,6 @@ function finish(result: CapabilityResult): CallToolResult {
 export async function handleConfirmationCall(
   server: McpServer,
   application: ApplicationContext,
-  definition: CapabilityDefinition,
   request: CapabilityRequest,
   transport: ServerContext['transport'],
   codec: RequestStateCodec<ConfirmationState>,

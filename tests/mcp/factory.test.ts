@@ -6,7 +6,7 @@ import type { RuntimeConfig } from '../../src/config/runtime-config.js';
 import { SERVER_INSTRUCTIONS } from '../../src/mcp/instructions.js';
 import { PROMPT_NAMES } from '../../src/mcp/prompts.js';
 import { createMutationFixture, createReadFixture } from '../fixtures/capabilities.js';
-import { connectLegacy, connectModern } from '../helpers/connect.js';
+import { MCP_ERAS } from '../helpers/connect.js';
 
 function config(readOnly = true): RuntimeConfig {
   return {
@@ -25,12 +25,7 @@ function config(readOnly = true): RuntimeConfig {
   };
 }
 
-const connectors = [
-  ['legacy', connectLegacy],
-  ['modern', connectModern]
-] as const;
-
-describe.each(connectors)('%s MCP server factory', (_era, connect) => {
+describe.each(MCP_ERAS)('$label MCP server factory', ({ connect }) => {
   it('initializes with exact identity and instructions', async () => {
     const connection = await connect(createApplicationContext(config()));
     try {
@@ -98,7 +93,7 @@ describe.each(connectors)('%s MCP server factory', (_era, connect) => {
 
 it('does not create process-global listeners while connecting or closing', async () => {
   const before = process.eventNames().map(String).sort();
-  for (const [, connect] of connectors) {
+  for (const { connect } of MCP_ERAS) {
     const connection = await connect(createApplicationContext(config()));
     await connection.close();
   }

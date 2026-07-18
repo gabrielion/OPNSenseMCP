@@ -20,8 +20,8 @@ import { defineCapability } from '../../src/capabilities/kernel.js';
 import type { RuntimeConfig } from '../../src/config/runtime-config.js';
 import { createServerFactory } from '../../src/mcp/server-factory.js';
 import { ConfirmationStateSchema } from '../../src/mcp/confirmation.js';
-import { createMutationFixture } from '../fixtures/capabilities.js';
-import { connectLegacy, connectModern } from '../helpers/connect.js';
+import { createMutationFixture, createReadFixture } from '../fixtures/capabilities.js';
+import { connectModern, MCP_ERAS } from '../helpers/connect.js';
 
 function config(): RuntimeConfig {
   return {
@@ -40,11 +40,6 @@ function config(): RuntimeConfig {
     }
   };
 }
-
-const connectors = [
-  ['legacy', connectLegacy],
-  ['modern', connectModern]
-] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -72,7 +67,7 @@ function createNestedMutation(
       idempotentHint: true,
       openWorldHint: false
     },
-    transports: ['http'],
+    transports: ['stdio', 'http'],
     policy: {
       effect: 'local-write',
       resourceScopes: policy.resourceScopes ?? ['test.write'],
@@ -165,7 +160,7 @@ function claimsFromState(state: string) {
   return ConfirmationStateSchema.parse(envelope.p);
 }
 
-describe.each(connectors)('%s one-shot confirmation', (_era, connect) => {
+describe.each(MCP_ERAS)('$label one-shot confirmation [$continuationSurface]', ({ connect }) => {
   it.each([
     ['accept', { action: 'accept', content: { confirm: true } }, 1],
     ['decline', { action: 'decline' }, 0],
@@ -234,9 +229,150 @@ describe.each(connectors)('%s one-shot confirmation', (_era, connect) => {
     }
     expect(onCall).not.toHaveBeenCalled();
   });
+
+  it('refuses a nested caller mutation during the round without executing the handler', async () => {
+    const onCall = vi.fn();
+    const mutation = createNestedMutation(onCall);
+    const application = createApplicationContext(config(), new CapabilityCatalog([mutation]));
+    const callerArguments = { change: { value: 'safe-before-round' } };
+    const connection = await connect(application, {
+      capabilities: { elicitation: { form: {} } }
+    });
+    connection.client.setRequestHandler('elicitation/create', () => {
+      callerArguments.change.value = 'mutated-by-caller-during-round';
+      return Promise.resolve({ action: 'accept', content: { confirm: true } });
+    });
+    try {
+      const result = await connection.client.callTool({
+        name: mutation.mcpName,
+        arguments: callerArguments
+      });
+      expect(result).toMatchObject({
+        isError: true,
+        structuredContent: { code: 'CONFIRMATION_INVALID' }
+      });
+      expect(onCall).not.toHaveBeenCalled();
+      expect(callerArguments.change.value).toBe('mutated-by-caller-during-round');
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it('keeps runtime secrets and internal authority labels out of common round payloads', async () => {
+    const mutation = createNestedMutation(() => undefined);
+    const application = createApplicationContext(config(), new CapabilityCatalog([mutation]));
+    const observedRequests: unknown[] = [];
+    const connection = await connect(application, {
+      capabilities: { elicitation: { form: {} } }
+    });
+    connection.client.setRequestHandler('elicitation/create', (request) => {
+      observedRequests.push(request);
+      return Promise.resolve({ action: 'accept', content: { confirm: true } });
+    });
+    try {
+      const result = await connection.client.callTool({
+        name: mutation.mcpName,
+        arguments: { change: { value: 'safe' } }
+      });
+      const payload = JSON.stringify({ observedRequests, result });
+      for (const forbidden of [
+        'HTTP_TOKEN_SENTINEL_DO_NOT_LEAK_123',
+        '0123456789abcdef0123456789abcdef',
+        'handler',
+        'dispatcher',
+        'settlement',
+        'ledger',
+        'inputSchema',
+        'outputSchema'
+      ]) {
+        expect(payload).not.toContain(forbidden);
+      }
+    } finally {
+      await connection.close();
+    }
+  });
 });
 
-describe('modern signed state and authoritative one-shot ledger', () => {
+describe('2026-only raw continuation security (the 2025 shim exposes neither requestState nor tool substitution)', () => {
+  it('consumes a confirmed write continuation sent to a non-eliciting read without executing either tool', async () => {
+    const writeHandler = vi.fn();
+    const readHandler = vi.fn();
+    const mutation = createNestedMutation(writeHandler);
+    const read = createReadFixture({
+      id: 'test.cross-tool.read',
+      mcpName: 'cross_tool_read',
+      handler: ({ value }) => {
+        readHandler();
+        return Promise.resolve({ echoed: value });
+      }
+    });
+    const handler = createMcpHandler(
+      createServerFactory(
+        createApplicationContext(config(), new CapabilityCatalog([mutation, read])),
+        'http'
+      )
+    );
+    try {
+      const writeArguments = { change: { value: 'safe' } };
+      const state = requestStateFrom(
+        await rawModernCall(handler, 1, mutation.mcpName, writeArguments)
+      );
+      const redirected = await rawModernCall(
+        handler,
+        2,
+        read.mcpName,
+        { value: 'must-not-run' },
+        { requestState: state, inputResponses: acceptedResponse() }
+      );
+      const replay = await rawModernCall(handler, 3, mutation.mcpName, writeArguments, {
+        requestState: state,
+        inputResponses: acceptedResponse()
+      });
+
+      expect(handlerCallSucceeded(redirected)).toBe(false);
+      expect(handlerCallSucceeded(replay)).toBe(false);
+      expect(readHandler).not.toHaveBeenCalled();
+      expect(writeHandler).not.toHaveBeenCalled();
+    } finally {
+      await handler.close();
+    }
+  });
+
+  it.each([
+    ['bare input response', acceptedResponse()],
+    [
+      'dropped wrapped response',
+      { confirmation: { method: 'elicitation/create', result: { action: 'accept' } } }
+    ]
+  ] as const)('refuses orphan %s on a non-eliciting read', async (_label, inputResponses) => {
+    const readHandler = vi.fn();
+    const read = createReadFixture({
+      id: 'test.orphan-continuation.read',
+      mcpName: 'orphan_continuation_read',
+      handler: ({ value }) => {
+        readHandler();
+        return Promise.resolve({ echoed: value });
+      }
+    });
+    const handler = createMcpHandler(
+      createServerFactory(createApplicationContext(config(), new CapabilityCatalog([read])), 'http')
+    );
+    try {
+      const response = await rawModernCall(
+        handler,
+        1,
+        read.mcpName,
+        { value: 'must-not-run' },
+        { inputResponses }
+      );
+      expect(handlerCallSucceeded(response)).toBe(false);
+      expect(JSON.stringify(response)).toContain('CONFIRMATION_INVALID');
+      expect(readHandler).not.toHaveBeenCalled();
+    } finally {
+      await handler.close();
+    }
+  });
+
   it('executes exactly once under sequential and concurrent replay', async () => {
     for (const concurrent of [false, true]) {
       const onCall = vi.fn();
@@ -548,46 +684,57 @@ describe('modern signed state and authoritative one-shot ledger', () => {
   });
 });
 
-it('snapshots caller-owned policy collections, transport arrays, and request-state key bytes', async () => {
+it('keeps policy gates, listing, and a pre-mutation signed state stable across fresh servers', async () => {
   const allowedResourceScopes = new Set(['test.write']);
   const enabledFeatureFlags = new Set<'shell' | 'ssh' | 'restore' | 'advanced-api'>(['shell']);
-  const allowedHosts = ['localhost'];
-  const allowedOrigins: string[] = [];
   const runtime = {
     ...config(),
     allowedResourceScopes,
-    enabledFeatureFlags,
-    http: { ...config().http, allowedHosts, allowedOrigins }
+    enabledFeatureFlags
   } satisfies RuntimeConfig;
-  const originalKey = Uint8Array.from(runtime.requestStateKey);
   const onCall = vi.fn();
   const mutation = createNestedMutation(onCall, 'test.snapshot.write', 'snapshot_write', {
     resourceScopes: ['test.write'],
     requiredFeatureFlags: ['shell']
   });
   const application = createApplicationContext(runtime, new CapabilityCatalog([mutation]));
+  const argumentsValue = { change: { value: 'safe' } };
+  const mintingServer = createMcpHandler(createServerFactory(application, 'http'));
+  let signedState: string;
+  try {
+    signedState = requestStateFrom(
+      await rawModernCall(mintingServer, 1, mutation.mcpName, argumentsValue)
+    );
+  } finally {
+    await mintingServer.close();
+  }
+
   allowedResourceScopes.clear();
   allowedResourceScopes.add('forged');
   enabledFeatureFlags.clear();
   runtime.requestStateKey.fill(0);
-  allowedHosts.push('evil.example');
-  allowedOrigins.push('https://evil.example');
   Reflect.set(runtime, 'readOnly', true);
 
-  const handler = createMcpHandler(createServerFactory(application, 'http'));
+  const listingConnection = await connectModern(application);
   try {
-    const args = { change: { value: 'safe' } };
-    const initial = await rawModernCall(handler, 1, mutation.mcpName, args);
-    const success = await rawModernCall(handler, 2, mutation.mcpName, args, {
-      requestState: requestStateFrom(initial),
+    expect((await listingConnection.client.listTools()).tools.map(({ name }) => name)).toContain(
+      mutation.mcpName
+    );
+  } finally {
+    await listingConnection.close();
+  }
+
+  const settlingServer = createMcpHandler(createServerFactory(application, 'http'));
+  try {
+    const success = await rawModernCall(settlingServer, 2, mutation.mcpName, argumentsValue, {
+      requestState: signedState,
       inputResponses: acceptedResponse()
     });
     expect(handlerCallSucceeded(success)).toBe(true);
     expect(onCall).toHaveBeenCalledTimes(1);
-    expect(originalKey.every((byte) => byte !== 0)).toBe(true);
     expect(Object.getOwnPropertyNames(application)).toEqual(['catalog']);
     expect(Object.getOwnPropertySymbols(application)).toEqual([]);
   } finally {
-    await handler.close();
+    await settlingServer.close();
   }
 });

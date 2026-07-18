@@ -33,7 +33,7 @@ function context(application: ReturnType<typeof createApplicationContext>): Serv
 describe('opaque application dispatch', () => {
   it('routes valid and forged cached names through the closed kernel', async () => {
     const handler = vi.fn(({ value }: { value: string }) => Promise.resolve({ echoed: value }));
-    const fixture = createReadFixture();
+    const fixture = createReadFixture({ handler });
     const application = createApplicationContext(config(), new CapabilityCatalog([fixture]));
 
     await expect(
@@ -42,13 +42,14 @@ describe('opaque application dispatch', () => {
         context(application)
       )
     ).resolves.toEqual({ kind: 'success', output: { echoed: 'safe' } });
+    expect(handler).toHaveBeenCalledTimes(1);
     await expect(
       dispatchCapability(
         { name: 'stale_cached_name', arguments: { value: 'unsafe' } },
         context(application)
       )
     ).resolves.toMatchObject({ kind: 'refused', code: 'UNKNOWN_CAPABILITY' });
-    expect(handler).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 
   it('reveals exactly catalog and rejects spread, clone, and constructed lookalikes', () => {

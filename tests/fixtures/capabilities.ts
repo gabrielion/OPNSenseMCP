@@ -9,6 +9,7 @@ interface ReadFixtureOptions {
   readonly transports?: readonly ('stdio' | 'http')[];
   readonly resourceScopes?: readonly string[];
   readonly requiredFeatureFlags?: readonly FeatureFlag[];
+  readonly handler?: (input: { readonly value: string }) => Promise<{ readonly echoed: string }>;
 }
 
 export function createReadFixture(options: ReadFixtureOptions = {}) {
@@ -36,7 +37,7 @@ export function createReadFixture(options: ReadFixtureOptions = {}) {
       timeoutMs: 1000,
       redactFields: []
     },
-    handler: ({ value }) => Promise.resolve({ echoed: value })
+    handler: options.handler ?? (({ value }) => Promise.resolve({ echoed: value }))
   });
 }
 
