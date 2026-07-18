@@ -13,7 +13,7 @@ import {
   startHttpWithDependencies,
   type HttpRuntimeDependencies
 } from '../../src/http/runtime.js';
-import { installStdioSignalHandlers } from '../../src/main.js';
+import { installStdioSignalHandlers, isDirectInvocation } from '../../src/main.js';
 import { installHttpSignalHandlers, startOwnedHttpEntrypoint } from '../../src/entrypoints/http.js';
 
 function config(legacySseEnabled = false): RuntimeConfig {
@@ -54,6 +54,17 @@ function controlledStdin(initiallyEnded = false) {
 }
 
 describe('owned lifecycle aggregation', () => {
+  it('fails closed without diagnostics when direct-entry realpath resolution fails', async () => {
+    const sentinel = '/DIRECT_ENTRY_PATH_MUST_NOT_LEAK';
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const canonicalize = vi.fn(() => Promise.reject(new Error(sentinel)));
+
+    await expect(
+      isDirectInvocation('file:///installed/dist/main.js', sentinel, canonicalize)
+    ).resolves.toBe(false);
+    expect(write).not.toHaveBeenCalled();
+  });
+
   it('closes the owned stdio handle exactly once on stdin EOF', async () => {
     const stdin = controlledStdin();
     const close = vi.fn(() => Promise.resolve());

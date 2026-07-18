@@ -1,4 +1,6 @@
+#!/usr/bin/env node
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { startStdio, type StdioRuntime } from './entrypoints/stdio.js';
@@ -48,8 +50,26 @@ export async function runStdioEntrypoint(): Promise<StdioRuntime> {
   return handle;
 }
 
-const invokedPath = process.argv[1];
-if (invokedPath !== undefined && fileURLToPath(import.meta.url) === resolve(invokedPath)) {
+type RealPathResolver = (path: string) => Promise<string>;
+
+export async function isDirectInvocation(
+  moduleUrl: string,
+  invokedPath: string | undefined,
+  canonicalize: RealPathResolver = realpath
+): Promise<boolean> {
+  if (invokedPath === undefined) return false;
+  try {
+    const [modulePath, executablePath] = await Promise.all([
+      canonicalize(fileURLToPath(moduleUrl)),
+      canonicalize(resolve(invokedPath))
+    ]);
+    return modulePath === executablePath;
+  } catch {
+    return false;
+  }
+}
+
+if (await isDirectInvocation(import.meta.url, process.argv[1])) {
   void runStdioEntrypoint().catch((error: unknown) => {
     const diagnostic = error instanceof Error ? error.name : 'Error';
     process.stderr.write(`${diagnostic}\n`);
