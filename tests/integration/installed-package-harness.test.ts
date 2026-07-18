@@ -89,7 +89,7 @@ describe('installed-package harness portability', () => {
       packageName: '@gabrielion/opnsense-mcp',
       nodeExecutable: '/runtime/node',
       npmCli: '/runtime/npm-cli.js',
-      commandShell: undefined
+      windowsSystemRoot: undefined
     });
 
     expect(harness).toEqual({
@@ -112,7 +112,7 @@ describe('installed-package harness portability', () => {
       packageName: '@gabrielion/opnsense-mcp',
       nodeExecutable: 'C:\\node\\node.exe',
       npmCli: 'C:\\node\\npm-cli.js',
-      commandShell: 'C:\\Windows\\System32\\cmd.exe'
+      windowsSystemRoot: 'C:\\Windows'
     });
 
     expect(harness.dependencyLinkType).toBe('junction');
@@ -135,9 +135,9 @@ describe('installed-package harness portability', () => {
       kind: 'posix-group',
       group: -4321
     });
-    expect(ownedTreeTerminationPlan('win32', 4321, 1234)).toEqual({
+    expect(ownedTreeTerminationPlan('win32', 4321, 1234, 'C:\\Windows')).toEqual({
       kind: 'windows-taskkill',
-      command: 'taskkill.exe',
+      command: 'C:\\Windows\\System32\\taskkill.exe',
       arguments: ['/pid', '4321', '/t', '/f'],
       shell: false
     });
@@ -146,15 +146,46 @@ describe('installed-package harness portability', () => {
         'Invalid owned process identifier'
       );
     }
+    for (const unsafeRoot of [undefined, '', 'Windows', 'C:\\Windows\\..\\Temp']) {
+      expect(() => ownedTreeTerminationPlan('win32', 4321, 1234, unsafeRoot)).toThrow(
+        'Invalid Windows system root'
+      );
+    }
+    expect(() =>
+      packageHarnessPlatform({
+        platform: 'win32',
+        consumer: 'C:\\Temp\\consumer',
+        packageName: '@gabrielion/opnsense-mcp',
+        nodeExecutable: 'C:\\node\\node.exe',
+        npmCli: 'C:\\node\\npm-cli.js',
+        windowsSystemRoot: undefined
+      })
+    ).toThrow('Invalid Windows system root');
+  });
+
+  it('rejects an untrusted Windows system root before starting a supervisor', async () => {
+    await expect(
+      runBoundedCommand(
+        { command: process.execPath, arguments: ['-e', 'process.exit(0)'] },
+        {
+          cwd: process.cwd(),
+          environment: process.env,
+          input: '',
+          timeoutMs: 1_000,
+          cleanupTimeoutMs: 1_000
+        },
+        { platform: 'win32', windowsSystemRoot: 'relative-root' }
+      )
+    ).rejects.toThrow('Command platform configuration failed');
   });
 
   it('does not start a Windows tree killer after its cleanup deadline has expired', async () => {
     const controller = new AbortController();
     controller.abort();
 
-    await expect(terminateOwnedProcessTree('win32', 4321, controller.signal)).rejects.toThrow(
-      'Process tree termination aborted'
-    );
+    await expect(
+      terminateOwnedProcessTree('win32', 4321, controller.signal, 'C:\\Windows')
+    ).rejects.toThrow('Process tree termination aborted');
   });
 
   it('kills a real parent and descendant before rejecting the command timeout', async () => {
@@ -182,6 +213,7 @@ describe('installed-package harness portability', () => {
         {
           terminateOwnedTree: async (pid, signal) => {
             parentPid = validateFixturePid(pid);
+            expect(processIsAlive(parentPid)).toBe(true);
             descendantPid = await waitForFixturePid(pidFile, signal);
             await terminateOwnedProcessTree(process.platform, parentPid, signal);
           }
@@ -247,5 +279,71 @@ describe('installed-package harness portability', () => {
       )
     ).rejects.toThrow('Command timed out');
     expect(closed).toBe(true);
+  });
+
+  it('never targets a released supervisor whose output is still held by a descendant', async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-released-supervisor-'));
+    const pidFile = join(temporaryRoot, 'descendant.pid');
+    let terminationCalls = 0;
+    const fixture = [
+      "const { spawn } = require('node:child_process');",
+      "const { writeFileSync } = require('node:fs');",
+      "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 600)'], { stdio: ['ignore', 'inherit', 'inherit'] });",
+      'writeFileSync(process.argv[1], String(child.pid));',
+      'child.unref();'
+    ].join('');
+    try {
+      await expect(
+        runBoundedCommand(
+          { command: process.execPath, arguments: ['-e', fixture, pidFile] },
+          {
+            cwd: process.cwd(),
+            environment: process.env,
+            input: '',
+            timeoutMs: 200,
+            cleanupTimeoutMs: 50
+          },
+          {
+            terminateOwnedTree: () => {
+              terminationCalls += 1;
+              return Promise.resolve();
+            }
+          }
+        )
+      ).rejects.toThrow('Command cleanup timed out');
+      expect(terminationCalls).toBe(0);
+      const controller = new AbortController();
+      const deadline = setTimeout(() => {
+        controller.abort();
+      }, 1_000);
+      deadline.unref();
+      const descendantPid = await waitForFixturePid(pidFile, controller.signal);
+      while (processIsAlive(descendantPid) && !controller.signal.aborted) {
+        await new Promise<void>((resolveWait) => {
+          const timer = setTimeout(resolveWait, 10);
+          timer.unref();
+        });
+      }
+      clearTimeout(deadline);
+      expect(processIsAlive(descendantPid)).toBe(false);
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('bounds captured command output before returning a fixed failure', async () => {
+    await expect(
+      runBoundedCommand(
+        { command: process.execPath, arguments: ['-e', "process.stdout.write('x'.repeat(33))"] },
+        {
+          cwd: process.cwd(),
+          environment: process.env,
+          input: '',
+          timeoutMs: 1_000,
+          cleanupTimeoutMs: 1_000
+        },
+        { outputLimitBytes: 32 }
+      )
+    ).rejects.toThrow('Command output limit exceeded');
   });
 });

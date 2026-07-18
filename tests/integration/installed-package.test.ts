@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  COMMAND_SUPERVISOR_STARTUP_TIMEOUT_MS,
   localArchiveInstallArguments,
   packageHarnessPlatform,
   runBoundedCommand,
@@ -26,8 +27,9 @@ const INSTALL_TIMEOUT_MS = 30_000;
 const MCP_COMMAND_TIMEOUT_MS = 3_000;
 const COMMAND_CLEANUP_TIMEOUT_MS = 2_000;
 const PACKAGE_TEST_TIMEOUT_MS = 90_000;
-// 30+2 seconds for pack, 30+2 for install, and 2*(3+2) for MCP commands = 74s < 90s.
+// Four 2s supervisor startups + pack/install cleanup + two MCP cleanup budgets = 82s < 90s.
 const WORST_CASE_PACKAGE_TEST_MS =
+  4 * COMMAND_SUPERVISOR_STARTUP_TIMEOUT_MS +
   PACK_TIMEOUT_MS +
   COMMAND_CLEANUP_TIMEOUT_MS +
   INSTALL_TIMEOUT_MS +
@@ -72,7 +74,7 @@ async function withInstalledPackage(
       packageName: manifest.name,
       nodeExecutable: process.execPath,
       npmCli,
-      commandShell: process.env.ComSpec
+      windowsSystemRoot: process.env.SystemRoot
     });
     await symlink(
       join(repository, 'node_modules'),

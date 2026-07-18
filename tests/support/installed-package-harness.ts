@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { spawn } from 'node:child_process';
+import { fork, spawn } from 'node:child_process';
 import { posix, win32 } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export interface CommandInvocation {
   readonly command: string;
@@ -20,7 +21,7 @@ interface PackageHarnessPlatformInput {
   readonly packageName: string;
   readonly nodeExecutable: string;
   readonly npmCli: string;
-  readonly commandShell: string | undefined;
+  readonly windowsSystemRoot: string | undefined;
 }
 
 interface PackageHarnessPlatform {
@@ -43,13 +44,15 @@ interface BoundedCommandOptions {
 interface BoundedCommandDependencies {
   readonly platform?: NodeJS.Platform;
   readonly terminateOwnedTree?: (pid: number, signal: AbortSignal) => Promise<void>;
+  readonly outputLimitBytes?: number;
+  readonly windowsSystemRoot?: string;
 }
 
 export type OwnedTreeTerminationPlan =
   | { readonly kind: 'posix-group'; readonly group: number }
   | {
       readonly kind: 'windows-taskkill';
-      readonly command: 'taskkill.exe';
+      readonly command: string;
       readonly arguments: readonly ['/pid', string, '/t', '/f'];
       readonly shell: false;
     };
@@ -67,10 +70,22 @@ function validatedOwnedPid(pid: number | undefined, currentPid: number): number 
   return pid;
 }
 
+function windowsSystemExecutable(systemRoot: string | undefined, executable: string): string {
+  if (
+    typeof systemRoot !== 'string' ||
+    !/^[A-Za-z]:\\[^\0/]+(?:\\[^\0/]+)*$/u.test(systemRoot) ||
+    win32.normalize(systemRoot) !== systemRoot
+  ) {
+    throw new Error('Invalid Windows system root');
+  }
+  return win32.join(systemRoot, 'System32', executable);
+}
+
 export function ownedTreeTerminationPlan(
   platform: NodeJS.Platform,
   pid: number | undefined,
-  currentPid = process.pid
+  currentPid = process.pid,
+  windowsSystemRoot = process.env.SystemRoot
 ): OwnedTreeTerminationPlan {
   const ownedPid = validatedOwnedPid(pid, currentPid);
   if (platform === 'win32') {
@@ -82,7 +97,7 @@ export function ownedTreeTerminationPlan(
     ];
     return Object.freeze({
       kind: 'windows-taskkill',
-      command: 'taskkill.exe',
+      command: windowsSystemExecutable(windowsSystemRoot, 'taskkill.exe'),
       arguments: Object.freeze(arguments_),
       shell: false
     });
@@ -110,7 +125,6 @@ function terminateWindowsTree(
       if (settled) return;
       settled = true;
       signal.removeEventListener('abort', onAbort);
-      killer.removeAllListeners();
       callback();
     };
     const onAbort = () => {
@@ -145,14 +159,14 @@ function terminateWindowsTree(
 
 const PROCESS_LIST_OUTPUT_LIMIT = 4 * 1024 * 1024;
 
-function posixGroupHasLiveMembers(group: number, signal: AbortSignal): Promise<boolean> {
+function posixGroupHasMembers(group: number, signal: AbortSignal): Promise<boolean> {
   return new Promise((resolveInspection, rejectInspection) => {
     if (signal.aborted) {
       rejectInspection(new Error('Process tree wait aborted'));
       return;
     }
     const groupId = Math.abs(group);
-    const inspector = spawn('/bin/ps', ['-axo', 'pgid=,stat='], {
+    const inspector = spawn('/bin/ps', ['-axo', 'pgid='], {
       shell: false,
       stdio: ['ignore', 'pipe', 'ignore']
     });
@@ -176,6 +190,8 @@ function posixGroupHasLiveMembers(group: number, signal: AbortSignal): Promise<b
     };
     const onAbort = () => {
       stopInspector();
+      inspector.stdout.destroy();
+      inspector.unref();
       finish(() => {
         rejectInspection(new Error('Process tree wait aborted'));
       });
@@ -185,6 +201,8 @@ function posixGroupHasLiveMembers(group: number, signal: AbortSignal): Promise<b
       if (outputBytes > PROCESS_LIST_OUTPUT_LIMIT) {
         outputExceeded = true;
         stopInspector();
+        inspector.stdout.destroy();
+        inspector.unref();
         return;
       }
       output += chunk.toString('utf8');
@@ -201,23 +219,9 @@ function posixGroupHasLiveMembers(group: number, signal: AbortSignal): Promise<b
         });
         return;
       }
-      let hasLiveMember = false;
-      for (const line of output.split(/\r?\n/u)) {
-        const fields = line.trim().split(/\s+/u);
-        if (fields[0] !== String(groupId)) continue;
-        if (fields.length < 2 || fields[1] === undefined) {
-          finish(() => {
-            rejectInspection(new Error('Process tree status failed'));
-          });
-          return;
-        }
-        if (!fields[1].startsWith('Z')) {
-          hasLiveMember = true;
-          break;
-        }
-      }
+      const hasMember = output.split(/\r?\n/u).some((line) => line.trim() === String(groupId));
       finish(() => {
-        resolveInspection(hasLiveMember);
+        resolveInspection(hasMember);
       });
     });
     signal.addEventListener('abort', onAbort, { once: true });
@@ -242,7 +246,7 @@ function waitForPosixGroupExit(group: number, signal: AbortSignal): Promise<void
     };
     const inspect = async () => {
       try {
-        if (!(await posixGroupHasLiveMembers(group, signal))) {
+        if (!(await posixGroupHasMembers(group, signal))) {
           finish(resolveExit);
           return;
         }
@@ -270,9 +274,10 @@ function waitForPosixGroupExit(group: number, signal: AbortSignal): Promise<void
 export async function terminateOwnedProcessTree(
   platform: NodeJS.Platform,
   pid: number | undefined,
-  signal: AbortSignal
+  signal: AbortSignal,
+  windowsSystemRoot = process.env.SystemRoot
 ): Promise<void> {
-  const plan = ownedTreeTerminationPlan(platform, pid);
+  const plan = ownedTreeTerminationPlan(platform, pid, process.pid, windowsSystemRoot);
   if (plan.kind === 'windows-taskkill') {
     await terminateWindowsTree(plan, signal);
     return;
@@ -312,7 +317,6 @@ export function packageHarnessPlatform(input: PackageHarnessPlatformInput): Pack
     input.packageName,
     'dist/main.js'
   );
-  const commandShell = input.commandShell ?? 'cmd.exe';
   return Object.freeze({
     dependencyLinkType: input.platform === 'win32' ? 'junction' : 'dir',
     npm: Object.freeze({ command: input.nodeExecutable, arguments: Object.freeze([input.npmCli]) }),
@@ -321,7 +325,7 @@ export function packageHarnessPlatform(input: PackageHarnessPlatformInput): Pack
     installedCommand: Object.freeze(
       input.platform === 'win32'
         ? {
-            command: commandShell,
+            command: windowsSystemExecutable(input.windowsSystemRoot, 'cmd.exe'),
             arguments: Object.freeze(['/d', '/s', '/c', `"${installedShim}"`])
           }
         : { command: installedShim, arguments: Object.freeze([]) }
@@ -329,6 +333,85 @@ export function packageHarnessPlatform(input: PackageHarnessPlatformInput): Pack
   });
 }
 
+export const COMMAND_SUPERVISOR_STARTUP_TIMEOUT_MS = 2_000;
+const DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024;
+const COMMAND_SUPERVISOR_PATH = fileURLToPath(
+  new URL('./bounded-command-supervisor.mjs', import.meta.url)
+);
+
+interface OutputCapture {
+  readonly chunks: Buffer[];
+  bytes: number;
+  exceeded: boolean;
+}
+
+interface TargetCloseMessage {
+  readonly type: 'target-close';
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly spawnFailed: boolean;
+}
+
+type SupervisorMessage =
+  | { readonly type: 'ready' }
+  | { readonly type: 'started' }
+  | TargetCloseMessage;
+
+function hasExactObjectKeys(value: object, expected: readonly string[]): boolean {
+  const keys = Object.keys(value).sort();
+  return keys.length === expected.length && keys.every((key, index) => key === expected[index]);
+}
+
+function isSupervisorMessage(value: unknown): value is SupervisorMessage {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const type = (value as { readonly type?: unknown }).type;
+  if (type === 'ready' || type === 'started') return hasExactObjectKeys(value, ['type']);
+  if (type !== 'target-close') return false;
+  const message = value as {
+    readonly code?: unknown;
+    readonly signal?: unknown;
+    readonly spawnFailed?: unknown;
+  };
+  return (
+    hasExactObjectKeys(value, ['code', 'signal', 'spawnFailed', 'type']) &&
+    (message.code === null ||
+      (typeof message.code === 'number' &&
+        Number.isSafeInteger(message.code) &&
+        message.code >= 0)) &&
+    (message.signal === null ||
+      (typeof message.signal === 'string' && /^SIG[A-Z0-9]+$/u.test(message.signal))) &&
+    typeof message.spawnFailed === 'boolean'
+  );
+}
+
+function validatedOutputLimit(value: number | undefined): number {
+  const limit = value ?? DEFAULT_COMMAND_OUTPUT_LIMIT_BYTES;
+  if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error('Invalid command output limit');
+  return limit;
+}
+
+function captureOutput(capture: OutputCapture, chunk: Buffer, limit: number): void {
+  const remaining = Math.max(0, limit - capture.bytes);
+  if (chunk.length > remaining) capture.exceeded = true;
+  if (remaining === 0) return;
+  const accepted = chunk.subarray(0, remaining);
+  capture.chunks.push(accepted);
+  capture.bytes += accepted.length;
+}
+
+function serializableEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(environment).filter((entry): entry is [string, string] => {
+      return typeof entry[1] === 'string';
+    })
+  );
+}
+
+/**
+ * Runs project-owned test commands under a durable supervisor. Commands and their descendants must stay
+ * in the inherited process family: setsid, double-fork, daemonization, and Windows breakaway are outside
+ * this portable cleanup contract and therefore may only produce an unconfirmed-cleanup failure.
+ */
 export function runBoundedCommand(
   invocation: CommandInvocation,
   options: BoundedCommandOptions,
@@ -336,66 +419,118 @@ export function runBoundedCommand(
 ): Promise<CommandResult> {
   return new Promise((resolveCommand, rejectCommand) => {
     const platform = dependencies.platform ?? process.platform;
-    const child = spawn(invocation.command, [...invocation.arguments], {
-      cwd: options.cwd,
-      detached: platform !== 'win32',
-      env: options.environment,
-      shell: false,
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-    let stdout = '';
-    let stderr = '';
-    let timedOut = false;
-    let spawnFailed = false;
-    let childClosed = false;
+    const windowsSystemRoot = dependencies.windowsSystemRoot ?? process.env.SystemRoot;
+    let outputLimit: number;
+    try {
+      outputLimit = validatedOutputLimit(dependencies.outputLimitBytes);
+      if (platform === 'win32') windowsSystemExecutable(windowsSystemRoot, 'taskkill.exe');
+    } catch {
+      rejectCommand(new Error('Command platform configuration failed'));
+      return;
+    }
+    const supervisorEnvironment =
+      platform === 'win32' && windowsSystemRoot !== undefined
+        ? { SystemRoot: windowsSystemRoot }
+        : Object.freeze({});
+    let supervisor: ReturnType<typeof fork>;
+    try {
+      supervisor = fork(COMMAND_SUPERVISOR_PATH, [], {
+        cwd: options.cwd,
+        detached: platform !== 'win32',
+        env: supervisorEnvironment,
+        execArgv: [],
+        serialization: 'json',
+        stdio: ['pipe', 'pipe', 'pipe', 'ipc']
+      });
+    } catch {
+      rejectCommand(new Error('Command failed to start'));
+      return;
+    }
+    if (supervisor.stdin === null || supervisor.stdout === null || supervisor.stderr === null) {
+      supervisor.kill('SIGKILL');
+      rejectCommand(new Error('Command failed to start'));
+      return;
+    }
+    const supervisorInput = supervisor.stdin;
+    const supervisorOutput = supervisor.stdout;
+    const supervisorError = supervisor.stderr;
+    const stdout: OutputCapture = { chunks: [], bytes: 0, exceeded: false };
+    const stderr: OutputCapture = { chunks: [], bytes: 0, exceeded: false };
+    let state: 'starting' | 'active' | 'release-sent' | 'terminating' | 'closed' = 'starting';
+    let supervisorReady = false;
+    let supervisorSpawnFailed = false;
+    let supervisorExited = false;
+    let supervisorClosed = false;
+    let targetResult: TargetCloseMessage | undefined;
+    let terminationStarted = false;
     let treeSettled = false;
     let settled = false;
-    let parentExited = false;
+    let terminationReason = 'Command timed out';
+    let commandDeadline: ReturnType<typeof setTimeout> | undefined;
     let cleanupDeadline: ReturnType<typeof setTimeout> | undefined;
+    let releaseDeadline: ReturnType<typeof setTimeout> | undefined;
     const terminationAbort = new AbortController();
+    const clearDeadlines = () => {
+      clearTimeout(startupDeadline);
+      if (commandDeadline !== undefined) clearTimeout(commandDeadline);
+      if (cleanupDeadline !== undefined) clearTimeout(cleanupDeadline);
+      if (releaseDeadline !== undefined) clearTimeout(releaseDeadline);
+    };
     const finish = (callback: () => void, detach = false) => {
       if (settled) return;
       settled = true;
-      clearTimeout(deadline);
-      if (cleanupDeadline !== undefined) clearTimeout(cleanupDeadline);
+      clearDeadlines();
       terminationAbort.abort();
       if (detach) {
-        child.removeAllListeners();
-        child.stdin.destroy();
-        child.stdout.destroy();
-        child.stderr.destroy();
-        child.unref();
+        try {
+          if (supervisor.connected) supervisor.disconnect();
+        } catch {
+          // Detachment never upgrades an unconfirmed cleanup to success.
+        }
+        supervisorInput.destroy();
+        supervisorOutput.destroy();
+        supervisorError.destroy();
+        supervisor.unref();
       }
       callback();
     };
-    const settleTimedOutCommand = () => {
-      if (!timedOut || !childClosed || !treeSettled) return;
+    const settleTerminatedCommand = () => {
+      if (!terminationStarted || !supervisorClosed || !treeSettled) return;
       finish(() => {
-        rejectCommand(new Error('Command timed out'));
+        rejectCommand(new Error(terminationReason));
       });
     };
-    const deadline = setTimeout(() => {
-      if (settled) return;
-      timedOut = true;
+    const beginTermination = (reason: string) => {
+      if (settled || terminationStarted || state === 'release-sent' || state === 'closed') return;
+      terminationStarted = true;
+      terminationReason = reason;
+      state = 'terminating';
+      clearDeadlines();
       cleanupDeadline = setTimeout(() => {
         finish(() => {
           rejectCommand(new Error('Command cleanup timed out'));
         }, true);
       }, options.cleanupTimeoutMs);
       cleanupDeadline.unref();
-      const pid = child.pid;
       let termination: Promise<void>;
       try {
-        const ownedPid = validatedOwnedPid(pid, process.pid);
         if (
-          platform === 'win32' &&
-          (parentExited || child.exitCode !== null || child.signalCode !== null)
+          !supervisorReady ||
+          supervisorExited ||
+          supervisor.exitCode !== null ||
+          supervisor.signalCode !== null
         ) {
           termination = Promise.reject(new Error('Process identity is no longer owned'));
         } else {
+          const ownedPid = validatedOwnedPid(supervisor.pid, process.pid);
           termination =
             dependencies.terminateOwnedTree === undefined
-              ? terminateOwnedProcessTree(platform, ownedPid, terminationAbort.signal)
+              ? terminateOwnedProcessTree(
+                  platform,
+                  ownedPid,
+                  terminationAbort.signal,
+                  windowsSystemRoot
+                )
               : dependencies.terminateOwnedTree(ownedPid, terminationAbort.signal);
         }
       } catch {
@@ -404,42 +539,142 @@ export function runBoundedCommand(
       void termination.then(
         () => {
           treeSettled = true;
-          settleTimedOutCommand();
+          settleTerminatedCommand();
         },
         () => undefined
       );
-    }, options.timeoutMs);
-    deadline.unref();
-    child.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
-    });
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf8');
-    });
-    child.stdin.on('error', () => undefined);
-    child.once('error', () => {
-      spawnFailed = true;
-    });
-    child.once('exit', () => {
-      parentExited = true;
-    });
-    child.once('close', (code, signal) => {
-      childClosed = true;
-      options.onClose?.();
-      if (timedOut) {
-        settleTimedOutCommand();
+    };
+    const finishReleasedCommand = () => {
+      if (targetResult === undefined) {
+        finish(() => {
+          rejectCommand(new Error('Command cleanup unconfirmed'));
+        });
         return;
       }
-      if (spawnFailed) {
+      const result = targetResult;
+      if (result.spawnFailed || supervisorSpawnFailed) {
         finish(() => {
           rejectCommand(new Error('Command failed to start'));
         });
         return;
       }
+      if (stdout.exceeded || stderr.exceeded) {
+        finish(() => {
+          rejectCommand(new Error('Command output limit exceeded'));
+        });
+        return;
+      }
       finish(() => {
-        resolveCommand({ code, signal, stdout, stderr });
+        resolveCommand({
+          code: result.code,
+          signal: result.signal,
+          stdout: Buffer.concat(stdout.chunks).toString('utf8'),
+          stderr: Buffer.concat(stderr.chunks).toString('utf8')
+        });
+      });
+    };
+    const sendToSupervisor = (message: object): boolean => {
+      if (!supervisor.connected) return false;
+      try {
+        supervisor.send(message);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    supervisorOutput.on('data', (chunk: Buffer) => {
+      captureOutput(stdout, chunk, outputLimit);
+    });
+    supervisorError.on('data', (chunk: Buffer) => {
+      captureOutput(stderr, chunk, outputLimit);
+    });
+    supervisorInput.on('error', () => undefined);
+    supervisor.once('error', () => {
+      supervisorSpawnFailed = true;
+    });
+    supervisor.once('exit', () => {
+      supervisorExited = true;
+    });
+    supervisor.once('close', () => {
+      supervisorClosed = true;
+      state = 'closed';
+      options.onClose?.();
+      if (terminationStarted) {
+        settleTerminatedCommand();
+        return;
+      }
+      if (targetResult !== undefined) {
+        finishReleasedCommand();
+        return;
+      }
+      finish(() => {
+        rejectCommand(
+          new Error(
+            supervisorSpawnFailed ? 'Command failed to start' : 'Command cleanup unconfirmed'
+          )
+        );
       });
     });
-    child.stdin.end(options.input);
+    supervisor.on('message', (message: unknown) => {
+      if (!isSupervisorMessage(message)) {
+        beginTermination('Command supervisor protocol failed');
+        return;
+      }
+      if (message.type === 'ready') {
+        if (state !== 'starting' || supervisorReady) {
+          beginTermination('Command supervisor protocol failed');
+          return;
+        }
+        supervisorReady = true;
+        if (
+          !sendToSupervisor({
+            type: 'start',
+            command: invocation.command,
+            arguments: [...invocation.arguments],
+            environment: serializableEnvironment(options.environment)
+          })
+        ) {
+          beginTermination('Command supervisor protocol failed');
+        }
+        return;
+      }
+      if (message.type === 'started') {
+        if (state !== 'starting' || !supervisorReady) {
+          beginTermination('Command supervisor protocol failed');
+          return;
+        }
+        clearTimeout(startupDeadline);
+        state = 'active';
+        commandDeadline = setTimeout(() => {
+          beginTermination('Command timed out');
+        }, options.timeoutMs);
+        commandDeadline.unref();
+        return;
+      }
+      if (
+        terminationStarted ||
+        (state !== 'active' && !(state === 'starting' && message.spawnFailed))
+      ) {
+        return;
+      }
+      clearTimeout(startupDeadline);
+      if (commandDeadline !== undefined) clearTimeout(commandDeadline);
+      targetResult = message;
+      state = 'release-sent';
+      releaseDeadline = setTimeout(() => {
+        finish(() => {
+          rejectCommand(new Error('Command cleanup timed out'));
+        }, true);
+      }, options.cleanupTimeoutMs);
+      releaseDeadline.unref();
+      if (!sendToSupervisor({ type: 'release' })) {
+        // The independently owned release deadline remains authoritative.
+      }
+    });
+    const startupDeadline = setTimeout(() => {
+      beginTermination('Command startup timed out');
+    }, COMMAND_SUPERVISOR_STARTUP_TIMEOUT_MS);
+    startupDeadline.unref();
+    supervisorInput.end(options.input);
   });
 }

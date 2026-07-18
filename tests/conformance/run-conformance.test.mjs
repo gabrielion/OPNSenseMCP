@@ -70,38 +70,52 @@ async function listen(server) {
   return address;
 }
 
+function trackRawSocket(socket) {
+  let firstReset;
+  let firstOtherFailure;
+  let resolveClosed;
+  const closed = socket.closed
+    ? Promise.resolve()
+    : new Promise((resolveClose) => {
+        resolveClosed = resolveClose;
+      });
+  const onError = (error) => {
+    if (error?.code === 'ECONNRESET') firstReset ??= error;
+    else firstOtherFailure ??= error;
+  };
+  const onClose = () => {
+    socket.off('error', onError);
+    resolveClosed?.();
+  };
+  if (!socket.closed) {
+    socket.on('error', onError);
+    socket.once('close', onClose);
+  }
+  return Object.freeze({
+    async waitForClose({ allowReset = false } = {}) {
+      await closed;
+      if (firstOtherFailure !== undefined) throw firstOtherFailure;
+      if (!allowReset && firstReset !== undefined) throw firstReset;
+    }
+  });
+}
+
 function rawRequest(port, chunks, { waitForEnd = true } = {}) {
   return new Promise((resolveRequest, rejectRequest) => {
     const socket = connect(port, '127.0.0.1');
+    const tracker = trackRawSocket(socket);
     const received = [];
     ownedResources.add({ close: () => Promise.resolve(socket.destroy()) });
     socket.on('data', (chunk) => received.push(chunk));
-    socket.once('error', rejectRequest);
+    if (waitForEnd) socket.once('error', rejectRequest);
     socket.once('connect', () => {
       for (const chunk of chunks) socket.write(chunk);
-      if (!waitForEnd) resolveRequest({ socket, received });
+      if (!waitForEnd) resolveRequest({ socket, received, waitForClose: tracker.waitForClose });
     });
     socket.once('end', () => resolveRequest(Buffer.concat(received).toString('latin1')));
     socket.once('close', () => {
       if (waitForEnd) resolveRequest(Buffer.concat(received).toString('latin1'));
     });
-  });
-}
-
-function waitForRawSocketClose(socket, { allowReset = false } = {}) {
-  if (socket.closed) return Promise.resolve();
-  return new Promise((resolveClose, rejectClose) => {
-    let failure;
-    const onError = (error) => {
-      if (!(allowReset && error?.code === 'ECONNRESET')) failure ??= error;
-    };
-    const onClose = () => {
-      socket.off('error', onError);
-      if (failure === undefined) resolveClose();
-      else rejectClose(failure);
-    };
-    socket.on('error', onError);
-    socket.once('close', onClose);
   });
 }
 
@@ -974,23 +988,17 @@ describe('raw streaming authentication proxy', () => {
   it('waits for close and tolerates only explicitly allowed connection resets', async () => {
     const reset = Object.assign(new Error('expected reset'), { code: 'ECONNRESET' });
     const allowedSocket = Object.assign(new EventEmitter(), { closed: false });
-    let allowedSettled = false;
-    const allowedWait = waitForRawSocketClose(allowedSocket, { allowReset: true }).then(() => {
-      allowedSettled = true;
-    });
-
+    const allowedTracker = trackRawSocket(allowedSocket);
     allowedSocket.emit('error', reset);
-    await Promise.resolve();
-    expect(allowedSettled).toBe(false);
     allowedSocket.emit('close');
-    await allowedWait;
+    await allowedTracker.waitForClose({ allowReset: true });
 
     const refusedSocket = Object.assign(new EventEmitter(), { closed: false });
+    const refusedTracker = trackRawSocket(refusedSocket);
     const unexpected = Object.assign(new Error('unexpected socket failure'), { code: 'EPIPE' });
-    const refusedWait = expect(waitForRawSocketClose(refusedSocket)).rejects.toBe(unexpected);
     refusedSocket.emit('error', unexpected);
     refusedSocket.emit('close');
-    await refusedWait;
+    await expect(refusedTracker.waitForClose()).rejects.toBe(unexpected);
   });
 
   class ControlledUpstreamRequest extends EventEmitter {
@@ -1196,7 +1204,7 @@ describe('raw streaming authentication proxy', () => {
       ['POST /mcp HTTP/1.1\r\nHost: local\r\nContent-Length: 5\r\nConnection: close\r\n\r\n'],
       { waitForEnd: false }
     );
-    await waitForRawSocketClose(declaredExchange.socket, { allowReset: true });
+    await declaredExchange.waitForClose({ allowReset: true });
     const declared = Buffer.concat(declaredExchange.received).toString('latin1');
     expect(declared).toContain('413 Payload Too Large');
     expect(declared).toContain('Connection: close');
@@ -1211,7 +1219,7 @@ describe('raw streaming authentication proxy', () => {
       { waitForEnd: false }
     );
     await vi.waitFor(() => expect(upstreamRequests).toBe(1));
-    const streamedClosed = waitForRawSocketClose(streamedExchange.socket, { allowReset: true });
+    const streamedClosed = streamedExchange.waitForClose({ allowReset: true });
     streamedExchange.socket.write('3\r\ncde\r\n0\r\n\r\n');
     await streamedClosed;
     const streamed = Buffer.concat(streamedExchange.received).toString('latin1');
@@ -1255,7 +1263,7 @@ describe('raw streaming authentication proxy', () => {
       { waitForEnd: false }
     );
     await upstreamResponded.promise;
-    const exchangeClosed = waitForRawSocketClose(exchange.socket, { allowReset: true });
+    const exchangeClosed = exchange.waitForClose({ allowReset: true });
     exchange.socket.write('3\r\ncde\r\n0\r\n\r\n');
     await exchangeClosed;
 
@@ -1312,7 +1320,7 @@ describe('raw streaming authentication proxy', () => {
       );
       await exchange.deliver(upstreamResponse);
 
-      const inboundClosed = waitForRawSocketClose(inbound.socket, { allowReset: true });
+      const inboundClosed = inbound.waitForClose({ allowReset: true });
       exchange.upstreamRequest.emit('error', new Error('POISON_UPSTREAM_REQUEST'));
       expect(upstreamResponse.destroyed).toBe(true);
       await inboundClosed;
@@ -1358,7 +1366,7 @@ describe('raw streaming authentication proxy', () => {
         ],
         { waitForEnd: false }
       );
-      await waitForRawSocketClose(inbound.socket, { allowReset: true });
+      await inbound.waitForClose({ allowReset: true });
 
       const body = Buffer.concat(inbound.received).toString('latin1');
       expect(body).toContain('HTTP/1.1 502 Bad Gateway');
@@ -1385,7 +1393,7 @@ describe('raw streaming authentication proxy', () => {
       await exchange.deliver(upstreamResponse);
       await vi.waitFor(() => expect(exchange.upstreamRequest.ended).toBe(true));
 
-      const inboundClosed = waitForRawSocketClose(inbound.socket, { allowReset: true });
+      const inboundClosed = inbound.waitForClose({ allowReset: true });
       upstreamResponse.emit('error', new Error('POISON_UPSTREAM_RESPONSE'));
       expect(exchange.upstreamRequest.destroyed).toBe(true);
       await inboundClosed;
