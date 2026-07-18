@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { spawn } from 'node:child_process';
-import { lstat, mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { lstat, mkdtemp, open, readFile, readdir, realpath, rm } from 'node:fs/promises';
 import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -203,7 +204,12 @@ export async function assertConformanceProductContract(application, overrides = 
       throw conformanceProductContractError();
     }
     const parsed = first.parseInput({});
-    if (parsed === null || typeof parsed !== 'object' || Object.keys(parsed).length !== 0) {
+    if (
+      parsed === null ||
+      typeof parsed !== 'object' ||
+      Array.isArray(parsed) ||
+      Object.keys(parsed).length !== 0
+    ) {
       throw conformanceProductContractError();
     }
     let rejectsExtra = false;
@@ -213,6 +219,15 @@ export async function assertConformanceProductContract(application, overrides = 
       rejectsExtra = true;
     }
     if (!rejectsExtra) throw conformanceProductContractError();
+    for (const invalidInput of [null, [], '', 0, false, undefined]) {
+      let rejectsInvalidInput = false;
+      try {
+        first.parseInput(invalidInput);
+      } catch {
+        rejectsInvalidInput = true;
+      }
+      if (!rejectsInvalidInput) throw conformanceProductContractError();
+    }
 
     const result = await dependencies.dispatch(
       application,
@@ -291,15 +306,52 @@ function isStrictDescendant(parent, candidate) {
   return child !== '' && child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child);
 }
 
-export async function validateScenarioReport(stateDirectory, version, scenario) {
+function matchesMetadata(expected, actual, kind) {
+  return (
+    expected.dev === actual.dev &&
+    expected.ino === actual.ino &&
+    expected.size === actual.size &&
+    expected.ctimeNs === actual.ctimeNs &&
+    expected.mtimeNs === actual.mtimeNs &&
+    (kind === 'directory' ? actual.isDirectory() : actual.isFile()) &&
+    !actual.isSymbolicLink()
+  );
+}
+
+async function revalidateReportPath(path, root, expected, kind) {
+  const actual = await lstat(path, { bigint: true });
+  if (!matchesMetadata(expected, actual, kind)) throw conformanceReportError();
+  if ((await realpath(path)) !== root) throw conformanceReportError();
+}
+
+async function readBoundedReport(handle) {
+  const bytes = Buffer.allocUnsafe(MAX_CONFORMANCE_REPORT_BYTES + 1);
+  let offset = 0;
+  while (offset < bytes.length) {
+    const result = await handle.read(bytes, offset, bytes.length - offset, offset);
+    if (result.bytesRead === 0) break;
+    offset += result.bytesRead;
+  }
+  if (offset < 1 || offset > MAX_CONFORMANCE_REPORT_BYTES) throw conformanceReportError();
+  return { content: bytes.subarray(0, offset).toString('utf8'), size: offset };
+}
+
+export async function validateScenarioReport(stateDirectory, version, scenario, overrides = {}) {
+  const dependencies = {
+    openReport: open,
+    clock: SYSTEM_TIMER,
+    ...overrides
+  };
+  let reportHandle;
+  let accepted = false;
   try {
-    const stateMetadata = await lstat(stateDirectory);
+    const stateMetadata = await lstat(stateDirectory, { bigint: true });
     if (stateMetadata.isSymbolicLink() || !stateMetadata.isDirectory())
       throw conformanceReportError();
     const stateRoot = await realpath(stateDirectory);
 
     const resultsPath = join(stateRoot, 'results');
-    const resultsMetadata = await lstat(resultsPath);
+    const resultsMetadata = await lstat(resultsPath, { bigint: true });
     if (resultsMetadata.isSymbolicLink() || !resultsMetadata.isDirectory()) {
       throw conformanceReportError();
     }
@@ -307,7 +359,7 @@ export async function validateScenarioReport(stateDirectory, version, scenario) 
     if (!isStrictDescendant(stateRoot, resultsRoot)) throw conformanceReportError();
 
     const versionPath = join(resultsRoot, version);
-    const versionMetadata = await lstat(versionPath);
+    const versionMetadata = await lstat(versionPath, { bigint: true });
     if (versionMetadata.isSymbolicLink() || !versionMetadata.isDirectory()) {
       throw conformanceReportError();
     }
@@ -315,7 +367,7 @@ export async function validateScenarioReport(stateDirectory, version, scenario) 
     if (!isStrictDescendant(resultsRoot, versionRoot)) throw conformanceReportError();
 
     const scenarioPath = join(versionRoot, scenario);
-    const scenarioMetadata = await lstat(scenarioPath);
+    const scenarioMetadata = await lstat(scenarioPath, { bigint: true });
     if (scenarioMetadata.isSymbolicLink() || !scenarioMetadata.isDirectory()) {
       throw conformanceReportError();
     }
@@ -332,7 +384,7 @@ export async function validateScenarioReport(stateDirectory, version, scenario) 
       throw conformanceReportError();
     }
     const runPath = join(scenarioRoot, runEntries[0].name);
-    const runMetadata = await lstat(runPath);
+    const runMetadata = await lstat(runPath, { bigint: true });
     if (runMetadata.isSymbolicLink() || !runMetadata.isDirectory()) throw conformanceReportError();
     const runRoot = await realpath(runPath);
     if (!isStrictDescendant(scenarioRoot, runRoot)) throw conformanceReportError();
@@ -347,12 +399,12 @@ export async function validateScenarioReport(stateDirectory, version, scenario) 
       throw conformanceReportError();
     }
     const reportPath = join(runRoot, 'checks.json');
-    const reportMetadata = await lstat(reportPath);
+    const reportMetadata = await lstat(reportPath, { bigint: true });
     if (
       reportMetadata.isSymbolicLink() ||
       !reportMetadata.isFile() ||
-      reportMetadata.size < 1 ||
-      reportMetadata.size > MAX_CONFORMANCE_REPORT_BYTES
+      reportMetadata.size < 1n ||
+      reportMetadata.size > BigInt(MAX_CONFORMANCE_REPORT_BYTES)
     ) {
       throw conformanceReportError();
     }
@@ -361,7 +413,31 @@ export async function validateScenarioReport(stateDirectory, version, scenario) 
       throw conformanceReportError();
     }
 
-    const checks = JSON.parse(await readFile(reportRoot, 'utf8'));
+    reportHandle = await dependencies.openReport(
+      reportRoot,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW
+    );
+    const openedMetadata = await reportHandle.stat({ bigint: true });
+    if (!matchesMetadata(reportMetadata, openedMetadata, 'file')) {
+      throw conformanceReportError();
+    }
+    const report = await readBoundedReport(reportHandle);
+    const postReadMetadata = await reportHandle.stat({ bigint: true });
+    if (
+      !matchesMetadata(reportMetadata, postReadMetadata, 'file') ||
+      postReadMetadata.size !== BigInt(report.size)
+    ) {
+      throw conformanceReportError();
+    }
+
+    await revalidateReportPath(stateDirectory, stateRoot, stateMetadata, 'directory');
+    await revalidateReportPath(resultsPath, resultsRoot, resultsMetadata, 'directory');
+    await revalidateReportPath(versionPath, versionRoot, versionMetadata, 'directory');
+    await revalidateReportPath(scenarioPath, scenarioRoot, scenarioMetadata, 'directory');
+    await revalidateReportPath(runPath, runRoot, runMetadata, 'directory');
+    await revalidateReportPath(reportPath, reportRoot, reportMetadata, 'file');
+
+    const checks = JSON.parse(report.content);
     if (!Array.isArray(checks) || checks.length === 0) throw conformanceReportError();
     const statuses = checks.map((check) => {
       if (check === null || typeof check !== 'object' || Array.isArray(check)) {
@@ -375,9 +451,24 @@ export async function validateScenarioReport(stateDirectory, version, scenario) 
     ) {
       throw conformanceReportError();
     }
+    accepted = true;
   } catch {
-    throw conformanceReportError();
+    accepted = false;
   }
+  if (reportHandle !== undefined) {
+    try {
+      await settleWithin(
+        'scenario-report-handle',
+        () => reportHandle.close(),
+        REPORT_VALIDATION_TIMEOUT_MS,
+        dependencies.clock,
+        () => conformanceReportError()
+      );
+    } catch {
+      accepted = false;
+    }
+  }
+  if (!accepted) throw conformanceReportError();
 }
 
 function filterRawHeaders(rawHeaders, additionalNames = []) {
@@ -500,18 +591,84 @@ export async function startLoopbackProxy(upstreamUrl, token, limits, overrides =
     forwardedHeaders.push('Authorization', `Bearer ${token}`);
     let upstreamRequest;
     let activeUpstreamResponse;
+    let requestEnded = false;
+    let upstreamResponsePublished = false;
+    let upstreamFailureStarted = false;
     let responseFinished = false;
     let tooLarge = false;
     let bodyBytes = 0;
 
+    const destroyInbound = () => {
+      if (!request.destroyed) request.destroy();
+    };
+    const destroyDownstream = () => {
+      if (!response.destroyed && !response.writableEnded) response.destroy();
+    };
     const destroyUpstream = () => {
       activeUpstreamResponse?.destroy();
       upstreamRequest?.destroy();
     };
-    const upstreamFailure = () => {
-      if (tooLarge || responseFinished || response.destroyed || response.writableEnded) return;
-      if (response.headersSent) response.destroy();
-      else fixedResponse(response, 502, 'Bad Gateway\n');
+    const finishLocalFailure = (status, body) => {
+      if (response.headersSent || response.destroyed || response.writableEnded) {
+        destroyInbound();
+        destroyDownstream();
+        return;
+      }
+      response.once('finish', destroyInbound);
+      fixedResponse(response, status, body);
+    };
+    const failUpstream = (source) => {
+      if (upstreamFailureStarted) return;
+      upstreamFailureStarted = true;
+      if (source !== 'request') upstreamRequest?.destroy();
+      if (source !== 'response') activeUpstreamResponse?.destroy();
+      if (tooLarge || responseFinished) return;
+      if (response.headersSent) {
+        destroyInbound();
+        destroyDownstream();
+      } else {
+        finishLocalFailure(502, 'Bad Gateway\n');
+      }
+    };
+    const failInbound = () => {
+      destroyUpstream();
+      destroyDownstream();
+    };
+    const failDownstream = () => {
+      if (responseFinished) return;
+      destroyInbound();
+      destroyUpstream();
+    };
+    const publishUpstreamResponse = () => {
+      if (
+        !requestEnded ||
+        upstreamResponsePublished ||
+        activeUpstreamResponse === undefined ||
+        tooLarge ||
+        response.destroyed ||
+        response.writableEnded
+      ) {
+        return;
+      }
+      upstreamResponsePublished = true;
+      const upstreamResponse = activeUpstreamResponse;
+      const responseHeaders = filterRawHeaders(upstreamResponse.rawHeaders);
+      response.writeHead(
+        upstreamResponse.statusCode ?? 502,
+        upstreamResponse.statusMessage,
+        responseHeaders
+      );
+      upstreamResponse.on('data', (chunk) => {
+        if (!response.write(chunk)) {
+          upstreamResponse.pause();
+          response.once('drain', () => upstreamResponse.resume());
+        }
+      });
+      upstreamResponse.once('end', () => {
+        responseFinished = true;
+        response.end();
+      });
+      upstreamResponse.resume();
     };
     const onRequestData = (chunk) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -543,47 +700,33 @@ export async function startLoopbackProxy(upstreamUrl, token, limits, overrides =
         },
         (upstreamResponse) => {
           activeUpstreamResponse = upstreamResponse;
-          if (tooLarge || response.destroyed || response.writableEnded) {
+          upstreamResponse.pause();
+          if (tooLarge || upstreamFailureStarted || response.destroyed || response.writableEnded) {
             upstreamResponse.destroy();
             return;
           }
-          const responseHeaders = filterRawHeaders(upstreamResponse.rawHeaders);
-          response.writeHead(
-            upstreamResponse.statusCode ?? 502,
-            upstreamResponse.statusMessage,
-            responseHeaders
-          );
-          upstreamResponse.on('data', (chunk) => {
-            if (!response.write(chunk)) {
-              upstreamResponse.pause();
-              response.once('drain', () => upstreamResponse.resume());
-            }
-          });
-          upstreamResponse.once('end', () => {
-            responseFinished = true;
-            response.end();
-          });
-          upstreamResponse.once('aborted', () => {
-            if (!responseFinished) response.destroy();
-          });
-          upstreamResponse.once('error', upstreamFailure);
+          upstreamResponse.once('aborted', () => failUpstream('response'));
+          upstreamResponse.once('error', () => failUpstream('response'));
+          publishUpstreamResponse();
         }
       );
     } catch {
-      fixedResponse(response, 502, 'Bad Gateway\n');
-      request.resume();
+      finishLocalFailure(502, 'Bad Gateway\n');
       return;
     }
-    upstreamRequest.once('error', upstreamFailure);
+    upstreamRequest.once('error', () => failUpstream('request'));
     request.on('data', onRequestData);
     request.once('end', () => {
-      if (!tooLarge) upstreamRequest.end();
+      requestEnded = true;
+      if (!tooLarge) {
+        upstreamRequest.end();
+        publishUpstreamResponse();
+      }
     });
-    request.once('aborted', destroyUpstream);
-    request.once('error', destroyUpstream);
-    response.once('close', () => {
-      if (!responseFinished) destroyUpstream();
-    });
+    request.once('aborted', failInbound);
+    request.once('error', failInbound);
+    response.once('close', failDownstream);
+    response.once('error', failDownstream);
   };
 
   server = dependencies.createProxyServer(

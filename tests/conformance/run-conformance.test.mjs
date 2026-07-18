@@ -1,11 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
-import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import {
+  appendFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  open as openFile,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  utimes,
+  writeFile
+} from 'node:fs/promises';
 import { createServer, request as httpRequest } from 'node:http';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -89,20 +102,24 @@ async function pollProcessGone(pid, milliseconds = 3_000) {
   throw new Error('Child process remained alive');
 }
 
-function closeChild(pid) {
+async function closeChildAndConfirm(pid) {
   if (pid === undefined) return;
   try {
     process.kill(pid, 'SIGKILL');
   } catch (error) {
-    if (error?.code !== 'ESRCH') throw error;
+    if (error?.code === 'ESRCH') return;
+    throw error;
   }
+  await pollProcessGone(pid);
 }
 
 afterEach(async () => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
-  for (const pid of ownedPids) closeChild(pid);
-  ownedPids.clear();
+  for (const pid of [...ownedPids]) {
+    await closeChildAndConfirm(pid);
+    ownedPids.delete(pid);
+  }
   await Promise.allSettled([...ownedResources].map((resource) => resource.close()));
   ownedResources.clear();
   await Promise.allSettled(
@@ -125,6 +142,76 @@ async function createAcceptedReport(stateDirectory, version, scenario, checks = 
     JSON.stringify(checks ?? [{ status: 'SUCCESS' }, { status: 'INFO' }])
   );
   return runDirectory;
+}
+
+function assertOfficialStdoutContract(stdout, version, dedicatedTmp, poison) {
+  for (const forbidden of [
+    resolve('.'),
+    process.execPath,
+    'scripts/run-conformance.mjs',
+    'node_modules/@modelcontextprotocol/conformance',
+    '--url',
+    '--scenario',
+    '--output-dir',
+    'Authorization',
+    'Bearer ',
+    poison,
+    ...Object.values(runner.CONFORMANCE_SENTINELS)
+  ]) {
+    expect(stdout).not.toContain(forbidden);
+  }
+
+  const lines = stdout.split('\n');
+  let index = 0;
+  let expectedProxyUrl;
+  for (const scenario of runner.SCENARIOS_BY_VERSION[version]) {
+    const running = lines[index++];
+    const runningMatch = /^Running client scenario '([^']+)' against server: (\S+)$/u.exec(running);
+    expect(runningMatch?.[1]).toBe(scenario);
+    const proxyProjection = runner.parseExactLoopbackMcpUrl(runningMatch?.[2]);
+    expectedProxyUrl ??= proxyProjection.href;
+    expect(proxyProjection.href).toBe(expectedProxyUrl);
+
+    const resultLine = lines[index++];
+    const resultMatch = /^Results saved to (.+)$/u.exec(resultLine);
+    expect(resultMatch).not.toBeNull();
+    const resultPath = resultMatch?.[1];
+    expect(isAbsolute(resultPath)).toBe(true);
+    const ownedResultPath = relative(resolve(dedicatedTmp), resolve(resultPath));
+    expect(ownedResultPath).not.toBe('');
+    expect(ownedResultPath).not.toBe('..');
+    expect(ownedResultPath.startsWith(`..${sep}`)).toBe(false);
+    expect(isAbsolute(ownedResultPath)).toBe(false);
+    const segments = ownedResultPath.split(sep);
+    expect(segments).toHaveLength(5);
+    expect(segments[0]).toMatch(/^opnsense-mcp-conformance-[A-Za-z0-9]+$/u);
+    expect(segments.slice(1, 4)).toEqual(['results', version, scenario]);
+    expect(segments[4]).toMatch(new RegExp(`^server-${scenario}-[A-Za-z0-9-]+$`, 'u'));
+
+    const summaryIndex = lines.indexOf('Test Results:', index);
+    expect(summaryIndex).toBeGreaterThan(index);
+    const checks = JSON.parse(lines.slice(index, summaryIndex).join('\n').trim());
+    expect(checks).toBeInstanceOf(Array);
+    expect(checks.length).toBeGreaterThan(0);
+    expect(checks.some((check) => check?.status === 'SUCCESS')).toBe(true);
+    expect(
+      checks.every(
+        (check) =>
+          check !== null &&
+          typeof check === 'object' &&
+          !Array.isArray(check) &&
+          new Set(['SUCCESS', 'INFO']).has(check.status)
+      )
+    ).toBe(true);
+    const structuredChecks = JSON.stringify(checks);
+    expect(structuredChecks).not.toMatch(
+      /(?:^|["\s])\/(?:Users|home|opt|private|tmp|var)(?:\/|["\s])/u
+    );
+    expect(structuredChecks).not.toMatch(/authorization|bearer|token/iu);
+    index = summaryIndex + 1;
+    expect(lines[index++]).toMatch(/^Passed: [1-9][0-9]*\/[1-9][0-9]*, 0 failed, 0 warnings$/u);
+  }
+  expect(lines.slice(index).every((line) => line === '')).toBe(true);
 }
 
 describe('exact conformance command contract', () => {
@@ -373,7 +460,12 @@ describe('real foundation product preflight', () => {
         redactFields: []
       },
       parseInput(value) {
-        if (value === null || typeof value !== 'object' || Object.keys(value).length !== 0) {
+        if (
+          value === null ||
+          typeof value !== 'object' ||
+          Array.isArray(value) ||
+          Object.keys(value).length !== 0
+        ) {
           throw new Error('strict');
         }
         return {};
@@ -385,6 +477,20 @@ describe('real foundation product preflight', () => {
     kind: 'success',
     output: { status: 'ok', readOnly: true, version: '0.1.0' }
   });
+
+  function acceptInvalidSchemaInput(predicate) {
+    return (capability) => {
+      capability.parseInput = (value) => {
+        const isEmptyRecord =
+          value !== null &&
+          typeof value === 'object' &&
+          !Array.isArray(value) &&
+          Object.keys(value).length === 0;
+        if (isEmptyRecord || predicate(value)) return {};
+        throw new Error('strict');
+      };
+    };
+  }
 
   it('accepts exact first-object identity, strict input, policy metadata, and dispatched output', async () => {
     const expected = exactCapability();
@@ -401,15 +507,7 @@ describe('real foundation product preflight', () => {
 
   it.each([
     ['ordering', (capability) => [exactCapability(), capability]],
-    ['identity', () => [exactCapability()]],
-    ['name', (capability) => ((capability.mcpName = 'changed'), [capability])],
-    ['policy', (capability) => ((capability.policy.effect = 'write'), [capability])],
-    ['annotation', (capability) => ((capability.annotations.openWorldHint = true), [capability])],
-    ['transport', (capability) => ((capability.transports = ['http']), [capability])],
-    [
-      'schema',
-      (capability) => ((capability.parseInput = () => ({ unexpected: true })), [capability])
-    ]
+    ['identity', () => [exactCapability()]]
   ])('fails closed with one stable error for %s drift', async (_label, expose) => {
     const expected = exactCapability();
     const error = await runner
@@ -429,22 +527,113 @@ describe('real foundation product preflight', () => {
   });
 
   it.each([
-    { kind: 'refusal', error: { code: 'READ_ONLY' } },
-    { kind: 'confirmation', confirmation: {} },
-    { kind: 'success', output: { status: 'ok', readOnly: false, version: '0.1.0' } },
-    { kind: 'success', output: { status: 'ok', readOnly: true, version: 'changed' } }
-  ])('fails closed on malformed dispatch result %#', async (result) => {
+    ['id', (capability) => (capability.id = 'changed')],
+    ['name', (capability) => (capability.mcpName = 'changed')],
+    ['title', (capability) => (capability.title = 'Changed')],
+    ['description', (capability) => (capability.description = 'Changed')],
+    ['annotation readOnlyHint', (capability) => (capability.annotations.readOnlyHint = false)],
+    ['annotation destructiveHint', (capability) => (capability.annotations.destructiveHint = true)],
+    ['annotation idempotentHint', (capability) => (capability.annotations.idempotentHint = false)],
+    ['annotation openWorldHint', (capability) => (capability.annotations.openWorldHint = true)],
+    ['transport length', (capability) => (capability.transports = ['http'])],
+    ['transport order', (capability) => (capability.transports = ['http', 'stdio'])],
+    ['policy effect', (capability) => (capability.policy.effect = 'write')],
+    ['policy backup', (capability) => (capability.policy.backup = 'required')],
+    ['policy audit', (capability) => (capability.policy.audit = 'required')],
+    ['policy confirmation', (capability) => (capability.policy.confirmation = 'required')],
+    ['policy timeout', (capability) => (capability.policy.timeoutMs = 2_000)],
+    ['policy resource count', (capability) => (capability.policy.resourceScopes = [])],
+    ['policy resource identity', (capability) => (capability.policy.resourceScopes = ['changed'])],
+    [
+      'policy feature flags',
+      (capability) => (capability.policy.requiredFeatureFlags = ['changed'])
+    ],
+    ['policy redact fields', (capability) => (capability.policy.redactFields = ['changed'])],
+    [
+      'schema empty projection',
+      (capability) => (capability.parseInput = () => ({ unexpected: true }))
+    ],
+    [
+      'schema array projection',
+      (capability) => {
+        capability.parseInput = (value) => {
+          if (
+            value !== null &&
+            typeof value === 'object' &&
+            !Array.isArray(value) &&
+            Object.keys(value).length === 0
+          ) {
+            return [];
+          }
+          throw new Error('strict');
+        };
+      }
+    ],
+    ['schema extra acceptance', (capability) => (capability.parseInput = () => ({}))],
+    ['schema null acceptance', acceptInvalidSchemaInput((value) => value === null)],
+    ['schema array acceptance', acceptInvalidSchemaInput(Array.isArray)],
+    ['schema string acceptance', acceptInvalidSchemaInput((value) => typeof value === 'string')],
+    ['schema number acceptance', acceptInvalidSchemaInput((value) => typeof value === 'number')],
+    ['schema boolean acceptance', acceptInvalidSchemaInput((value) => typeof value === 'boolean')],
+    ['schema undefined acceptance', acceptInvalidSchemaInput((value) => value === undefined)]
+  ])('fails closed when only %s drifts', async (_label, mutate) => {
     const expected = exactCapability();
-    await expect(
-      runner.assertConformanceProductContract(
+    mutate(expected);
+    const error = await runner
+      .assertConformanceProductContract(
         {},
         {
           expected,
           list: () => [expected],
-          dispatch: async () => result
+          dispatch: async () => success
         }
       )
-    ).rejects.toMatchObject({ name: 'ConformanceProductContractError' });
+      .catch((reason) => reason);
+    expect({ name: error.name, message: error.message }).toEqual({
+      name: 'ConformanceProductContractError',
+      message: 'Conformance product contract is unavailable'
+    });
+  });
+
+  it.each([
+    ['refusal', () => ({ kind: 'refusal', error: { code: 'READ_ONLY' } })],
+    ['confirmation', () => ({ kind: 'confirmation', confirmation: {} })],
+    [
+      'wrong status',
+      () => ({ kind: 'success', output: { status: 'changed', readOnly: true, version: '0.1.0' } })
+    ],
+    [
+      'wrong readOnly',
+      () => ({ kind: 'success', output: { status: 'ok', readOnly: false, version: '0.1.0' } })
+    ],
+    [
+      'wrong version',
+      () => ({ kind: 'success', output: { status: 'ok', readOnly: true, version: 'changed' } })
+    ],
+    [
+      'extra output field',
+      () => ({
+        kind: 'success',
+        output: { status: 'ok', readOnly: true, version: '0.1.0', poison: true }
+      })
+    ],
+    [
+      'synchronous throw',
+      () => {
+        throw new Error('POISON_DISPATCH_THROW');
+      }
+    ],
+    ['rejected promise', () => Promise.reject(new Error('POISON_DISPATCH_REJECTION'))]
+  ])('fails closed on dispatch mode %s', async (_label, dispatch) => {
+    const expected = exactCapability();
+    const error = await runner
+      .assertConformanceProductContract({}, { expected, list: () => [expected], dispatch })
+      .catch((reason) => reason);
+    expect({ name: error.name, message: error.message }).toEqual({
+      name: 'ConformanceProductContractError',
+      message: 'Conformance product contract is unavailable'
+    });
+    expect(JSON.stringify(error)).not.toContain('POISON');
   });
 
   it('passes once against the real default application and dispatch path', async () => {
@@ -542,18 +731,295 @@ describe('strict alpha.9 report evidence', () => {
     }
   });
 
-  it('rejects symlinks at every report path boundary', async () => {
+  it.each(['results', 'version', 'scenario', 'run', 'report'])(
+    'rejects a symlink at the %s report boundary with one redacted error',
+    async (boundary) => {
+      const version = '2025-11-25';
+      const scenario = 'ping';
+      const stateDirectory = await temporaryDirectory();
+      const outside = await temporaryDirectory();
+      const runDirectory = await createAcceptedReport(stateDirectory, version, scenario);
+      const outsideRun = await createAcceptedReport(outside, version, scenario);
+      const paths = {
+        results: [join(stateDirectory, 'results'), join(outside, 'results')],
+        version: [join(stateDirectory, 'results', version), join(outside, 'results', version)],
+        scenario: [
+          join(stateDirectory, 'results', version, scenario),
+          join(outside, 'results', version, scenario)
+        ],
+        run: [runDirectory, outsideRun],
+        report: [join(runDirectory, 'checks.json'), join(outsideRun, 'checks.json')]
+      };
+      const [insidePath, outsidePath] = paths[boundary];
+      await rm(insidePath, { recursive: true, force: true });
+      await symlink(outsidePath, insidePath);
+
+      const error = await runner
+        .validateScenarioReport(stateDirectory, version, scenario)
+        .catch((reason) => reason);
+      expect({ name: error.name, message: error.message }).toEqual({
+        name: 'ConformanceReportError',
+        message: 'Conformance scenario report is invalid'
+      });
+      expect(JSON.stringify(error)).not.toContain(stateDirectory);
+      expect(JSON.stringify(error)).not.toContain(outside);
+    }
+  );
+
+  it.each(['symlink', 'regular-file'])(
+    'rejects an atomic %s swap before report open',
+    async (mode) => {
+      const version = '2025-11-25';
+      const scenario = 'ping';
+      const stateDirectory = await temporaryDirectory();
+      const runDirectory = await createAcceptedReport(stateDirectory, version, scenario);
+      const displacedPath = join(runDirectory, 'checks.original.json');
+      const outside = await temporaryDirectory();
+      const outsideReport = join(outside, 'outside.json');
+      await writeFile(outsideReport, '[{"status":"SUCCESS"}]');
+      let observedFlags;
+      let openCalls = 0;
+      let closeCalls = 0;
+
+      const error = await runner
+        .validateScenarioReport(stateDirectory, version, scenario, {
+          openReport: async (path, flags) => {
+            openCalls += 1;
+            observedFlags = flags;
+            await rename(path, displacedPath);
+            if (mode === 'symlink') await symlink(outsideReport, path);
+            else await writeFile(path, '[{"status":"SUCCESS"}]');
+            const handle = await openFile(path, flags);
+            return {
+              stat: (...arguments_) => handle.stat(...arguments_),
+              read: (...arguments_) => handle.read(...arguments_),
+              close: async () => {
+                closeCalls += 1;
+                await handle.close();
+              }
+            };
+          }
+        })
+        .catch((reason) => reason);
+
+      expect({ name: error.name, message: error.message }).toEqual({
+        name: 'ConformanceReportError',
+        message: 'Conformance scenario report is invalid'
+      });
+      expect(openCalls).toBe(1);
+      expect(observedFlags & fsConstants.O_NOFOLLOW).toBe(fsConstants.O_NOFOLLOW);
+      expect(closeCalls).toBe(mode === 'symlink' ? 0 : 1);
+    }
+  );
+
+  it('bounds a report that grows after fstat to an N+1 read and always closes its handle', async () => {
+    const version = '2025-11-25';
+    const scenario = 'ping';
     const stateDirectory = await temporaryDirectory();
-    const outside = await temporaryDirectory();
-    await createAcceptedReport(outside, '2025-11-25', 'ping');
-    await symlink(join(outside, 'results'), join(stateDirectory, 'results'));
-    await expect(
-      runner.validateScenarioReport(stateDirectory, '2025-11-25', 'ping')
-    ).rejects.toMatchObject({ name: 'ConformanceReportError' });
+    const runDirectory = await createAcceptedReport(stateDirectory, version, scenario);
+    const reportPath = join(runDirectory, 'checks.json');
+    let openCalls = 0;
+    let closeCalls = 0;
+    let grew = false;
+
+    const error = await runner
+      .validateScenarioReport(stateDirectory, version, scenario, {
+        openReport: async (path, flags) => {
+          openCalls += 1;
+          const handle = await openFile(path, flags);
+          return {
+            stat: (...arguments_) => handle.stat(...arguments_),
+            read: async (...arguments_) => {
+              if (!grew) {
+                grew = true;
+                await appendFile(reportPath, Buffer.alloc(runner.MAX_CONFORMANCE_REPORT_BYTES));
+              }
+              return handle.read(...arguments_);
+            },
+            close: async () => {
+              closeCalls += 1;
+              await handle.close();
+            }
+          };
+        }
+      })
+      .catch((reason) => reason);
+
+    expect(error).toMatchObject({ name: 'ConformanceReportError' });
+    expect(openCalls).toBe(1);
+    expect(grew).toBe(true);
+    expect(closeCalls).toBe(1);
   });
+
+  it('rejects a same-inode rewrite restored before the final report stat', async () => {
+    const version = '2025-11-25';
+    const scenario = 'ping';
+    const stateDirectory = await temporaryDirectory();
+    const runDirectory = await createAcceptedReport(stateDirectory, version, scenario, [
+      { status: 'WARNING' }
+    ]);
+    const reportPath = join(runDirectory, 'checks.json');
+    const warning = '[{"status":"WARNING"}]';
+    const success = '[{"status":"SUCCESS"}]';
+    expect(Buffer.byteLength(warning)).toBe(Buffer.byteLength(success));
+    const fixedTime = new Date('2026-07-18T00:00:00.000Z');
+    await utimes(reportPath, fixedTime, fixedTime);
+    const before = await lstat(reportPath, { bigint: true });
+    let closeCalls = 0;
+    let raced = false;
+
+    const error = await runner
+      .validateScenarioReport(stateDirectory, version, scenario, {
+        openReport: async (path, flags) => {
+          const handle = await openFile(path, flags);
+          return {
+            stat: (...arguments_) => handle.stat(...arguments_),
+            read: async (...arguments_) => {
+              if (raced) return handle.read(...arguments_);
+              raced = true;
+              await writeFile(reportPath, success);
+              const result = await handle.read(...arguments_);
+              await writeFile(reportPath, warning);
+              await utimes(reportPath, fixedTime, fixedTime);
+              return result;
+            },
+            close: async () => {
+              closeCalls += 1;
+              await handle.close();
+            }
+          };
+        }
+      })
+      .catch((reason) => reason);
+
+    const after = await lstat(reportPath, { bigint: true });
+    expect(after.ino).toBe(before.ino);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeNs).toBe(before.mtimeNs);
+    expect(after.ctimeNs).not.toBe(before.ctimeNs);
+    expect(error).toMatchObject({
+      name: 'ConformanceReportError',
+      message: 'Conformance scenario report is invalid'
+    });
+    expect(raced).toBe(true);
+    expect(closeCalls).toBe(1);
+  });
+
+  it.each(['report', 'scenario-chain'])(
+    'revalidates the %s identity after the bound report read',
+    async (swap) => {
+      const version = '2025-11-25';
+      const scenario = 'ping';
+      const stateDirectory = await temporaryDirectory();
+      const runDirectory = await createAcceptedReport(stateDirectory, version, scenario);
+      const reportPath = join(runDirectory, 'checks.json');
+      const scenarioPath = join(stateDirectory, 'results', version, scenario);
+      let swapped = false;
+      let closeCalls = 0;
+
+      const error = await runner
+        .validateScenarioReport(stateDirectory, version, scenario, {
+          openReport: async (path, flags) => {
+            const handle = await openFile(path, flags);
+            return {
+              stat: (...arguments_) => handle.stat(...arguments_),
+              read: async (...arguments_) => {
+                const result = await handle.read(...arguments_);
+                if (!swapped) {
+                  swapped = true;
+                  if (swap === 'report') {
+                    await rename(reportPath, `${reportPath}.original`);
+                    await writeFile(reportPath, '[{"status":"SUCCESS"}]');
+                  } else {
+                    await rename(scenarioPath, `${scenarioPath}.original`);
+                    await mkdir(scenarioPath);
+                  }
+                }
+                return result;
+              },
+              close: async () => {
+                closeCalls += 1;
+                await handle.close();
+              }
+            };
+          }
+        })
+        .catch((reason) => reason);
+
+      expect(error).toMatchObject({ name: 'ConformanceReportError' });
+      expect(swapped).toBe(true);
+      expect(closeCalls).toBe(1);
+    }
+  );
 });
 
 describe('raw streaming authentication proxy', () => {
+  class ControlledUpstreamRequest extends EventEmitter {
+    destroyed = false;
+    ended = false;
+    writes = [];
+
+    write(chunk) {
+      this.writes.push(Buffer.from(chunk));
+      return true;
+    }
+
+    end() {
+      this.ended = true;
+    }
+
+    destroy() {
+      this.destroyed = true;
+    }
+  }
+
+  class ControlledUpstreamResponse extends EventEmitter {
+    destroyed = false;
+    paused = false;
+    rawHeaders = ['Content-Type', 'text/plain'];
+    statusCode = 200;
+    statusMessage = 'OK';
+
+    pause() {
+      this.paused = true;
+    }
+
+    resume() {
+      this.paused = false;
+    }
+
+    destroy() {
+      this.destroyed = true;
+    }
+  }
+
+  async function controlledProxy() {
+    const upstreamRequest = new ControlledUpstreamRequest();
+    let deliverResponse;
+    const responseReady = deferred();
+    const proxy = await runner.startLoopbackProxy(
+      'http://127.0.0.1:1/mcp',
+      runner.CONFORMANCE_SENTINELS.token,
+      HTTP_LIMITS,
+      {
+        requestUpstream: (_options, callback) => {
+          deliverResponse = callback;
+          responseReady.resolve();
+          return upstreamRequest;
+        }
+      }
+    );
+    ownedResources.add(proxy);
+    return {
+      proxy,
+      upstreamRequest,
+      async deliver(upstreamResponse) {
+        await responseReady.promise;
+        deliverResponse(upstreamResponse);
+      }
+    };
+  }
+
   it('filters hop-by-hop headers in both directions and preserves duplicate MCP headers and chunks', async () => {
     let observed;
     let releaseSecond;
@@ -584,7 +1050,9 @@ describe('raw streaming authentication proxy', () => {
           'Mcp-Session-Id',
           'one',
           'Mcp-Session-Id',
-          'two'
+          'two',
+          'Date',
+          'Thu, 01 Jan 1970 00:00:00 GMT'
         ]);
         response.write('data: one\n\n');
         await allowSecond;
@@ -622,11 +1090,24 @@ describe('raw streaming authentication proxy', () => {
     await once(socket, 'close');
     const rawResponse = Buffer.concat(received).toString('latin1');
     expect(rawResponse).toContain('HTTP/1.1 207 Custom');
-    expect(rawResponse).toContain('Mcp-Session-Id: one');
-    expect(rawResponse).toContain('Mcp-Session-Id: two');
-    expect(rawResponse).not.toContain('X-Hop-Out-A');
-    expect(rawResponse).not.toContain('X-Hop-Out-B');
     expect(rawResponse.indexOf('data: one')).toBeLessThan(rawResponse.indexOf('data: two'));
+    const responseHeaderLines = rawResponse.split('\r\n\r\n', 1)[0].split('\r\n').slice(1);
+    const responsePairs = responseHeaderLines.map((line) => {
+      const separator = line.indexOf(':');
+      return [line.slice(0, separator), line.slice(separator + 1).trimStart()];
+    });
+    const responseConnections = responsePairs.filter(
+      ([name]) => name.toLowerCase() === 'connection'
+    );
+    expect(responseConnections.length).toBeLessThanOrEqual(1);
+    expect(responseConnections.every(([, value]) => value.toLowerCase() === 'close')).toBe(true);
+    expect(responsePairs.filter(([name]) => name.toLowerCase() !== 'connection')).toEqual([
+      ['Content-Type', 'text/event-stream'],
+      ['Mcp-Session-Id', 'one'],
+      ['Mcp-Session-Id', 'two'],
+      ['Date', 'Thu, 01 Jan 1970 00:00:00 GMT'],
+      ['Transfer-Encoding', 'chunked']
+    ]);
 
     expect(observed.method).toBe('POST');
     expect(observed.url).toBe('/mcp');
@@ -635,24 +1116,20 @@ describe('raw streaming authentication proxy', () => {
     for (let index = 0; index < observed.rawHeaders.length; index += 2) {
       pairs.push([observed.rawHeaders[index], observed.rawHeaders[index + 1]]);
     }
-    expect(pairs.filter(([name]) => name.toLowerCase() === 'host')).toEqual([
-      ['Host', `127.0.0.1:${upstreamAddress.port}`]
-    ]);
-    expect(pairs.filter(([name]) => name.toLowerCase() === 'authorization')).toEqual([
+    const requestConnections = pairs.filter(([name]) => name.toLowerCase() === 'connection');
+    expect(requestConnections.length).toBeLessThanOrEqual(1);
+    expect(requestConnections.every(([, value]) => value.toLowerCase() === 'close')).toBe(true);
+    expect(pairs.filter(([name]) => name.toLowerCase() !== 'connection')).toEqual([
+      ['Accept', 'application/json, text/event-stream'],
+      ['MCP-Protocol-Version', '2025-11-25'],
+      ['Mcp-Method', 'tools/list'],
+      ['Mcp-Name', 'server_status'],
+      ['Mcp-Param-Region', 'one'],
+      ['Mcp-Param-Region', 'two'],
+      ['Content-Length', '4'],
+      ['Host', `127.0.0.1:${upstreamAddress.port}`],
       ['Authorization', `Bearer ${runner.CONFORMANCE_SENTINELS.token}`]
     ]);
-    expect(pairs.filter(([name]) => name === 'Mcp-Param-Region')).toEqual([
-      ['Mcp-Param-Region', 'one'],
-      ['Mcp-Param-Region', 'two']
-    ]);
-    expect(pairs.some(([name]) => ['x-hop-in-a', 'x-hop-in-b'].includes(name.toLowerCase()))).toBe(
-      false
-    );
-    expect(
-      pairs
-        .filter(([name]) => name.toLowerCase() === 'connection')
-        .every(([, value]) => !value.toLowerCase().includes('x-hop-in'))
-    ).toBe(true);
   });
 
   it('rejects oversized declared and streamed bodies locally, while accepting the exact bound', async () => {
@@ -704,6 +1181,315 @@ describe('raw streaming authentication proxy', () => {
     expect(upstreamRequests).toBe(2);
   });
 
+  it('withholds an early upstream response until a chunked body is fully validated', async () => {
+    const upstreamResponded = deferred();
+    const upstreamRequestAborted = deferred();
+    const upstreamResponseClosed = deferred();
+    const upstream = createServer((request, response) => {
+      request.once('data', () => {
+        response.writeHead(200, { 'Content-Type': 'text/plain' });
+        response.write('EARLY_UPSTREAM_SUCCESS');
+        upstreamResponded.resolve();
+      });
+      request.once('aborted', () => upstreamRequestAborted.resolve());
+      response.once('close', () => upstreamResponseClosed.resolve());
+    });
+    const upstreamAddress = await listen(upstream);
+    const proxy = await runner.startLoopbackProxy(
+      `http://127.0.0.1:${upstreamAddress.port}/mcp`,
+      runner.CONFORMANCE_SENTINELS.token,
+      { ...HTTP_LIMITS, bodyBytes: 4 }
+    );
+    ownedResources.add(proxy);
+
+    const exchange = await rawRequest(
+      runner.parseExactLoopbackMcpUrl(proxy.url).port,
+      [
+        'POST /mcp HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n',
+        '2\r\nab\r\n'
+      ],
+      { waitForEnd: false }
+    );
+    await upstreamResponded.promise;
+    exchange.socket.write('3\r\ncde\r\n0\r\n\r\n');
+    if (!exchange.socket.destroyed) await once(exchange.socket, 'close');
+
+    const rawResponse = Buffer.concat(exchange.received).toString('latin1');
+    expect(rawResponse).toContain('HTTP/1.1 413 Payload Too Large');
+    expect(rawResponse).not.toContain('HTTP/1.1 200 OK');
+    expect(rawResponse).not.toContain('EARLY_UPSTREAM_SUCCESS');
+    expect(rawResponse).not.toContain(runner.CONFORMANCE_SENTINELS.token);
+    await Promise.all([upstreamRequestAborted.promise, upstreamResponseClosed.promise]);
+  });
+
+  it('destroys both upstream peers when the inbound request aborts', async () => {
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const exchange = await controlledProxy();
+      const upstreamResponse = new ControlledUpstreamResponse();
+      const inbound = await rawRequest(
+        runner.parseExactLoopbackMcpUrl(exchange.proxy.url).port,
+        ['POST /mcp HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: chunked\r\n\r\n', '2\r\nab\r\n'],
+        { waitForEnd: false }
+      );
+      await vi.waitFor(() => expect(exchange.upstreamRequest.writes).toHaveLength(1));
+      await exchange.deliver(upstreamResponse);
+
+      inbound.socket.destroy();
+      await vi.waitFor(() => {
+        expect(exchange.upstreamRequest.destroyed).toBe(true);
+        expect(upstreamResponse.destroyed).toBe(true);
+      });
+      expect(Buffer.concat(inbound.received).toString()).not.toContain(
+        runner.CONFORMANCE_SENTINELS.token
+      );
+      await Promise.resolve();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
+  it('destroys the held upstream response when the upstream ClientRequest errors', async () => {
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const exchange = await controlledProxy();
+      const upstreamResponse = new ControlledUpstreamResponse();
+      const inbound = await rawRequest(
+        runner.parseExactLoopbackMcpUrl(exchange.proxy.url).port,
+        [
+          'POST /mcp HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n',
+          '2\r\nab\r\n'
+        ],
+        { waitForEnd: false }
+      );
+      await exchange.deliver(upstreamResponse);
+
+      exchange.upstreamRequest.emit('error', new Error('POISON_UPSTREAM_REQUEST'));
+      expect(upstreamResponse.destroyed).toBe(true);
+      if (!inbound.socket.destroyed) await once(inbound.socket, 'close');
+      const body = Buffer.concat(inbound.received).toString('latin1');
+      expect(body).toContain('HTTP/1.1 502 Bad Gateway');
+      expect(body).not.toContain(runner.CONFORMANCE_SENTINELS.token);
+      await Promise.resolve();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
+  it('destroys the inbound request after a synchronous upstream construction failure', async () => {
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      let destroyInbound;
+      const createProxyServer = (options, listener) =>
+        createServer(options, (request, response) => {
+          const originalDestroy = request.destroy.bind(request);
+          destroyInbound = vi.fn((...arguments_) => originalDestroy(...arguments_));
+          request.destroy = destroyInbound;
+          listener(request, response);
+        });
+      const proxy = await runner.startLoopbackProxy(
+        'http://127.0.0.1:1/mcp',
+        runner.CONFORMANCE_SENTINELS.token,
+        HTTP_LIMITS,
+        {
+          createProxyServer,
+          requestUpstream: () => {
+            throw new Error('POISON_SYNCHRONOUS_UPSTREAM');
+          }
+        }
+      );
+      ownedResources.add(proxy);
+      const inbound = await rawRequest(
+        runner.parseExactLoopbackMcpUrl(proxy.url).port,
+        [
+          'POST /mcp HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n',
+          '2\r\nab\r\n'
+        ],
+        { waitForEnd: false }
+      );
+      if (!inbound.socket.destroyed) await once(inbound.socket, 'close');
+
+      const body = Buffer.concat(inbound.received).toString('latin1');
+      expect(body).toContain('HTTP/1.1 502 Bad Gateway');
+      expect(body).not.toContain(runner.CONFORMANCE_SENTINELS.token);
+      expect(destroyInbound).toHaveBeenCalledOnce();
+      await Promise.resolve();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
+  it('destroys the upstream ClientRequest when the upstream IncomingMessage errors', async () => {
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const exchange = await controlledProxy();
+      const upstreamResponse = new ControlledUpstreamResponse();
+      const inbound = await rawRequest(
+        runner.parseExactLoopbackMcpUrl(exchange.proxy.url).port,
+        ['POST /mcp HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'],
+        { waitForEnd: false }
+      );
+      await exchange.deliver(upstreamResponse);
+      await vi.waitFor(() => expect(exchange.upstreamRequest.ended).toBe(true));
+
+      upstreamResponse.emit('error', new Error('POISON_UPSTREAM_RESPONSE'));
+      expect(exchange.upstreamRequest.destroyed).toBe(true);
+      if (!inbound.socket.destroyed) await once(inbound.socket, 'close');
+      expect(Buffer.concat(inbound.received).toString()).not.toContain(
+        runner.CONFORMANCE_SENTINELS.token
+      );
+      await Promise.resolve();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
+  it('destroys both upstream peers when the downstream response aborts', async () => {
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const exchange = await controlledProxy();
+      const upstreamResponse = new ControlledUpstreamResponse();
+      const inbound = await rawRequest(
+        runner.parseExactLoopbackMcpUrl(exchange.proxy.url).port,
+        ['POST /mcp HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'],
+        { waitForEnd: false }
+      );
+      await exchange.deliver(upstreamResponse);
+      await vi.waitFor(() => expect(upstreamResponse.paused).toBe(false));
+      upstreamResponse.emit('data', Buffer.from('SAFE_STREAM_CHUNK'));
+      await vi.waitFor(() =>
+        expect(Buffer.concat(inbound.received).toString()).toContain('SAFE_STREAM_CHUNK')
+      );
+
+      inbound.socket.destroy();
+      await vi.waitFor(() => {
+        expect(exchange.upstreamRequest.destroyed).toBe(true);
+        expect(upstreamResponse.destroyed).toBe(true);
+      });
+      expect(Buffer.concat(inbound.received).toString()).not.toContain(
+        runner.CONFORMANCE_SENTINELS.token
+      );
+      await Promise.resolve();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
+  it.each(['inbound', 'upstream-request', 'upstream-response', 'downstream'])(
+    'couples real Node HTTP peers when the %s leg aborts',
+    async (leg) => {
+      const uncaught = [];
+      const unhandled = [];
+      const onUncaught = (error) => uncaught.push(error);
+      const onUnhandled = (error) => unhandled.push(error);
+      process.on('uncaughtExceptionMonitor', onUncaught);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        let serverRequest;
+        let serverResponse;
+        let serverSocket;
+        const upstreamResponded = deferred();
+        const upstream = createServer((request, response) => {
+          serverRequest = request;
+          serverResponse = response;
+          serverSocket = request.socket;
+          request.on('error', () => undefined);
+          response.on('error', () => undefined);
+          request.once('data', () => {
+            response.writeHead(200, { 'Content-Type': 'text/plain' });
+            response.write('REAL_UPSTREAM_CHUNK');
+            upstreamResponded.resolve();
+          });
+        });
+        const upstreamAddress = await listen(upstream);
+        let upstreamRequest;
+        let upstreamResponse;
+        let destroyUpstreamRequest;
+        let destroyUpstreamResponse;
+        const upstreamResponseReady = deferred();
+        const proxy = await runner.startLoopbackProxy(
+          `http://127.0.0.1:${upstreamAddress.port}/mcp`,
+          runner.CONFORMANCE_SENTINELS.token,
+          HTTP_LIMITS,
+          {
+            requestUpstream: (options, callback) => {
+              upstreamRequest = httpRequest(options, (response) => {
+                upstreamResponse = response;
+                const originalDestroyResponse = response.destroy.bind(response);
+                destroyUpstreamResponse = vi.fn((...arguments_) =>
+                  originalDestroyResponse(...arguments_)
+                );
+                response.destroy = destroyUpstreamResponse;
+                callback(response);
+                upstreamResponseReady.resolve();
+              });
+              const originalDestroyRequest = upstreamRequest.destroy.bind(upstreamRequest);
+              destroyUpstreamRequest = vi.fn((...arguments_) =>
+                originalDestroyRequest(...arguments_)
+              );
+              upstreamRequest.destroy = destroyUpstreamRequest;
+              return upstreamRequest;
+            }
+          }
+        );
+        ownedResources.add(proxy);
+        const inbound = await rawRequest(
+          runner.parseExactLoopbackMcpUrl(proxy.url).port,
+          [
+            'POST /mcp HTTP/1.1\r\nHost: local\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n',
+            '2\r\nab\r\n'
+          ],
+          { waitForEnd: false }
+        );
+        await Promise.all([upstreamResponded.promise, upstreamResponseReady.promise]);
+
+        if (leg === 'inbound') {
+          inbound.socket.destroy();
+        } else if (leg === 'upstream-request') {
+          upstreamRequest.destroy(new Error('REAL_UPSTREAM_REQUEST_ABORT'));
+        } else if (leg === 'upstream-response') {
+          upstreamResponse.destroy(new Error('REAL_UPSTREAM_RESPONSE_ABORT'));
+        } else {
+          inbound.socket.write('0\r\n\r\n');
+          await vi.waitFor(() =>
+            expect(Buffer.concat(inbound.received).toString()).toContain('REAL_UPSTREAM_CHUNK')
+          );
+          inbound.socket.destroy();
+        }
+
+        await vi.waitFor(() => {
+          expect(inbound.socket.destroyed).toBe(true);
+          expect(upstreamRequest.destroyed).toBe(true);
+          expect(upstreamResponse.destroyed).toBe(true);
+          expect(serverRequest.destroyed).toBe(true);
+          expect(serverResponse.destroyed).toBe(true);
+          expect(serverSocket.destroyed).toBe(true);
+        });
+        expect(destroyUpstreamRequest).toHaveBeenCalled();
+        expect(destroyUpstreamResponse).toHaveBeenCalled();
+        expect(Buffer.concat(inbound.received).toString()).not.toContain(
+          runner.CONFORMANCE_SENTINELS.token
+        );
+        await new Promise((resolveTurn) => setImmediate(resolveTurn));
+        expect(uncaught).toEqual([]);
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('uncaughtExceptionMonitor', onUncaught);
+        process.off('unhandledRejection', onUnhandled);
+      }
+    }
+  );
+
   it.each(['/', '/other', '/mcp/', '/mcp?x=1', 'http://127.0.0.1/mcp'])(
     'rejects non-exact request target %s without upstream access',
     async (target) => {
@@ -752,17 +1538,26 @@ describe('raw streaming authentication proxy', () => {
       request.end();
     });
     expect(status).toBe(200);
-    const held = Array.from({ length: 17 }, () =>
+    const held = Array.from({ length: 16 }, () =>
       connect(runner.parseExactLoopbackMcpUrl(proxy.url).port, '127.0.0.1')
     );
     for (const socket of held)
       ownedResources.add({ close: () => Promise.resolve(socket.destroy()) });
-    await new Promise((resolveConnections) => setTimeout(resolveConnections, 30));
+    await Promise.all(
+      held.map((socket) => (socket.readyState === 'open' ? undefined : once(socket, 'connect')))
+    );
+    const seventeenth = connect(runner.parseExactLoopbackMcpUrl(proxy.url).port, '127.0.0.1');
+    ownedResources.add({ close: () => Promise.resolve(seventeenth.destroy()) });
+    await vi.waitFor(() => expect(seventeenth.destroyed).toBe(true));
+    expect(constructed.listening).toBe(true);
+    expect(held.every((socket) => !socket.destroyed)).toBe(true);
     const first = proxy.close();
     const second = proxy.close();
     expect(second).toBe(first);
     await first;
-    await vi.waitFor(() => expect(held.every((socket) => socket.destroyed)).toBe(true));
+    await vi.waitFor(() =>
+      expect([...held, seventeenth].every((socket) => socket.destroyed)).toBe(true)
+    );
   });
 
   it('forwards at most the first 16 requests on one real keep-alive socket', async () => {
@@ -795,30 +1590,61 @@ describe('raw streaming authentication proxy', () => {
     expect(localOverLimit === 0 || localOverLimit === 1).toBe(true);
   });
 
-  it('force-closes a partially created listener after listen failure or non-TCP address', async () => {
-    for (const listenProxy of [
-      async () => {
-        throw new Error('POISON_LISTEN');
-      },
-      async () => 'pipe-name'
-    ]) {
-      let server;
-      await expect(
-        runner.startLoopbackProxy(
-          'http://127.0.0.1:1/mcp',
-          runner.CONFORMANCE_SENTINELS.token,
-          HTTP_LIMITS,
-          {
-            createProxyServer: (options, listener) => {
-              server = createServer(options, listener);
-              return server;
-            },
-            listenProxy
-          }
-        )
-      ).rejects.toBeDefined();
-      expect(server.listening).toBe(false);
-    }
+  it('force-closes real occupied-port and non-TCP startup failures', async () => {
+    const occupied = createServer();
+    const occupiedAddress = await listen(occupied);
+    let occupiedProxy;
+    const listenOccupied = (server) =>
+      new Promise((resolveListen, rejectListen) => {
+        server.once('error', rejectListen);
+        server.once('listening', () => resolveListen(server.address()));
+        server.listen(occupiedAddress.port, '127.0.0.1');
+      });
+    await expect(
+      runner.startLoopbackProxy(
+        'http://127.0.0.1:1/mcp',
+        runner.CONFORMANCE_SENTINELS.token,
+        HTTP_LIMITS,
+        {
+          createProxyServer: (options, listener) => {
+            occupiedProxy = createServer(options, listener);
+            return occupiedProxy;
+          },
+          listenProxy: listenOccupied
+        }
+      )
+    ).rejects.toMatchObject({ code: 'EADDRINUSE' });
+    expect(occupiedProxy.listening).toBe(false);
+
+    const pipeDirectory = await temporaryDirectory();
+    const pipePath = join(pipeDirectory, 'proxy.sock');
+    let pipeProxy;
+    let pipeClient;
+    const listenPipe = async (server) => {
+      server.listen(pipePath);
+      await once(server, 'listening');
+      pipeClient = connect(pipePath);
+      ownedResources.add({ close: () => Promise.resolve(pipeClient.destroy()) });
+      await once(pipeClient, 'connect');
+      return server.address();
+    };
+    await expect(
+      runner.startLoopbackProxy(
+        'http://127.0.0.1:1/mcp',
+        runner.CONFORMANCE_SENTINELS.token,
+        HTTP_LIMITS,
+        {
+          createProxyServer: (options, listener) => {
+            pipeProxy = createServer(options, listener);
+            return pipeProxy;
+          },
+          listenProxy: listenPipe
+        }
+      )
+    ).rejects.toBeDefined();
+    expect(pipeProxy.listening).toBe(false);
+    await vi.waitFor(() => expect(pipeClient.destroyed).toBe(true));
+    expect(await readdir(pipeDirectory)).toEqual([]);
   });
 });
 
@@ -996,7 +1822,10 @@ describe('child deadline and process ownership', () => {
       await pollProcessGone(pid);
       ownedPids.delete(pid);
     } finally {
-      closeChild(pid);
+      if (pid !== undefined && ownedPids.has(pid)) {
+        await closeChildAndConfirm(pid);
+        ownedPids.delete(pid);
+      }
     }
   }, 8_000);
 });
@@ -1035,6 +1864,82 @@ describe('orchestration startup, report, and cleanup ordering', () => {
         events.push('remove');
         await rm(path, { recursive: true, force: true });
       }
+    };
+  }
+
+  const lateStartupPhases = [
+    'makeStateDirectory',
+    'installEnvironment',
+    'createApplicationRuntime',
+    'assertProductContract',
+    'startProductHttp',
+    'startProxy',
+    'resolveExecutable'
+  ];
+
+  function lateStartupValue(phase, stateDirectory, cleanup) {
+    if (phase === 'makeStateDirectory') return stateDirectory;
+    if (phase === 'installEnvironment') return { restore: cleanup };
+    if (phase === 'createApplicationRuntime') return { application: {}, close: cleanup };
+    if (phase === 'startProductHttp') {
+      return {
+        url: 'http://127.0.0.1:1234/mcp',
+        limits: HTTP_LIMITS,
+        close: cleanup
+      };
+    }
+    if (phase === 'startProxy') {
+      return { url: 'http://127.0.0.1:5678/mcp', close: cleanup };
+    }
+    if (phase === 'resolveExecutable') return '/late/official/index.js';
+    return undefined;
+  }
+
+  async function pendingStartup(phase) {
+    vi.useFakeTimers();
+    const events = [];
+    const stateDirectory = await temporaryDirectory();
+    const acquisition = deferred();
+    const started = deferred();
+    const lateCleanup = vi.fn(async () => events.push(`late-cleanup:${phase}`));
+    const overrides = successfulOverrides(events, stateDirectory);
+    overrides.removeStateDirectory = async (path) => {
+      if (phase === 'makeStateDirectory' && path === stateDirectory) await lateCleanup();
+      events.push('remove');
+    };
+    overrides[phase] = () => {
+      started.resolve();
+      return acquisition.promise;
+    };
+    const activeTimers = new Set();
+    const referenced = [];
+    overrides.clock = {
+      set(callback, milliseconds) {
+        let handle;
+        handle = setTimeout(() => {
+          activeTimers.delete(handle);
+          callback();
+        }, milliseconds);
+        activeTimers.add(handle);
+        referenced.push(handle.hasRef());
+        return handle;
+      },
+      clear(handle) {
+        activeTimers.delete(handle);
+        clearTimeout(handle);
+      }
+    };
+    const outcome = runner.runConformance('2025-11-25', overrides).catch((error) => error);
+    await started.promise;
+    await vi.advanceTimersByTimeAsync(runner.STARTUP_PHASE_TIMEOUT_MS);
+    return {
+      acquisition,
+      activeTimers,
+      error: outcome,
+      events,
+      lateCleanup,
+      referenced,
+      value: lateStartupValue(phase, stateDirectory, lateCleanup)
     };
   }
 
@@ -1237,68 +2142,81 @@ describe('orchestration startup, report, and cleanup ordering', () => {
     expect(JSON.stringify(error)).not.toContain('POISON');
   });
 
-  it('closes a startup owner that fulfills during the late-arrival grace', async () => {
-    vi.useFakeTimers();
-    const events = [];
-    const stateDirectory = await temporaryDirectory();
-    const applicationDeferred = deferred();
-    const lateClose = vi.fn(async () => events.push('close:late-application'));
-    const overrides = successfulOverrides(events, stateDirectory);
-    overrides.createApplicationRuntime = () => {
-      events.push('application-pending');
-      return applicationDeferred.promise;
-    };
-    const activeTimers = new Set();
-    overrides.clock = {
-      set(callback, milliseconds) {
-        let handle;
-        handle = setTimeout(() => {
-          activeTimers.delete(handle);
-          callback();
-        }, milliseconds);
-        activeTimers.add(handle);
-        return handle;
-      },
-      clear(handle) {
-        activeTimers.delete(handle);
-        clearTimeout(handle);
-      }
-    };
-    const promise = runner.runConformance('2025-11-25', overrides);
-    const outcome = promise.catch((error) => error);
-    await vi.waitFor(() => expect(events).toContain('application-pending'));
-    await vi.advanceTimersByTimeAsync(runner.STARTUP_PHASE_TIMEOUT_MS);
-    applicationDeferred.resolve({ application: {}, close: lateClose });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(lateClose).toHaveBeenCalledOnce();
-    await vi.advanceTimersByTimeAsync(1_000);
-    const error = await outcome;
-    expect(error.errors.map((entry) => entry.name)).toEqual(['ConformanceStartupTimeoutError']);
-    expect(events.at(-1)).toBe('restore');
-    expect(activeTimers.size).toBe(0);
-  });
+  it.each(lateStartupPhases)(
+    'cleans or discards a late %s fulfillment during the arrival grace',
+    async (phase) => {
+      const pending = await pendingStartup(phase);
+      pending.acquisition.resolve(pending.value);
+      await vi.advanceTimersByTimeAsync(0);
+      const ownsLateCleanup = new Set([
+        'makeStateDirectory',
+        'installEnvironment',
+        'createApplicationRuntime',
+        'startProductHttp',
+        'startProxy'
+      ]).has(phase);
+      expect(pending.lateCleanup).toHaveBeenCalledTimes(ownsLateCleanup ? 1 : 0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const error = await pending.error;
+      expect(error.errors.map((entry) => [entry.name, entry.message])).toEqual([
+        ['ConformanceStartupTimeoutError', 'Conformance startup phase timed out']
+      ]);
+      expect(pending.referenced.every(Boolean)).toBe(true);
+      expect(pending.activeTimers.size).toBe(0);
+      expect(JSON.stringify(error)).not.toContain('/late/official');
+    }
+  );
 
-  it('reports an owner arriving beyond the grace as not confirmed but still observes late cleanup', async () => {
-    vi.useFakeTimers();
-    const events = [];
-    const stateDirectory = await temporaryDirectory();
-    const applicationDeferred = deferred();
-    const lateClose = vi.fn(async () => events.push('close:very-late-application'));
-    const overrides = successfulOverrides(events, stateDirectory);
-    overrides.createApplicationRuntime = () => applicationDeferred.promise;
-    const promise = runner.runConformance('2025-11-25', overrides);
-    const outcome = promise.catch((error) => error);
-    await vi.advanceTimersByTimeAsync(runner.STARTUP_PHASE_TIMEOUT_MS);
-    await vi.advanceTimersByTimeAsync(1_000);
-    const error = await outcome;
-    expect(error.errors.map((entry) => [entry.name, entry.message])).toEqual([
-      ['ConformanceStartupTimeoutError', 'Conformance startup phase timed out'],
-      ['ConformanceCleanupTimeoutError', 'Conformance cleanup timed out: late-startup']
-    ]);
-    applicationDeferred.resolve({ application: {}, close: lateClose });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(lateClose).toHaveBeenCalledOnce();
-  });
+  it.each(lateStartupPhases)(
+    'observes a late %s rejection during the arrival grace without cleanup or leakage',
+    async (phase) => {
+      const pending = await pendingStartup(phase);
+      const unhandled = vi.fn();
+      process.on('unhandledRejection', unhandled);
+      try {
+        pending.acquisition.reject(new Error(`POISON_LATE_REJECTION_${phase}`));
+        await vi.advanceTimersByTimeAsync(1_000);
+        const error = await pending.error;
+        expect(error.errors.map((entry) => [entry.name, entry.message])).toEqual([
+          ['ConformanceStartupTimeoutError', 'Conformance startup phase timed out']
+        ]);
+        expect(pending.lateCleanup).not.toHaveBeenCalled();
+        expect(pending.referenced.every(Boolean)).toBe(true);
+        expect(pending.activeTimers.size).toBe(0);
+        expect(JSON.stringify(error)).not.toContain('POISON');
+        expect(unhandled).not.toHaveBeenCalled();
+      } finally {
+        process.off('unhandledRejection', unhandled);
+      }
+    }
+  );
+
+  it.each(lateStartupPhases)(
+    'reports %s arriving after grace as unconfirmed, then cleans or discards it exactly once',
+    async (phase) => {
+      const pending = await pendingStartup(phase);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const error = await pending.error;
+      expect(error.errors.map((entry) => [entry.name, entry.message])).toEqual([
+        ['ConformanceStartupTimeoutError', 'Conformance startup phase timed out'],
+        ['ConformanceCleanupTimeoutError', 'Conformance cleanup timed out: late-startup']
+      ]);
+      expect(pending.lateCleanup).not.toHaveBeenCalled();
+
+      pending.acquisition.resolve(pending.value);
+      await vi.advanceTimersByTimeAsync(0);
+      const ownsLateCleanup = new Set([
+        'makeStateDirectory',
+        'installEnvironment',
+        'createApplicationRuntime',
+        'startProductHttp',
+        'startProxy'
+      ]).has(phase);
+      expect(pending.lateCleanup).toHaveBeenCalledTimes(ownsLateCleanup ? 1 : 0);
+      expect(pending.referenced.every(Boolean)).toBe(true);
+      expect(pending.activeTimers.size).toBe(0);
+    }
+  );
 
   it('times out report validation and keeps a late rejection observed', async () => {
     vi.useFakeTimers();
@@ -1396,6 +2314,86 @@ describe('orchestration startup, report, and cleanup ordering', () => {
       expect(activeTimers.size).toBe(0);
     }
   );
+
+  it.each(
+    ['proxy', 'http', 'application', 'temp-state', 'environment'].flatMap((slot) =>
+      ['throw', 'reject'].map((mode) => [slot, mode])
+    )
+  )('redacts and orders a %s cleanup %s with referenced timers', async (slot, mode) => {
+    vi.useFakeTimers();
+    const events = [];
+    const stateDirectory = await temporaryDirectory();
+    const overrides = successfulOverrides(events, stateDirectory);
+    overrides.runChild = async () => undefined;
+    overrides.validateReport = async () => undefined;
+    const fail = () => {
+      events.push(`cleanup-failure:${slot}`);
+      const error = new Error(`POISON_CLEANUP_${slot}_${mode}`);
+      if (mode === 'throw') throw error;
+      return Promise.reject(error);
+    };
+    if (slot === 'application') {
+      overrides.createApplicationRuntime = async () => ({ application: {}, close: fail });
+    } else if (slot === 'http') {
+      overrides.startProductHttp = async () => ({
+        url: 'http://127.0.0.1:1234/mcp',
+        limits: HTTP_LIMITS,
+        close: fail
+      });
+    } else if (slot === 'proxy') {
+      overrides.startProxy = async () => ({
+        url: 'http://127.0.0.1:5678/mcp',
+        close: fail
+      });
+    } else if (slot === 'temp-state') {
+      overrides.removeStateDirectory = fail;
+    } else {
+      overrides.installEnvironment = async () => ({ restore: fail });
+    }
+    const activeTimers = new Set();
+    const referenced = [];
+    overrides.clock = {
+      set(callback, milliseconds) {
+        let handle;
+        handle = setTimeout(() => {
+          activeTimers.delete(handle);
+          callback();
+        }, milliseconds);
+        activeTimers.add(handle);
+        referenced.push(handle.hasRef());
+        return handle;
+      },
+      clear(handle) {
+        activeTimers.delete(handle);
+        clearTimeout(handle);
+      }
+    };
+
+    const error = await runner.runConformance('2025-11-25', overrides).catch((reason) => reason);
+    expect(error.errors.map((entry) => [entry.name, entry.message])).toEqual([
+      ['ConformanceCleanupError', `Conformance operation failed: ${slot}`]
+    ]);
+    expect(JSON.stringify(error)).not.toContain('POISON');
+    expect(referenced.length).toBeGreaterThan(7);
+    expect(referenced.every(Boolean)).toBe(true);
+    expect(activeTimers.size).toBe(0);
+
+    const failureIndex = events.indexOf(`cleanup-failure:${slot}`);
+    const removeIndex = events.indexOf('remove');
+    const restoreIndex = events.indexOf('restore');
+    if (new Set(['proxy', 'http', 'application']).has(slot)) {
+      expect(failureIndex).toBeLessThan(removeIndex);
+      expect(removeIndex).toBeLessThan(restoreIndex);
+    } else if (slot === 'temp-state') {
+      expect(events.indexOf('close:proxy')).toBeLessThan(failureIndex);
+      expect(events.indexOf('close:http')).toBeLessThan(failureIndex);
+      expect(events.indexOf('close:application')).toBeLessThan(failureIndex);
+      expect(failureIndex).toBeLessThan(restoreIndex);
+    } else {
+      expect(removeIndex).toBeLessThan(failureIndex);
+      expect(failureIndex).toBe(events.length - 1);
+    }
+  });
 });
 
 describe('direct CLI boundary', () => {
@@ -1463,10 +2461,16 @@ describe('direct CLI boundary', () => {
       expect(Buffer.concat(stdout).toString()).toBe('');
       expect(Buffer.concat(stderr).toString()).toBe('Conformance run failed\n');
       expect(Buffer.concat(stderr).toString()).not.toContain('POISON');
-      if (child.pid !== undefined) ownedPids.delete(child.pid);
+      if (child.pid !== undefined) {
+        await pollProcessGone(child.pid);
+        ownedPids.delete(child.pid);
+      }
     } finally {
       clearTimeout(outer);
-      closeChild(child.pid);
+      if (child.pid !== undefined && ownedPids.has(child.pid)) {
+        await closeChildAndConfirm(child.pid);
+        ownedPids.delete(child.pid);
+      }
     }
   }, 5_000);
 });
@@ -1517,11 +2521,10 @@ describe('real official alpha.9 evidence', () => {
         closed = true;
         expect(code).toBe(0);
         expect(signal).toBeNull();
-        const output = Buffer.concat([...stdout, ...stderr]).toString();
-        expect(output).not.toContain(poison);
-        for (const sentinel of Object.values(runner.CONFORMANCE_SENTINELS)) {
-          expect(output).not.toContain(sentinel);
-        }
+        const stdoutText = Buffer.concat(stdout).toString();
+        const stderrText = Buffer.concat(stderr).toString();
+        expect(stderrText).toBe('');
+        assertOfficialStdoutContract(stdoutText, version, dedicatedTmp, poison);
         expect(await readdir(dedicatedTmp)).toEqual([]);
         expect(await readdir('.', { withFileTypes: true })).not.toEqual(
           expect.arrayContaining([expect.objectContaining({ name: 'results' })])
@@ -1535,7 +2538,10 @@ describe('real official alpha.9 evidence', () => {
         clearTimeout(terminate);
         clearTimeout(kill);
         clearTimeout(confirmation);
-        closeChild(child.pid);
+        if (child.pid !== undefined && ownedPids.has(child.pid)) {
+          await closeChildAndConfirm(child.pid);
+          ownedPids.delete(child.pid);
+        }
       }
     },
     210_000
