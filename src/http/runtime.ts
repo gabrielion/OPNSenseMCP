@@ -144,6 +144,25 @@ function diagnose(error: Error): void {
   process.stderr.write(`${error.name}\n`);
 }
 
+const EXPECTED_STANDARD_HEADER_REJECTION_PREFIXES = Object.freeze(
+  [
+    'method-header-mismatch',
+    'method-header-missing',
+    'name-header-mismatch',
+    'name-header-missing'
+  ].map((cell) => `Rejected inbound request (${cell}): `)
+);
+
+function diagnoseCreateHandlerError(value: unknown): void {
+  if (
+    value instanceof Error &&
+    EXPECTED_STANDARD_HEADER_REJECTION_PREFIXES.some((prefix) => value.message.startsWith(prefix))
+  ) {
+    return;
+  }
+  diagnose(toError(value));
+}
+
 function rejectUnreadRequest(
   request: Parameters<RequestHandler>[0],
   response: Parameters<RequestHandler>[1],
@@ -433,7 +452,7 @@ export async function startHttpWithDependencies(
     handler = dependencies.createHandler(createServerFactory(application, 'http'), {
       legacy: 'stateless',
       maxSubscriptions: limits.maxSubscriptions,
-      onerror: diagnose
+      onerror: diagnoseCreateHandlerError
     });
     const nodeHandler = dependencies.adaptHandler(handler, { onerror: diagnose });
     let mountCompatibility:

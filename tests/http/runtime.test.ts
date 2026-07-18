@@ -598,6 +598,86 @@ it('passes stateless legacy and 16 subscriptions to beta.4 and configures exact 
   }
 });
 
+it('silences only the four intentional MCP standard-header probe diagnostics', async () => {
+  const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  const startupFailure = new Error('intentional construction stop');
+  let createHandlerOnerror: ((error: Error) => void) | undefined;
+  let nodeHandlerOnerror: ((error: Error) => void) | undefined;
+  let legacyOnerror: ((error: Error) => void) | undefined;
+  const dependencies = {
+    createHandler: (
+      _factory: Parameters<typeof createMcpHandler>[0],
+      options: Parameters<typeof createMcpHandler>[1]
+    ) => {
+      if (options === undefined) throw new Error('Expected MCP handler options');
+      createHandlerOnerror = options.onerror;
+      return { close: () => Promise.resolve() } as ReturnType<typeof createMcpHandler>;
+    },
+    adaptHandler: (
+      _handler: Parameters<typeof toNodeHandler>[0],
+      options: Parameters<typeof toNodeHandler>[1]
+    ) => {
+      nodeHandlerOnerror = options?.onerror;
+      return (() => Promise.resolve()) as never;
+    },
+    createNodeServer: () => {
+      throw startupFailure;
+    },
+    listen: () => Promise.reject(new Error('unexpected listen')),
+    loadLegacySse: () =>
+      Promise.resolve({
+        mountLegacySseCompatibility: (...arguments_: unknown[]) => {
+          const options = arguments_[1] as { readonly onerror: (error: Error) => void };
+          legacyOnerror = options.onerror;
+          return { close: () => Promise.resolve() };
+        }
+      })
+  } as unknown as HttpRuntimeDependencies;
+
+  await expect(
+    startHttpWithDependencies(
+      createApplicationContext(config({ legacySseEnabled: true })),
+      { port: 0 },
+      dependencies
+    )
+  ).rejects.toBe(startupFailure);
+
+  expect(createHandlerOnerror).toBeTypeOf('function');
+  expect(nodeHandlerOnerror).toBeTypeOf('function');
+  expect(legacyOnerror).toBeTypeOf('function');
+  const reportCreateHandlerError = createHandlerOnerror as (error: Error) => void;
+  const reportNodeHandlerError = nodeHandlerOnerror as (error: Error) => void;
+  const reportLegacyError = legacyOnerror as (error: Error) => void;
+  const sentinel = 'MCP_HEADER_DIAGNOSTIC_SENTINEL';
+
+  for (const cell of [
+    'method-header-mismatch',
+    'method-header-missing',
+    'name-header-mismatch',
+    'name-header-missing'
+  ]) {
+    reportCreateHandlerError(new Error(`Rejected inbound request (${cell}): ${sentinel}`));
+  }
+  expect(write).not.toHaveBeenCalled();
+
+  const diagnosticCreateHandlerErrors = [
+    new Error(`Rejected inbound request (method-header-mismatch) ${sentinel}`),
+    new Error(`Rejected inbound request (method-header-mismatch):${sentinel}`),
+    new Error(`Rejected inbound request (method-header-mismatch-extra): ${sentinel}`),
+    new Error(`prefix Rejected inbound request (method-header-missing): ${sentinel}`),
+    new Error(`Rejected inbound request (notification-method-header-mismatch): ${sentinel}`),
+    new Error(`Internal MCP handler failure: ${sentinel}`)
+  ];
+  for (const error of diagnosticCreateHandlerErrors) reportCreateHandlerError(error);
+  (reportCreateHandlerError as unknown as (error: unknown) => void)(sentinel);
+  reportNodeHandlerError(new Error(`Node adapter failure: ${sentinel}`));
+  reportLegacyError(new Error(`Legacy SSE failure: ${sentinel}`));
+
+  const diagnostics = write.mock.calls.flat().join('');
+  expect(diagnostics).toBe('Error\n'.repeat(diagnosticCreateHandlerErrors.length + 3));
+  expect(diagnostics).not.toContain(sentinel);
+});
+
 it('projects frozen defensive HTTP settings without exposing the bearer', () => {
   const allowedHosts = ['127.0.0.1'];
   const allowedOrigins = [ORIGIN];
