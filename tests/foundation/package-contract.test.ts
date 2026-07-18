@@ -16,6 +16,7 @@ interface LockPackage {
   readonly resolved?: string;
   readonly integrity?: string;
   readonly dev?: boolean;
+  readonly devDependencies?: Record<string, string>;
 }
 
 interface LockDocument {
@@ -43,12 +44,32 @@ describe('package contract', () => {
     });
     expect(document.devDependencies['@modelcontextprotocol/client']).toBe('2.0.0-beta.4');
     expect(document.devDependencies['@modelcontextprotocol/conformance']).toBe('0.2.0-alpha.9');
+    expect(document.scripts['test:conformance:2025']).toBe(
+      'npm run build && node scripts/run-conformance.mjs 2025-11-25'
+    );
+    expect(document.scripts['test:conformance:2026']).toBe(
+      'npm run build && node scripts/run-conformance.mjs 2026-07-28'
+    );
+    expect(document.scripts['test:conformance']).toBe(
+      'npm run test:conformance:2025 && npm run test:conformance:2026'
+    );
     expect(document.devDependencies.vitest).toBe('4.1.10');
     expect(document.scripts['release:check:legacy-sse']).toBe(
       'node scripts/check-legacy-sse-dependency.mjs'
     );
 
     const lock = JSON.parse(await readFile('package-lock.json', 'utf8')) as LockDocument;
+    expect(lock.packages['']?.devDependencies?.['@modelcontextprotocol/conformance']).toBe(
+      '0.2.0-alpha.9'
+    );
+    expect(lock.packages['node_modules/@modelcontextprotocol/conformance']).toMatchObject({
+      version: '0.2.0-alpha.9',
+      resolved:
+        'https://registry.npmjs.org/@modelcontextprotocol/conformance/-/conformance-0.2.0-alpha.9.tgz',
+      integrity:
+        'sha512-Bi5P5TQlOQGPJxCT7UAHbpG7wsR7sNZskHGtCoZBo6vDu416D2FXPgM4wKbg91teIgj4HjGkhnzlvP7U2dszfQ==',
+      dev: true
+    });
     expect(lock.packages['']?.dependencies?.['@modelcontextprotocol/sdk']).toBe('1.29.0');
     const sdkNodes = Object.entries(lock.packages).filter(([path]) =>
       /(?:^|\/)node_modules\/@modelcontextprotocol\/sdk$/u.test(path)
@@ -61,6 +82,9 @@ describe('package contract', () => {
         'sha512-zo37mZA9hJWpULgkRpowewez1y6ML5GsXJPY8FI0tBBCd77HEvza4jDqRKOXgHNn867PVGCyTdzqpz0izu5ZjQ=='
     });
     expect(sdkNodes[0]?.[1].dev).toBeUndefined();
+
+    const vitestConfig = await readFile('vitest.config.ts', 'utf8');
+    expect(vitestConfig).toContain("include: ['tests/**/*.test.{ts,mjs}']");
   });
 
   it('contains no forbidden internal MCP dependency', async () => {

@@ -69,6 +69,23 @@ function versionOneMcpImports(sources: readonly SourceDocument[]): readonly (rea
   );
 }
 
+function staticImportSpecifiers(path: string, source: string): readonly string[] {
+  const sourceFile = ts.createSourceFile(
+    path,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS
+  );
+  const imports: string[] = [];
+  for (const statement of sourceFile.statements) {
+    if (ts.isImportDeclaration(statement) && ts.isStringLiteralLike(statement.moduleSpecifier)) {
+      imports.push(statement.moduleSpecifier.text);
+    }
+  }
+  return imports;
+}
+
 describe('closed capability execution boundary', () => {
   it('exposes exactly the safe catalog reference from ApplicationContext', () => {
     const config: RuntimeConfig = {
@@ -311,5 +328,86 @@ describe('closed capability execution boundary', () => {
       exports: Record<string, unknown>;
     };
     expect(Object.keys(document.exports)).toEqual(['.']);
+  });
+
+  it('routes conformance only through the owned default product HTTP stack', async () => {
+    const source = await readFile('scripts/run-conformance.mjs', 'utf8');
+    expect(source).toContain("from '../dist/app/default-application.js'");
+    expect(source).toContain("from '../dist/app/application-context.js'");
+    expect(source).toContain("from '../dist/capabilities/foundation/server-status.js'");
+    expect(source).toContain("from '../dist/http/runtime.js'");
+    expect(source).toContain('createApplicationRuntime: () => createDefaultApplicationRuntime()');
+    expect(source).toContain('startProductHttp: startHttp');
+    expect(source).toContain(
+      'dependencies.startProductHttp(applicationRuntime.application, { port: 0 })'
+    );
+    expect(source).toMatch(
+      /buildScenarioArgv\(\s*executable,\s*proxyUrl,\s*version,\s*scenario,\s*stateDirectory\s*\)/u
+    );
+    expect(source).toContain('process.execPath');
+    expect(source).toContain("stdio: 'inherit'");
+    expect(source).toContain('request.rawHeaders');
+    expect(source).toContain('upstreamResponse.rawHeaders');
+    expect(source).toContain('limits.bodyBytes');
+    expect(source).toContain('MAX_PROXY_REQUESTS_PER_SOCKET = 16');
+    expect(source).toContain('server.maxRequestsPerSocket = MAX_PROXY_REQUESTS_PER_SOCKET');
+    expect(source).toContain('assertConformanceProductContract');
+    expect(source).toContain('dependencies.assertProductContract');
+    expect(source).toContain('validateScenarioReport');
+    expect(source).toContain('dependencies.validateReport');
+    expect(source).toContain('environmentOwner.restore()');
+    expect(source).toContain('export async function runConformanceCli');
+    expect(source).toContain('dependencies.exit(1)');
+    expect(source.match(/handle\.unref\(\)/gu)).toHaveLength(1);
+    for (const forbidden of [
+      'createMcpHandler',
+      'toNodeHandler',
+      'createMcpExpressApp',
+      'createServerFactory',
+      'configureNodeHttpLimits',
+      'enforceHttpLimits',
+      'jsonBodyLimit'
+    ]) {
+      expect(source).not.toContain(forbidden);
+    }
+    expect(source).not.toMatch(/MCP_HTTP_TOKEN\s*:\s*['"]false/u);
+    expect(source).not.toContain('legacy-sse');
+    expect(source).not.toContain('express');
+    expect(source).not.toMatch(/from ['"]@modelcontextprotocol\//u);
+  });
+
+  it('keeps the conformance foundation capability dependency-closed and identity-bound', async () => {
+    const path = 'src/capabilities/foundation/server-status.ts';
+    const source = await readFile(path, 'utf8');
+    expect(staticImportSpecifiers(path, source)).toEqual(['zod/v4', '../kernel.js']);
+    for (const forbiddenImport of [
+      'opnsense',
+      'client',
+      'http',
+      'net',
+      'fs',
+      'process',
+      'transport'
+    ]) {
+      expect(
+        staticImportSpecifiers(path, source).some((specifier) =>
+          specifier.toLowerCase().includes(forbiddenImport)
+        )
+      ).toBe(false);
+    }
+    for (const forbiddenAccess of [
+      /\bfetch\s*\(/u,
+      /\b(?:Socket|createConnection|connect)\b/u,
+      /\b(?:readFile|writeFile|readdir|mkdir|rm)\b/u,
+      /\bprocess\b/u,
+      /\b(?:process\.)?env\b/u
+    ]) {
+      expect(source).not.toMatch(forbiddenAccess);
+    }
+
+    const runner = await readFile('scripts/run-conformance.mjs', 'utf8');
+    expect(runner).toContain('expected: serverStatusCapability');
+    expect(runner).toContain('dispatch: dispatchApplicationCapability');
+    expect(runner).not.toMatch(/serverStatusCapability\.(?:handler|invoke|execute)/u);
   });
 });
