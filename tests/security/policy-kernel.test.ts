@@ -194,6 +194,171 @@ describe('closed capability definitions', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
+  it('rejects a proxied feature array before it can weaken a firewall write', async () => {
+    const handler = vi.fn(() => Promise.resolve({ echoed: 'unsafe' }));
+    const definition = createKernelDefinition({ effect: 'firewall-write', handler });
+    const requiredFeatureFlags = new Proxy<FeatureFlag[]>(['ssh'], {
+      get(_target, key) {
+        if (key === 'length') return Number.NaN;
+        return undefined;
+      }
+    });
+    Reflect.set(definition.policy, 'requiredFeatureFlags', requiredFeatureFlags);
+
+    let admitted: CapabilityDefinition | undefined;
+    let admissionError: unknown;
+    try {
+      admitted = defineCapability(definition);
+    } catch (error) {
+      admissionError = error;
+    }
+
+    let dispatchResult: CapabilityResult | undefined;
+    if (admitted !== undefined) {
+      dispatchResult = await dispatcherFor([admitted]).dispatch(request(), stdioContext());
+    }
+
+    expect(admissionError).toBeInstanceOf(Error);
+    expect((admissionError as Error).message).toMatch(invalidDefinitionError);
+    expect(admitted).toBeUndefined();
+    expect(dispatchResult).toBeUndefined();
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it('rejects top-level and policy proxies without consulting their traps', () => {
+    const definition = createKernelDefinition();
+    const definitionTrap = vi.fn((): unknown => undefined);
+    const proxiedDefinition = new Proxy(definition, { get: definitionTrap });
+
+    expect(() => defineCapability(proxiedDefinition)).toThrow(invalidDefinitionError);
+    expect(definitionTrap).not.toHaveBeenCalled();
+
+    const policy = definition.policy;
+    const policyTrap = vi.fn((target: typeof policy, key: PropertyKey) =>
+      Reflect.getOwnPropertyDescriptor(target, key)
+    );
+    const proxiedPolicy = new Proxy(policy, { getOwnPropertyDescriptor: policyTrap });
+    Reflect.set(definition, 'policy', proxiedPolicy);
+
+    expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+    expect(policyTrap).not.toHaveBeenCalled();
+  });
+
+  it('rejects a top-level policy accessor without invoking it', () => {
+    const definition = createKernelDefinition();
+    const originalPolicy = definition.policy;
+    const getter = vi.fn(() => originalPolicy);
+    Object.defineProperty(definition, 'policy', {
+      configurable: true,
+      enumerable: true,
+      get: getter
+    });
+
+    expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+    expect(getter).not.toHaveBeenCalled();
+  });
+
+  it.each(['id', 'mcpName', 'title', 'description'] as const)(
+    'rejects empty or whitespace-only top-level string metadata %s',
+    (field) => {
+      for (const value of ['', '   ']) {
+        const definition = createKernelDefinition();
+        Reflect.set(definition, field, value);
+
+        expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+      }
+    }
+  );
+
+  it.each([
+    { field: 'id', value: 'i'.repeat(257) },
+    { field: 'mcpName', value: 'n'.repeat(257) },
+    { field: 'title', value: 't'.repeat(257) },
+    { field: 'description', value: 'd'.repeat(4097) }
+  ] as const)('rejects overlong top-level string metadata $field', ({ field, value }) => {
+    const definition = createKernelDefinition();
+    Reflect.set(definition, field, value);
+
+    expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+  });
+
+  it.each([
+    { field: 'id', value: 42 },
+    { field: 'mcpName', value: null },
+    { field: 'title', value: false },
+    { field: 'description', value: () => 'description' },
+    { field: 'inputSchema', value: null },
+    { field: 'outputSchema', value: { parse: 'not-callable' } },
+    { field: 'handler', value: 'not-callable' }
+  ] as const)('rejects malformed top-level field $field', ({ field, value }) => {
+    const definition = createKernelDefinition();
+    Reflect.set(definition, field, value);
+
+    expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+  });
+
+  it('rejects schema and annotations accessors without invoking them', () => {
+    const definition = createKernelDefinition();
+    const parseGetter = vi.fn(() => (value: unknown) => value);
+    const inputSchema = Object.defineProperty({}, 'parse', {
+      configurable: true,
+      enumerable: true,
+      get: parseGetter
+    });
+    Reflect.set(definition, 'inputSchema', inputSchema);
+
+    expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+    expect(parseGetter).not.toHaveBeenCalled();
+
+    const annotationsGetter = vi.fn(() => true);
+    const annotations = Object.defineProperty({}, 'readOnlyHint', {
+      configurable: true,
+      enumerable: true,
+      get: annotationsGetter
+    });
+    Reflect.set(definition, 'inputSchema', z.object({ value: z.string() }).strict());
+    Reflect.set(definition, 'annotations', annotations);
+
+    expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+    expect(annotationsGetter).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'scalar annotations', annotations: 'read-only' },
+    { label: 'unknown annotation', annotations: { custom: true } },
+    { label: 'invalid annotation value', annotations: { readOnlyHint: 'yes' } }
+  ] as const)('rejects $label', ({ annotations }) => {
+    const definition = createKernelDefinition();
+    Reflect.set(definition, 'annotations', annotations);
+
+    expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+  });
+
+  it('bounds policy metadata arrays and rejects extra array properties', () => {
+    const oversizedFlags = Array<FeatureFlag>(129).fill('ssh');
+    const oversizedDefinition = createKernelDefinition();
+    Reflect.set(oversizedDefinition.policy, 'requiredFeatureFlags', oversizedFlags);
+
+    expect(() => defineCapability(oversizedDefinition)).toThrow(invalidDefinitionError);
+
+    const extraPropertyFlags: FeatureFlag[] = ['ssh'];
+    Reflect.set(extraPropertyFlags, 'extra', 'unsafe');
+    const extraPropertyDefinition = createKernelDefinition();
+    Reflect.set(extraPropertyDefinition.policy, 'requiredFeatureFlags', extraPropertyFlags);
+
+    expect(() => defineCapability(extraPropertyDefinition)).toThrow(invalidDefinitionError);
+  });
+
+  it('rejects extra top-level and policy fields', () => {
+    const topLevelDefinition = createKernelDefinition();
+    Reflect.set(topLevelDefinition, 'unexpected', true);
+    expect(() => defineCapability(topLevelDefinition)).toThrow(invalidDefinitionError);
+
+    const policyDefinition = createKernelDefinition();
+    Reflect.set(policyDefinition.policy, 'unexpected', true);
+    expect(() => defineCapability(policyDefinition)).toThrow(invalidDefinitionError);
+  });
+
   it.each([{ transports: ['websocket'] }, { transports: ['stdio', 'websocket'] }])(
     'rejects invalid runtime transports $transports',
     ({ transports }) => {

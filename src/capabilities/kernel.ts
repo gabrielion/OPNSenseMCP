@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Buffer } from 'node:buffer';
 import { randomBytes as secureRandomBytes } from 'node:crypto';
+import { isProxy } from 'node:util/types';
 import type { ToolAnnotations } from '@modelcontextprotocol/server';
 import type * as z from 'zod/v4';
 import { FeatureFlagSchema } from '../config/feature-flags.js';
@@ -27,6 +28,41 @@ const MAX_TIMEOUT_MS = 300_000;
 const CONFIRMATION_ID_BYTES = 32;
 const CONFIRMATION_ID_ATTEMPTS = 4;
 const INVALID_CAPABILITY_DEFINITION_MESSAGE = 'Invalid capability definition';
+// Capability declarations are startup metadata, never an unbounded data channel.
+const MAX_CAPABILITY_METADATA_ARRAY_LENGTH = 128;
+const MAX_CAPABILITY_NAME_LENGTH = 256;
+const MAX_CAPABILITY_TITLE_LENGTH = 256;
+const MAX_CAPABILITY_DESCRIPTION_LENGTH = 4096;
+
+const CAPABILITY_DEFINITION_KEYS = Object.freeze([
+  'id',
+  'mcpName',
+  'title',
+  'description',
+  'inputSchema',
+  'outputSchema',
+  'annotations',
+  'transports',
+  'policy',
+  'handler'
+]);
+const CAPABILITY_POLICY_KEYS = Object.freeze([
+  'effect',
+  'resourceScopes',
+  'requiredFeatureFlags',
+  'backup',
+  'audit',
+  'confirmation',
+  'timeoutMs',
+  'redactFields'
+]);
+const TOOL_ANNOTATION_KEYS = Object.freeze([
+  'title',
+  'readOnlyHint',
+  'destructiveHint',
+  'idempotentHint',
+  'openWorldHint'
+]);
 
 const REFUSAL_MESSAGES: Readonly<Record<RefusalCode, string>> = Object.freeze({
   CANCELLED: 'Capability execution was cancelled.',
@@ -158,41 +194,131 @@ function invalidCapabilityDefinition(): never {
   throw new Error(INVALID_CAPABILITY_DEFINITION_MESSAGE);
 }
 
-function readOwnDataProperty(source: unknown, key: string): unknown {
-  if (!isRecord(source)) return invalidCapabilityDefinition();
-  const descriptor = Object.getOwnPropertyDescriptor(source, key);
-  if (descriptor === undefined || !('value' in descriptor)) {
+function readPlainOwnDataProperties(
+  source: unknown,
+  allowedKeys: readonly string[],
+  requireAll: boolean
+): ReadonlyMap<string, unknown> {
+  if (isProxy(source) || !isRecord(source)) return invalidCapabilityDefinition();
+  const prototype: unknown = Object.getPrototypeOf(source);
+  if (prototype !== Object.prototype && prototype !== null) {
     return invalidCapabilityDefinition();
   }
-  return descriptor.value;
+
+  const allowed = new Set(allowedKeys);
+  const descriptors = Object.getOwnPropertyDescriptors(source);
+  const values = new Map<string, unknown>();
+  for (const key of Reflect.ownKeys(descriptors)) {
+    if (typeof key !== 'string' || !allowed.has(key)) {
+      return invalidCapabilityDefinition();
+    }
+    const descriptor = descriptors[key];
+    if (descriptor === undefined || !('value' in descriptor)) {
+      return invalidCapabilityDefinition();
+    }
+    values.set(key, descriptor.value);
+  }
+  if (requireAll && values.size !== allowedKeys.length) {
+    return invalidCapabilityDefinition();
+  }
+  return values;
+}
+
+function readRequiredProperty(values: ReadonlyMap<string, unknown>, key: string): unknown {
+  if (!values.has(key)) return invalidCapabilityDefinition();
+  return values.get(key);
+}
+
+function readBoundedString(value: unknown, maximumLength: number): string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > maximumLength ||
+    value.trim().length === 0
+  ) {
+    return invalidCapabilityDefinition();
+  }
+  return value;
+}
+
+function readSchemaParser(schema: unknown): (value: unknown) => unknown {
+  if (isProxy(schema) || !isRecord(schema)) return invalidCapabilityDefinition();
+  const descriptor = Object.getOwnPropertyDescriptor(schema, 'parse');
+  const parseValue: unknown =
+    descriptor !== undefined && 'value' in descriptor ? descriptor.value : undefined;
+  if (
+    descriptor === undefined ||
+    !('value' in descriptor) ||
+    typeof parseValue !== 'function' ||
+    isProxy(parseValue)
+  ) {
+    return invalidCapabilityDefinition();
+  }
+  const boundParser: unknown = Function.prototype.bind.call(parseValue, schema);
+  if (typeof boundParser !== 'function' || isProxy(boundParser)) {
+    return invalidCapabilityDefinition();
+  }
+  return boundParser as (value: unknown) => unknown;
+}
+
+function copyToolAnnotations(value: unknown): ToolAnnotations {
+  const source = readPlainOwnDataProperties(value, TOOL_ANNOTATION_KEYS, false);
+  const annotations: ToolAnnotations = {};
+
+  if (source.has('title')) {
+    annotations.title = readBoundedString(source.get('title'), MAX_CAPABILITY_TITLE_LENGTH);
+  }
+  for (const key of [
+    'readOnlyHint',
+    'destructiveHint',
+    'idempotentHint',
+    'openWorldHint'
+  ] as const) {
+    if (!source.has(key)) continue;
+    const hint = source.get(key);
+    if (typeof hint !== 'boolean') return invalidCapabilityDefinition();
+    annotations[key] = hint;
+  }
+  return Object.freeze(annotations);
 }
 
 function copyDenseArray<T>(
   value: unknown,
   isValidElement: (element: unknown) => element is T
 ): readonly T[] {
-  if (!Array.isArray(value)) return invalidCapabilityDefinition();
+  if (isProxy(value) || !Array.isArray(value)) return invalidCapabilityDefinition();
+
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  if (
+    lengthDescriptor === undefined ||
+    !('value' in lengthDescriptor) ||
+    typeof lengthDescriptor.value !== 'number' ||
+    !Number.isInteger(lengthDescriptor.value) ||
+    lengthDescriptor.value < 0 ||
+    lengthDescriptor.value > MAX_CAPABILITY_METADATA_ARRAY_LENGTH
+  ) {
+    return invalidCapabilityDefinition();
+  }
+  const length = lengthDescriptor.value;
+
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.length !== length + 1) return invalidCapabilityDefinition();
 
   const copy: T[] = [];
-  for (let index = 0; index < value.length; index += 1) {
+  for (let index = 0; index < length; index += 1) {
     const key = String(index);
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (
-      !Object.hasOwn(value, key) ||
-      descriptor === undefined ||
-      !('value' in descriptor) ||
-      !isValidElement(descriptor.value)
-    ) {
+    if (descriptor === undefined || !('value' in descriptor) || !isValidElement(descriptor.value)) {
       return invalidCapabilityDefinition();
     }
     copy.push(descriptor.value);
   }
 
-  for (const key of Reflect.ownKeys(value)) {
+  for (const key of ownKeys) {
     if (key === 'length') continue;
     if (typeof key !== 'string') return invalidCapabilityDefinition();
     const index = Number(key);
-    if (!Number.isInteger(index) || index < 0 || index >= value.length || String(index) !== key) {
+    if (!Number.isInteger(index) || index < 0 || index >= length || String(index) !== key) {
       return invalidCapabilityDefinition();
     }
   }
@@ -207,8 +333,13 @@ function isCapabilityEffect(value: unknown): value is CapabilityEffect {
   return value === 'read' || value === 'local-write' || value === 'firewall-write';
 }
 
-function isString(value: unknown): value is string {
-  return typeof value === 'string';
+function isMetadataString(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= MAX_CAPABILITY_NAME_LENGTH &&
+    value.trim().length > 0
+  );
 }
 
 function isFeatureFlag(value: unknown): value is FeatureFlag {
@@ -220,34 +351,52 @@ export function defineCapability<
   TOutput extends Record<string, unknown>
 >(definition: TypedCapabilityDefinition<TInput, TOutput>): CapabilityDefinition {
   try {
-    const id = definition.id;
-    const mcpName = definition.mcpName;
-    const title = definition.title;
-    const description = definition.description;
-    const inputSchema = definition.inputSchema;
-    const outputSchema = definition.outputSchema;
-    const parseInput = inputSchema.parse.bind(inputSchema) as (value: unknown) => TInput;
-    const parseOutput = outputSchema.parse.bind(outputSchema) as (value: unknown) => TOutput;
-    const handler = definition.handler;
-    const annotations = Object.freeze({ ...definition.annotations });
-    const transports = copyDenseArray(definition.transports, isTransportKind);
-    const sourcePolicy: unknown = definition.policy;
-    const effect = readOwnDataProperty(sourcePolicy, 'effect');
+    const source = readPlainOwnDataProperties(definition, CAPABILITY_DEFINITION_KEYS, true);
+    const id = readBoundedString(readRequiredProperty(source, 'id'), MAX_CAPABILITY_NAME_LENGTH);
+    const mcpName = readBoundedString(
+      readRequiredProperty(source, 'mcpName'),
+      MAX_CAPABILITY_NAME_LENGTH
+    );
+    const title = readBoundedString(
+      readRequiredProperty(source, 'title'),
+      MAX_CAPABILITY_TITLE_LENGTH
+    );
+    const description = readBoundedString(
+      readRequiredProperty(source, 'description'),
+      MAX_CAPABILITY_DESCRIPTION_LENGTH
+    );
+    const inputSchema = readRequiredProperty(source, 'inputSchema') as z.ZodType<TInput>;
+    const outputSchema = readRequiredProperty(source, 'outputSchema') as z.ZodType<TOutput>;
+    const parseInput = readSchemaParser(inputSchema) as (value: unknown) => TInput;
+    const parseOutput = readSchemaParser(outputSchema) as (value: unknown) => TOutput;
+    const handlerValue = readRequiredProperty(source, 'handler');
+    if (typeof handlerValue !== 'function' || isProxy(handlerValue)) {
+      return invalidCapabilityDefinition();
+    }
+    const handler = handlerValue as TypedCapabilityDefinition<TInput, TOutput>['handler'];
+    const annotations = copyToolAnnotations(readRequiredProperty(source, 'annotations'));
+    const transports = copyDenseArray(readRequiredProperty(source, 'transports'), isTransportKind);
+    const sourcePolicy = readPlainOwnDataProperties(
+      readRequiredProperty(source, 'policy'),
+      CAPABILITY_POLICY_KEYS,
+      true
+    );
+    const effect = readRequiredProperty(sourcePolicy, 'effect');
     const resourceScopes = copyDenseArray(
-      readOwnDataProperty(sourcePolicy, 'resourceScopes'),
-      isString
+      readRequiredProperty(sourcePolicy, 'resourceScopes'),
+      isMetadataString
     );
     const requiredFeatureFlags = copyDenseArray(
-      readOwnDataProperty(sourcePolicy, 'requiredFeatureFlags'),
+      readRequiredProperty(sourcePolicy, 'requiredFeatureFlags'),
       isFeatureFlag
     );
-    const backup = readOwnDataProperty(sourcePolicy, 'backup');
-    const audit = readOwnDataProperty(sourcePolicy, 'audit');
-    const confirmation = readOwnDataProperty(sourcePolicy, 'confirmation');
-    const timeoutMs = readOwnDataProperty(sourcePolicy, 'timeoutMs');
+    const backup = readRequiredProperty(sourcePolicy, 'backup');
+    const audit = readRequiredProperty(sourcePolicy, 'audit');
+    const confirmation = readRequiredProperty(sourcePolicy, 'confirmation');
+    const timeoutMs = readRequiredProperty(sourcePolicy, 'timeoutMs');
     const redactFields = copyDenseArray(
-      readOwnDataProperty(sourcePolicy, 'redactFields'),
-      isString
+      readRequiredProperty(sourcePolicy, 'redactFields'),
+      isMetadataString
     );
     if (
       !isCapabilityEffect(effect) ||
