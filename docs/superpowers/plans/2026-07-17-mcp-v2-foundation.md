@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Establish a safe, strictly typed MCP v2 foundation with a closed capability catalog, a minimal fail-closed policy envelope, pedagogical MCP guidance, dual-era stdio and hardened Streamable HTTP, and executable conformance evidence for MCP `2025-11-25` and draft `2026-07-28`.
+**Goal:** Establish a safe, strictly typed MCP v2 foundation with a closed capability catalog, a fail-closed policy kernel, pedagogical MCP guidance, dual-era stdio and hardened Streamable HTTP, and executable conformance evidence for MCP `2025-11-25` and draft `2026-07-28`.
 
-**Architecture:** A transport-neutral `buildServer(context): McpServer` factory registers every primary v2 tool from one typed capability catalog and routes every call through one policy envelope. Stdio uses the dual-era `serveStdio` factory entry, HTTP uses `createMcpHandler` behind the official Node and Express adapters, and signed request state carries elicitation confirmation across protocol rounds without trusting caller booleans. One default-off compatibility module owns all deprecated v1 SSE server and transport types; it re-registers only catalog metadata and calls the same transport-neutral dispatch facade, never passing a v1 transport to a v2 server. The foundation exposes only a read-only server status capability; mutation fixtures exist only under `tests/` until backup and audit enforcement are present.
+**Architecture:** A transport-neutral `buildServer(application, transport): McpServer` factory registers every primary v2 tool from one typed capability catalog and routes every call through one closed policy kernel. The handler vault and one-shot confirmation ledger are lexical kernel authorities and are not package exports. Stdio uses the dual-era `serveStdio` factory entry, HTTP uses `createMcpHandler` behind the official Node and Express adapters, and signed request state carries only a kernel-issued confirmation challenge across protocol rounds without trusting caller booleans. One default-off compatibility module owns all deprecated v1 SSE server and transport types; it re-registers only catalog metadata and calls the same transport-neutral dispatch facade, never passing a v1 transport to a v2 server. The foundation exposes only a read-only server status capability; mutation fixtures exist only under `tests/` until backup and audit enforcement are present.
 
 **Tech Stack:** Node.js 22.19.0, TypeScript 5.9.3 strict ESM, Zod 4.2.0, `@modelcontextprotocol/server@2.0.0-beta.4`, `@modelcontextprotocol/client@2.0.0-beta.4` for tests, `@modelcontextprotocol/node@2.0.0-beta.4`, `@modelcontextprotocol/express@2.0.0-beta.4`, isolated deprecated-SSE compatibility through `@modelcontextprotocol/sdk@1.29.0`, Express 5.2.1, Vitest 4.1.10, official MCP conformance `0.2.0-alpha.9`.
 
@@ -19,7 +19,7 @@
 - Pin Zod exactly to `4.2.0`; import it as `zod/v4` and pass complete Standard Schema objects such as `z.object(...)`.
 - Keep `exactOptionalPropertyTypes` enabled. When a value may be absent, omit the optional key with a conditional spread as shown in the snippets; never materialize an absent optional property with an undefined value.
 - Import no symbol from `@modelcontextprotocol/core-internal`.
-- `buildServer(context): McpServer` is the only primary beta.4 MCP assembly point. The sole exception is Task 7b's isolated deprecated-SSE v1 adapter, which may import only shared catalog metadata and `dispatchCapability`; capability handlers import no MCP transport type and v1 objects never cross into the v2 server.
+- `buildServer(application, transport): McpServer` is the only primary beta.4 MCP assembly point. The sole exception is Task 7b's isolated deprecated-SSE v1 adapter, which may import only shared catalog metadata and `dispatchCapability`; capability handlers import no MCP transport type and v1 objects never cross into the v2 server.
 - Stdio is the default executable path and uses `serveStdio`; Streamable HTTP uses `createMcpHandler` plus `toNodeHandler` and `createMcpExpressApp`.
 - The capability catalog is closed: undeclared, hidden, disabled, transport-incompatible, and read-only-forbidden calls fail before a handler runs.
 - The foundation registers no local-write or firewall-write product capability. Mutation execution remains unavailable until strict backup and audit gates are implemented in a separately reviewed plan.
@@ -29,7 +29,7 @@
 - Streamable HTTP remains the primary HTTP transport. Deprecated SSE compatibility is isolated behind `MCP_LEGACY_SSE_ENABLED=true`, is off by default, and shares the same bearer, Host, exact-Origin, policy, body, request, stream, session, concurrency, and time limits.
 - Source-header enforcement is available from Task 1 as `npm run license:check`. It is intentionally scoped to JavaScript and TypeScript source headers; the later provenance plan owns the release-tree/history-wide license, lineage, and forbidden-expression scan.
 - Use only real Vitest 4 matchers: catch an error and apply `toMatchObject` when structured error fields are needed. For a Zod IP union use `z.union([z.ipv4(), z.ipv6()])`. Build TypeScript and execute the emitted JavaScript with Node; do not add an on-the-fly TypeScript runner.
-- Conformance runs have no expected-failure baseline and must pass the four official targeted invocations named in Task 8 against the real product server; never describe that gate as full-suite conformance.
+- Conformance runs have no expected-failure baseline and must pass the five official targeted invocations named in Task 8 against the real product server; never describe that gate as full-suite conformance.
 - Use TDD for each behavior-bearing task: red test, focused implementation, green test, broader regression gate, atomic commit.
 
 ---
@@ -64,8 +64,10 @@ Create these focused units during the tasks below:
 │   ├── capabilities/
 │   │   ├── catalog.ts                       # Closed indexed catalog
 │   │   ├── dispatch.ts                      # Sole public execution facade
+│   │   ├── exposure.ts                      # Shared allow-list predicate
 │   │   ├── foundation/server-status.ts      # Only product capability in this phase
-│   │   └── types.ts                         # Capability and policy contracts
+│   │   ├── kernel.ts                        # Closed handler/policy/confirmation authority
+│   │   └── types.ts                         # Pure capability and policy contracts
 │   ├── config/
 │   │   ├── feature-flags.ts                 # Allowed feature flag vocabulary
 │   │   └── runtime-config.ts                # Secret-safe environment parsing
@@ -90,10 +92,9 @@ Create these focused units during the tasks below:
 │   ├── server/
 │   │   └── build-server.ts                  # Single MCP assembly function
 │   └── security/
-│       ├── canonical-json.ts                # Stable argument digest
-│       ├── policy-envelope.ts               # Central minimal enforcement
-│       └── verified-confirmation.ts         # Branded internal consent proof
+│       └── canonical-json.ts                # Stable argument digest
 ├── tests/
+│   ├── architecture/execution-boundary.test.ts
 │   ├── capabilities/catalog.test.ts
 │   ├── capabilities/dispatch.test.ts
 │   ├── config/runtime-config.test.ts
@@ -108,7 +109,8 @@ Create these focused units during the tasks below:
 │   ├── mcp/instructions.test.ts
 │   ├── mcp/prompts.test.ts
 │   ├── mcp/stdio.test.ts
-│   └── security/policy-envelope.test.ts
+│   ├── security/canonical-json.test.ts
+│   └── security/policy-kernel.test.ts
 ├── tsconfig.build.json
 ├── tsconfig.json
 └── vitest.config.ts
@@ -118,9 +120,9 @@ The dependency direction is fixed:
 
 ```text
 entrypoints/http ─┐
-entrypoints/stdio ├─> server-factory -> build-server -> register-capabilities -> policy-envelope
-tests             ┘                         │                    │
-                                           prompts             catalog -> handlers
+entrypoints/stdio ├─> server-factory -> build-server -> register-capabilities -> dispatch
+tests             ┘                         │                    │            │
+                                           prompts             catalog      kernel -> handlers
 ```
 
 Capability handlers depend only on `CapabilityExecutionContext`; they never depend on `McpServer`, `ServerContext`, `Request`, Express, or a transport.
@@ -604,7 +606,7 @@ git commit -m "chore: bootstrap AGPL MCP v2 foundation"
 
 **Interfaces:**
 - Consumes: Node.js environment data supplied as `NodeJS.ProcessEnv`.
-- Produces: `FeatureFlag`, `RuntimeConfig`, and `loadRuntimeConfig(env?: NodeJS.ProcessEnv): RuntimeConfig` for the catalog, policy envelope, request-state codec, and HTTP entry.
+- Produces: `FeatureFlag`, `RuntimeConfig`, and `loadRuntimeConfig(env?: NodeJS.ProcessEnv): RuntimeConfig` for the catalog, policy kernel, request-state codec, and HTTP entry.
 
 - [ ] **Step 1: Write the failing runtime configuration tests**
 
@@ -1364,574 +1366,412 @@ git add src/capabilities src/index.ts tests/capabilities tests/fixtures/capabili
 git commit -m "feat: add closed capability catalog"
 ```
 
-### Task 4: Enforce the minimal policy envelope before every handler
+### Task 4: Enforce a closed policy kernel before every handler
 
 **Files:**
-- Create: `src/capabilities/dispatch.ts`
-- Create: `src/security/canonical-json.ts`
-- Create: `src/security/verified-confirmation.ts`
-- Create: `src/security/policy-envelope.ts`
-- Create: `tests/security/policy-envelope.test.ts`
-- Create: `tests/capabilities/dispatch.test.ts`
-- Modify: `src/capabilities/types.ts`
-- Modify: `src/index.ts`
+- Create: src/capabilities/exposure.ts
+- Create: src/capabilities/kernel.ts
+- Create: src/security/canonical-json.ts
+- Create: tests/security/canonical-json.test.ts
+- Create: tests/security/policy-kernel.test.ts
+- Create: tests/architecture/execution-boundary.test.ts
+- Modify: src/capabilities/types.ts
+- Modify: src/capabilities/catalog.ts
+- Modify: src/capabilities/foundation/server-status.ts
+- Modify: tests/fixtures/capabilities.ts
+- Modify: tests/capabilities/catalog.test.ts
 
 **Interfaces:**
-- Consumes: `CapabilityCatalog`, `CapabilityDefinition`, `RuntimeConfig`, and `TransportKind`.
-- Produces: `PolicyEnvelope`, `DispatchRequest`, `DispatchOutcome`, `CapabilityRequest`,
-  `CapabilityResult`, `ServerContext`, `VerifiedConfirmation`,
-  `verifiedConfirmationFromAdapter()`, `sha256Json()`, and the sole public execution facade
-  `dispatchCapability(request, context)` for every adapter.
+- Consumes: CapabilityCatalog, CapabilityDefinition metadata, RuntimeConfig, FeatureFlag, and
+  TransportKind.
+- Produces internally: defineCapability(), createCapabilityDispatcher(), the handler vault, the
+  bounded confirmation ledger, and the adapter-only confirmation-completion closure.
+- Produces as transport-neutral contracts: CapabilityRequest, CapabilityInvocationContext,
+  package-internal CapabilityDispatcher, CapabilityResult, ConfirmationChallenge, RefusalCode,
+  canonicalJson(), and sha256Json(). Task 6 binds the dispatcher to an opaque ApplicationContext and adds
+  the sole package-root dispatchCapability(request, context) facade.
+- The root must not export a dispatcher object/constructor, raw handler invoker, handler vault,
+  confirmation mint, settlement closure, or policy options.
 
-- [ ] **Step 1: Write adversarial policy tests before implementation**
+The handler vault, defineCapability(), dispatcher implementation, and confirmation ledger live together in
+src/capabilities/kernel.ts. Moving them into one lexical module is intentional: no importable function may
+invoke a handler without traversing the policy checks. CapabilityDefinition remains immutable metadata and
+contains no handler, resolver, service, confirmation authority, or mutable policy field.
 
-Create `tests/security/policy-envelope.test.ts`:
+- [ ] **Step 1: Write canonical-JSON and exposure tests first**
 
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import * as z from 'zod/v4';
-import { describe, expect, it, vi } from 'vitest';
-import { CapabilityCatalog } from '../../src/capabilities/catalog.js';
-import { defineCapability } from '../../src/capabilities/types.js';
-import { PolicyEnvelope } from '../../src/security/policy-envelope.js';
-import {
-  verifiedConfirmationFromAdapter,
-  type VerifiedConfirmation
-} from '../../src/security/verified-confirmation.js';
-import { createMutationFixture, createReadFixture } from '../fixtures/capabilities.js';
+Create tests/security/canonical-json.test.ts. Cover all of these cases:
 
-function envelope(
-  catalog: CapabilityCatalog,
-  options: {
-    readOnly?: boolean;
-    allowedResourceScopes?: ReadonlySet<string> | null;
-  } = {}
-) {
-  return new PolicyEnvelope(catalog, {
-    readOnly: options.readOnly ?? true,
-    allowedResourceScopes: options.allowedResourceScopes ?? null,
-    enabledFeatureFlags: new Set()
-  });
+- recursively sort object keys with the JavaScript UTF-16 code-unit relational order, including
+  numeric-looking keys, nested objects, a BMP key, and an astral key; never use localeCompare();
+- produce the same SHA-256 digest for semantically identical objects inserted in different orders;
+- preserve dense array order;
+- reject top-level and nested sparse arrays by checking every index with Object.hasOwn();
+- reject undefined, bigint, symbol, function, NaN, positive/negative Infinity, Date, class instances,
+  accessors, symbol keys, non-enumerable fields, cyclic references, and arrays with extra properties;
+- reject depth greater than 64, more than 10000 serialized nodes, or more than 262144 UTF-8 bytes before
+  building an unbounded result;
+- accept only null, booleans, strings, finite numbers, dense arrays, and enumerable data properties on
+  Object.prototype/null-prototype records;
+- prove canonicalization errors never include the rejected value.
+
+Implement src/capabilities/exposure.ts with one shared predicate:
+
+~~~ts
+export function areDeclaredResourceScopesAllowed(
+  scopes: readonly string[],
+  allowed: ReadonlySet<string> | null
+): boolean {
+  return allowed === null || (scopes.length > 0 && scopes.every((scope) => allowed.has(scope)));
 }
+~~~
 
-describe('PolicyEnvelope', () => {
-  it('validates input and output around a declared read handler', async () => {
-    const policy = envelope(new CapabilityCatalog([createReadFixture()]));
-
-    await expect(
-      policy.dispatch({ mcpName: 'test_read', rawInput: { value: 'safe' }, transport: 'stdio' })
-    ).resolves.toEqual({ kind: 'success', output: { echoed: 'safe' } });
-
-    await expect(
-      policy.dispatch({ mcpName: 'test_read', rawInput: { value: 4 }, transport: 'stdio' })
-    ).resolves.toMatchObject({ kind: 'refused', code: 'INVALID_INPUT' });
-  });
-
-  it('refuses unknown and forged hidden calls before a handler runs', async () => {
-    const handler = vi.fn();
-    const write = createMutationFixture(handler);
-    const policy = envelope(new CapabilityCatalog([write]), { readOnly: true });
-
-    await expect(
-      policy.dispatch({ mcpName: 'missing', rawInput: {}, transport: 'stdio' })
-    ).resolves.toMatchObject({ kind: 'refused', code: 'UNKNOWN_CAPABILITY' });
-    await expect(
-      policy.dispatch({ mcpName: 'test_write', rawInput: { value: 'x' }, transport: 'stdio' })
-    ).resolves.toMatchObject({ kind: 'refused', code: 'READ_ONLY' });
-    expect(handler).not.toHaveBeenCalled();
-  });
-
-  it('requires a verified digest instead of a caller confirmation boolean', async () => {
-    const handler = vi.fn();
-    const policy = envelope(new CapabilityCatalog([createMutationFixture(handler)]), {
-      readOnly: false
-    });
-
-    const first = await policy.dispatch({
-      mcpName: 'test_write',
-      rawInput: { value: 'approved' },
-      transport: 'stdio'
-    });
-    expect(first).toMatchObject({ kind: 'confirmation-required', capabilityId: 'test.write' });
-    expect(handler).not.toHaveBeenCalled();
-    if (first.kind !== 'confirmation-required') throw new Error('Expected confirmation request');
-
-    const forgedShape = {
-      capabilityId: first.capabilityId,
-      argumentsSha256: first.argumentsSha256
-    } as unknown as VerifiedConfirmation;
-    await expect(
-      policy.dispatch({
-        mcpName: 'test_write',
-        rawInput: { value: 'approved' },
-        transport: 'stdio',
-        confirmation: forgedShape
-      })
-    ).resolves.toMatchObject({ kind: 'refused', code: 'CONFIRMATION_INVALID' });
-    expect(handler).not.toHaveBeenCalled();
-
-    const forged = verifiedConfirmationFromAdapter('test.write', 'wrong-digest');
-    await expect(
-      policy.dispatch({
-        mcpName: 'test_write',
-        rawInput: { value: 'approved' },
-        transport: 'stdio',
-        confirmation: forged
-      })
-    ).resolves.toMatchObject({ kind: 'refused', code: 'CONFIRMATION_INVALID' });
-    expect(handler).not.toHaveBeenCalled();
-
-    const verified = verifiedConfirmationFromAdapter(first.capabilityId, first.argumentsSha256);
-    await expect(
-      policy.dispatch({
-        mcpName: 'test_write',
-        rawInput: { value: 'approved' },
-        transport: 'stdio',
-        confirmation: verified
-      })
-    ).resolves.toEqual({ kind: 'success', output: { accepted: 'approved' } });
-    expect(handler).toHaveBeenCalledOnce();
-  });
-
-  it('enforces resource allow-lists at direct dispatch', async () => {
-    const policy = envelope(new CapabilityCatalog([createReadFixture()]), {
-      allowedResourceScopes: new Set(['different.scope'])
-    });
-
-    await expect(
-      policy.dispatch({ mcpName: 'test_read', rawInput: { value: 'x' }, transport: 'stdio' })
-    ).resolves.toMatchObject({ kind: 'refused', code: 'RESOURCE_NOT_ALLOWED' });
-  });
-
-  it('bounds execution time and sanitizes handler failures', async () => {
-    const slow = defineCapability({
-      id: 'test.slow',
-      mcpName: 'test_slow',
-      title: 'Slow test',
-      description: 'Wait beyond the declared timeout.',
-      inputSchema: z.object({}).strict(),
-      outputSchema: z.object({ complete: z.boolean() }).strict(),
-      annotations: { readOnlyHint: true },
-      transports: ['stdio'],
-      policy: {
-        effect: 'read',
-        resourceScopes: ['test.slow'],
-        requiredFeatureFlags: [],
-        backup: 'none',
-        audit: 'none',
-        confirmation: 'none',
-        timeoutMs: 5,
-        redactFields: []
-      },
-      handler: async () => {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-        throw new Error('sensitive downstream detail');
-      }
-    });
-    const policy = envelope(new CapabilityCatalog([slow]));
-    const outcome = await policy.dispatch({ mcpName: 'test_slow', rawInput: {}, transport: 'stdio' });
-
-    expect(outcome).toMatchObject({ kind: 'refused', code: 'TIMEOUT' });
-    expect(JSON.stringify(outcome)).not.toContain('sensitive downstream detail');
-  });
-});
-```
-
-- [ ] **Step 2: Run the policy tests and verify the red state**
+Modify CapabilityCatalog.listExposed() to use that exact predicate. With an active allow-list, an empty
+declared scope is hidden and every declared scope must be allowed. With no allow-list, an empty scope remains
+eligible for the other gates. Add catalog tests for allowed, partially allowed, disallowed, and empty scopes.
+Direct dispatch must later call the same predicate, so listing and execution cannot drift.
 
 Run:
 
-```bash
-npx vitest run tests/security/policy-envelope.test.ts
-```
+~~~bash
+npx vitest run tests/security/canonical-json.test.ts tests/capabilities/catalog.test.ts
+~~~
 
-Expected: FAIL because the security modules do not exist.
+Expected: RED for the missing canonical and exposure modules, not for a fixture or import error.
 
-- [ ] **Step 3: Add deterministic argument hashing**
+- [ ] **Step 2: Specify the pure contracts and closed definition boundary**
 
-Create `src/security/canonical-json.ts`:
+Refactor src/capabilities/types.ts into pure types only. It must not contain a WeakMap, handler, invoker, or
+definition factory. Keep the existing metadata vocabulary and add these transport-neutral shapes:
 
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import { createHash } from 'node:crypto';
-
-type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
-
-function normalize(value: unknown): JsonValue {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') return value;
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (Array.isArray(value)) return value.map((item) => normalize(item));
-  if (typeof value === 'object') {
-    const prototype = Object.getPrototypeOf(value) as object | null;
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw new TypeError('Only plain JSON objects can be canonicalized');
-    }
-    return Object.fromEntries(
-      Object.entries(value)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, item]) => [key, normalize(item)])
-    );
-  }
-  throw new TypeError('Value is not canonical JSON');
+~~~ts
+export interface CapabilityRequest {
+  readonly name: string;
+  readonly arguments: unknown;
 }
 
-export function canonicalJson(value: unknown): string {
-  return JSON.stringify(normalize(value));
+export interface CapabilityInvocationContext {
+  readonly transport: TransportKind;
+  readonly signal?: AbortSignal;
+  readonly principalId?: string;
 }
 
-export function sha256Json(value: unknown): string {
-  return createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex');
-}
-```
-
-- [ ] **Step 4: Define the branded adapter-only confirmation value**
-
-Create `src/security/verified-confirmation.ts`:
-
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-const verifiedConfirmationBrand: unique symbol = Symbol('verified-confirmation');
-const verifiedConfirmations = new WeakSet<object>();
-
-export interface VerifiedConfirmation {
+export interface ConfirmationChallenge {
+  readonly confirmationId: string;
   readonly capabilityId: string;
   readonly argumentsSha256: string;
-  readonly [verifiedConfirmationBrand]: true;
+  readonly expiresAt: string;
 }
-
-export function verifiedConfirmationFromAdapter(
-  capabilityId: string,
-  argumentsSha256: string
-): VerifiedConfirmation {
-  const confirmation: VerifiedConfirmation = Object.freeze({
-    capabilityId,
-    argumentsSha256,
-    [verifiedConfirmationBrand]: true as const
-  });
-  verifiedConfirmations.add(confirmation);
-  return confirmation;
-}
-
-export function isVerifiedConfirmation(value: unknown): value is VerifiedConfirmation {
-  return typeof value === 'object' && value !== null && verifiedConfirmations.has(value);
-}
-```
-
-- [ ] **Step 5: Implement the central policy envelope**
-
-Create `src/security/policy-envelope.ts`:
-
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import type { CapabilityCatalog } from '../capabilities/catalog.js';
-import type {
-  CapabilityDefinition,
-  CapabilityExecutionContext,
-  TransportKind
-} from '../capabilities/types.js';
-import { invokeCapabilityHandler } from '../capabilities/types.js';
-import type { FeatureFlag } from '../config/feature-flags.js';
-import { sha256Json } from './canonical-json.js';
-import {
-  isVerifiedConfirmation,
-  type VerifiedConfirmation
-} from './verified-confirmation.js';
 
 export type RefusalCode =
   | 'CANCELLED'
+  | 'CONFIRMATION_DECLINED'
   | 'CONFIRMATION_INVALID'
+  | 'CONFIRMATION_UNAVAILABLE'
   | 'EXECUTION_FAILED'
   | 'FEATURE_DISABLED'
   | 'INVALID_INPUT'
   | 'INVALID_OUTPUT'
+  | 'INVALID_POLICY'
+  | 'OUTCOME_INDETERMINATE'
   | 'READ_ONLY'
   | 'RESOURCE_NOT_ALLOWED'
   | 'TIMEOUT'
   | 'UNKNOWN_CAPABILITY'
   | 'UNSUPPORTED_TRANSPORT';
 
-export type DispatchOutcome =
+export type CapabilityResult =
   | { readonly kind: 'success'; readonly output: Record<string, unknown> }
-  | {
-      readonly kind: 'confirmation-required';
-      readonly capability: CapabilityDefinition;
-      readonly capabilityId: string;
-      readonly argumentsSha256: string;
-    }
-  | {
-      readonly kind: 'refused';
-      readonly code: RefusalCode;
-      readonly message: string;
-    };
+  | { readonly kind: 'confirmation-required'; readonly challenge: ConfirmationChallenge }
+  | { readonly kind: 'refused'; readonly code: RefusalCode; readonly message: string };
 
-export interface DispatchRequest {
-  readonly mcpName: string;
-  readonly rawInput: unknown;
-  readonly transport: TransportKind;
-  readonly principalId?: string;
-  readonly signal?: AbortSignal;
-  readonly confirmation?: VerifiedConfirmation;
+export interface CapabilityDispatcher {
+  listExposed(transport: TransportKind): readonly CapabilityDefinition[];
+  dispatch(
+    request: CapabilityRequest,
+    context: CapabilityInvocationContext
+  ): Promise<CapabilityResult>;
 }
+~~~
 
-export interface PolicyEnvelopeOptions {
+CapabilityDispatcher is exported only from its source module for internal composition and tests; src/index.ts
+must not re-export it. Keep package.json exports exactly { ".": ... }; internal source paths are not package
+subpath exports.
+
+Move TypedCapabilityDefinition, defineCapability(), and the private handler WeakMap from types.ts into
+src/capabilities/kernel.ts. Update server-status.ts and test fixtures to import defineCapability() from the
+kernel. Validate definition.policy.timeoutMs synchronously as an integer in the inclusive range 1..300000.
+At definition time, capture the input schema, output schema, their bound parser functions, and handler into
+lexical constants before constructing or returning anything; no stored closure may dereference the mutable
+caller-owned definition object later. Copy and freeze all caller-owned arrays/metadata exactly as Task 3
+already requires. Reassigning the source object's handler, either schema, annotations, policy, or nested
+arrays after defineCapability() must have no effect on parsing, metadata, or execution. Before invoking a
+handler, defensively revalidate the timeout so a structurally forged catalog entry yields sanitized
+INVALID_POLICY rather than a thrown RangeError or an unbounded call.
+
+The kernel also records every returned definition in a private WeakSet. Export one source-internal predicate
+isKernelDefinedCapability() for CapabilityCatalog construction only; it conveys no handler authority.
+CapabilityCatalog rejects any structural/spread/forged definition before indexing it. The architecture test
+allows only catalog.ts to import that predicate. Update the Task 3 duplicate-name fixture to create a second
+sealed definition through defineCapability() instead of spreading an existing definition. Likewise replace
+every existing catalog test that currently spreads a definition to alter transports, feature flags, or
+resource scopes with a fixture factory that creates a new sealed definition through defineCapability(); no
+positive-path test may normalize forgery by inserting a structural clone. Keep one explicit negative test
+that proves such a spread is rejected.
+
+Add tests proving NaN, Infinity, -1, 0, 1.5, and 300001 are rejected while 1 and 300000 are accepted. Prove
+the real catalog rejects an unsealed structural definition. Then inject a test-only structural catalog view
+that returns malformed timeout metadata and prove dispatch still returns INVALID_POLICY without throwing or
+invoking any handler. Retain a mutable source definition object in a test, replace its handler and both schema
+fields after defineCapability(), mutate its metadata/arrays, and prove the sealed capability still uses only
+the captured original parser/handler and copied metadata.
+
+- [ ] **Step 3: Write the adversarial kernel tests before implementation**
+
+Create tests/security/policy-kernel.test.ts. A helper may call the internal
+createCapabilityDispatcher(catalog, options, installCompletion?, testRuntime?) factory, but production
+package exports must not expose that factory. The factory consumes a minimal type-only CapabilityCatalogView
+with getByMcpName() and listExposed(); CapabilityCatalog is its production implementation, while one focused
+test view supplies malformed metadata to prove defensive refusal.
+
+The immutable options are:
+
+~~~ts
+interface CapabilityPolicyOptions {
   readonly readOnly: boolean;
   readonly allowedResourceScopes: ReadonlySet<string> | null;
   readonly enabledFeatureFlags: ReadonlySet<FeatureFlag>;
 }
+~~~
 
-function refused(code: RefusalCode, message: string): DispatchOutcome {
-  return { kind: 'refused', code, message };
-}
+The factory copies both sets, freezes the returned dispatcher, and never exposes its catalog or options as
+mutable properties. The test-only runtime dependency object may inject now(), randomBytes(), confirmation
+TTL, and ledger capacity; production defaults are Date.now, node:crypto randomBytes, 300000 ms, and 1024
+pending challenges. Validate those injected bounds at construction.
 
-async function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  const abortError = () =>
-    signal.reason instanceof Error ? signal.reason : new Error('Capability operation aborted');
-  if (signal.aborted) throw abortError();
-  return await new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(abortError());
-    signal.addEventListener('abort', onAbort, { once: true });
-    operation.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
-  });
-}
+Write failing tests for this exact pre-handler order:
 
-export class PolicyEnvelope {
-  constructor(
-    readonly catalog: CapabilityCatalog,
-    readonly options: PolicyEnvelopeOptions
-  ) {}
+1. catalog lookup;
+2. transport;
+3. read-only;
+4. required feature flags;
+5. declared resource allow-list via areDeclaredResourceScopesAllowed();
+6. pre-aborted caller cancellation;
+7. Zod input parsing;
+8. canonical argument digest;
+9. timeout-policy validation;
+10. confirmation issuance/validation when declared;
+11. handler invocation;
+12. Zod output parsing.
 
-  listExposed(transport: TransportKind): readonly CapabilityDefinition[] {
-    return this.catalog.listExposed({
-      readOnly: this.options.readOnly,
-      transport,
-      enabledFeatureFlags: this.options.enabledFeatureFlags,
-      allowedResourceScopes: this.options.allowedResourceScopes
-    });
-  }
+Every refusal before step 10 asserts that the handler was not called. Mutate the caller-owned option sets
+after construction and prove listing/dispatch retains the copied state. Prove Object.isFrozen(dispatcher)
+and that no catalog/options/handler property is reachable from it.
 
-  async dispatch(request: DispatchRequest): Promise<DispatchOutcome> {
-    const capability = this.catalog.getByMcpName(request.mcpName);
-    if (capability === undefined) {
-      return refused('UNKNOWN_CAPABILITY', 'The requested capability is not declared.');
-    }
-    if (!capability.transports.includes(request.transport)) {
-      return refused('UNSUPPORTED_TRANSPORT', 'The capability is unavailable on this transport.');
-    }
-    if (this.options.readOnly && capability.policy.effect !== 'read') {
-      return refused('READ_ONLY', 'The server is operating in read-only mode.');
-    }
-    if (
-      capability.policy.requiredFeatureFlags.some(
-        (flag) => !this.options.enabledFeatureFlags.has(flag)
-      )
-    ) {
-      return refused('FEATURE_DISABLED', 'A required feature is disabled.');
-    }
-    if (
-      this.options.allowedResourceScopes !== null &&
-      capability.policy.resourceScopes.some(
-        (resource) => !this.options.allowedResourceScopes?.has(resource)
-      )
-    ) {
-      return refused('RESOURCE_NOT_ALLOWED', 'The capability is outside the resource allow-list.');
-    }
+Cover at least:
 
-    let normalizedInput: unknown;
-    try {
-      normalizedInput = capability.parseInput(request.rawInput);
-    } catch {
-      return refused('INVALID_INPUT', 'The capability arguments are invalid.');
-    }
+- unknown name -> UNKNOWN_CAPABILITY;
+- unsupported transport -> UNSUPPORTED_TRANSPORT;
+- write in read-only mode -> READ_ONLY;
+- missing feature -> FEATURE_DISABLED;
+- active allow-list with empty, partially allowed, or disallowed declared scopes ->
+  RESOURCE_NOT_ALLOWED;
+- pre-aborted caller -> CANCELLED without allocating a confirmation challenge;
+- malformed input or schema transform to Date -> INVALID_INPUT;
+- invalid output -> INVALID_OUTPUT;
+- handler error containing a sentinel secret -> EXECUTION_FAILED with no sentinel in any result;
+- malformed timeout metadata -> INVALID_POLICY;
+- all refusal messages are fixed literals and contain no supplied argument, schema issue, secret, or
+  downstream exception text.
 
-    const argumentsSha256 = sha256Json(normalizedInput);
-    if (capability.policy.confirmation === 'elicitation') {
-      if (request.confirmation === undefined) {
-        return {
-          kind: 'confirmation-required',
-          capability,
-          capabilityId: capability.id,
-          argumentsSha256
-        };
-      }
-      if (
-        !isVerifiedConfirmation(request.confirmation) ||
-        request.confirmation.capabilityId !== capability.id ||
-        request.confirmation.argumentsSha256 !== argumentsSha256
-      ) {
-        return refused('CONFIRMATION_INVALID', 'The confirmation does not match this request.');
-      }
-    }
+Parsing never hands a Zod-returned reference directly to a resolver or handler. Immediately after a
+successful parse, canonicalize the normalized value once, compute the digest from those exact canonical
+UTF-8 bytes, parse those same bytes into a fresh plain JSON tree, and deeply freeze that tree. Resolvers and
+handlers receive only this canonical snapshot. This deliberately normalizes representations that canonical
+JSON treats as equal (including `-0` to `0`), so two equal digests cannot produce observably different
+handler inputs. Repeated aliases are materialized as independent JSON subtrees. Test mutation of nested
+`z.unknown()`/`z.any()` values before and after handler startup, source-object/schema/handler replacement,
+aliasing, and `Object.is(value, -0)`.
 
-    const timeoutSignal = AbortSignal.timeout(capability.policy.timeoutMs);
-    const signal = request.signal
-      ? AbortSignal.any([request.signal, timeoutSignal])
-      : timeoutSignal;
-    const executionContext: CapabilityExecutionContext = {
-      signal,
-      readOnly: this.options.readOnly,
-      transport: request.transport,
-      ...(request.principalId === undefined ? {} : { principalId: request.principalId })
-    };
+The operation runner accepts a thunk, not an already-started Promise. It checks caller cancellation before
+installing listeners, installs caller and timeout listeners, rechecks cancellation, and only then calls the
+handler thunk inside try/catch. The first observed abort stores a private typed cause and wins permanently.
+Use a cancellable injected/setTimeout timer plus an internal AbortController rather than an uncollectable
+AbortSignal.timeout timer. Clean every listener and clear the timer on success, synchronous throw, rejected
+Promise, caller cancellation, and timeout.
 
-    try {
-      const rawOutput = await raceWithAbort(
-        invokeCapabilityHandler(capability, normalizedInput, executionContext),
-        signal
-      );
-      try {
-        return { kind: 'success', output: capability.parseOutput(rawOutput) };
-      } catch {
-        return refused('INVALID_OUTPUT', 'The capability returned an invalid result.');
-      }
-    } catch {
-      if (timeoutSignal.aborted) {
-        return refused('TIMEOUT', 'The capability exceeded its execution timeout.');
-      }
-      if (request.signal?.aborted) {
-        return refused('CANCELLED', 'The capability call was cancelled.');
-      }
-      return refused('EXECUTION_FAILED', 'The capability could not complete safely.');
-    }
-  }
-}
-```
+Abort completion is effect-aware. Before handler entry every effect may return CANCELLED. After handler
+entry, a read may return CANCELLED/TIMEOUT promptly and safely observe any late read rejection. A
+local-write or firewall-write must never return while its handler can still produce a late side effect: the
+kernel aborts the internal signal, then awaits the handler's settlement. If abort/timeout won the race, the
+eventual value/error is discarded and the fixed result is OUTCOME_INDETERMINATE. Therefore `timeoutMs` is a
+cancellation deadline, not a false hard-stop claim for an in-flight write. A non-cooperative write that never
+settles leaves dispatch pending; downstream product code must use bounded transport operations and retain its
+lock/audit/backup ownership until settlement. Product Task 5 adds audited reconciliation semantics for this
+code. No timer/listener is cleaned before the late write promise settles.
 
-- [ ] **Step 6: Add and test the sole public dispatch facade**
+Add deterministic cancellation tests:
 
-Now that the policy and confirmation modules exist, add these type-only imports to
-`src/capabilities/types.ts`:
+- a pre-aborted caller signal returns CANCELLED and the handler is never invoked;
+- for a read fixture, caller-first returns CANCELLED even if the timeout later fires;
+- for a read fixture, timeout-first returns TIMEOUT even if the caller later aborts;
+- a read and a write handler waiting on context.signal both observe abortion with their distinct result
+  semantics;
+- a write handler that ignores context.signal and performs a delayed side effect cannot outlive the dispatch
+  result: dispatch stays pending, then returns OUTCOME_INDETERMINATE only after handler settlement;
+- the same ignored-signal fixture proves no side effect occurs after the result and no success/output leaks;
+- listener counts return to baseline on every path;
+- fake-timer counts return to zero on every path;
+- synchronous throw and Promise rejection containing different sentinel secrets both become sanitized
+  EXECUTION_FAILED;
+- no timer/listener race can turn a genuine handler exception into TIMEOUT or CANCELLED.
 
-```ts
-import type { CapabilityCatalog } from './catalog.js';
-import type { RuntimeConfig } from '../config/runtime-config.js';
-import type { DispatchOutcome, PolicyEnvelope } from '../security/policy-envelope.js';
-import type { VerifiedConfirmation } from '../security/verified-confirmation.js';
-```
+Use fake timers or injected controllable AbortSignals; never rely on wall-clock sleeps.
 
-Append the adapter request/context contracts to that file:
+Implement steps 1–9 once in a private synchronous authorizeRequest() helper that returns the sealed
+definition, fresh deeply frozen canonical input snapshot, canonical argument digest computed from that same
+snapshot string, and a frozen effectiveResourceScopes array.
+Both initial dispatch and accepted/declined settlement call this same helper; neither copies the gates.
+Foundation effective scopes equal the declared scopes. With an active allow-list they must be non-empty and
+all allowed; with no allow-list an empty declaration may pass. Product Task 5 extends this single helper with
+its sealed dynamic resolver rather than adding a second authorization path.
 
-```ts
-export interface CapabilityRequest {
-  readonly name: string;
-  readonly arguments: unknown;
-}
+- [ ] **Step 4: Implement canonical hashing and the closed kernel**
 
-export type CapabilityResult = DispatchOutcome;
+Implement src/security/canonical-json.ts without JSON-object locale sorting and without Array.map() over
+unvalidated arrays. Iterate dense indices with a for loop, inspect property descriptors, and recurse with an
+ancestor stack so cycles fail deterministically while repeated non-cyclic references serialize normally.
+Track depth, serialized node count, and cumulative UTF-8 byte count against the exact limits above before
+concatenating an unbounded result. Provide an internal canonical-snapshot helper that parses the completed
+canonical string into a fresh plain JSON tree and recursively freezes it; hashing and execution consume that
+same completed string, never two serializations. Wrap input snapshot failures as INVALID_INPUT and
+post-schema output snapshot failures as INVALID_OUTPUT.
 
-export interface ServerContext {
-  readonly config: RuntimeConfig;
-  readonly catalog: CapabilityCatalog;
-  readonly policy: PolicyEnvelope;
-  readonly transport: TransportKind;
-  readonly signal?: AbortSignal;
-  readonly principalId?: string;
-  readonly confirmation?: VerifiedConfirmation;
-}
-```
+Implement src/capabilities/kernel.ts with these private authorities:
 
-Create `src/capabilities/dispatch.ts`:
+- capabilityHandlers: WeakMap<CapabilityDefinition, handler>;
+- kernelDefinedCapabilities: WeakSet<CapabilityDefinition>;
+- pendingConfirmations: Map<string, PendingConfirmation> owned by each dispatcher;
+- a private invoke function that is never exported;
+- a private abort-cause type;
+- the operation thunk/cleanup helper;
+- the static refusal constructor.
 
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import type {
-  CapabilityRequest,
-  CapabilityResult,
-  ServerContext
-} from './types.js';
+No file named verified-confirmation.ts and no VerifiedConfirmation type or mint function may exist.
 
-export function dispatchCapability(
-  request: CapabilityRequest,
-  context: ServerContext
-): Promise<CapabilityResult> {
-  return context.policy.dispatch({
-    mcpName: request.name,
-    rawInput: request.arguments,
-    transport: context.transport,
-    ...(context.signal === undefined ? {} : { signal: context.signal }),
-    ...(context.principalId === undefined ? {} : { principalId: context.principalId }),
-    ...(context.confirmation === undefined ? {} : { confirmation: context.confirmation })
-  });
-}
-```
+For a capability whose policy.confirmation is elicitation, the first valid dispatch must not invoke the
+handler. It creates a cryptographically random 32-byte base64url confirmationId, records a private pending
+entry, and returns only a deeply frozen primitive challenge. The pending entry binds:
 
-Create `tests/capabilities/dispatch.test.ts`:
+- confirmationId;
+- capability ID and MCP name;
+- canonical argument digest;
+- frozen effective resource scopes used by the authorization decision;
+- transport;
+- principalId, including the explicit absence of one;
+- expiry;
 
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import { describe, expect, it, vi } from 'vitest';
-import { CapabilityCatalog } from '../../src/capabilities/catalog.js';
-import { dispatchCapability } from '../../src/capabilities/dispatch.js';
-import { loadRuntimeConfig } from '../../src/config/runtime-config.js';
-import { PolicyEnvelope } from '../../src/security/policy-envelope.js';
-import { createMutationFixture } from '../fixtures/capabilities.js';
+Do not retain normalized input or raw arguments in the ledger. On accepted completion, reparse the repeated
+arguments and use that fresh normalized value only after its canonical digest matches the pending digest.
 
-describe('dispatchCapability', () => {
-  it('cannot bypass the policy envelope for a forged direct call', async () => {
-    const handler = vi.fn();
-    const catalog = new CapabilityCatalog([createMutationFixture(handler)]);
-    const config = loadRuntimeConfig({ MCP_REQUEST_STATE_SECRET: '0'.repeat(32) });
-    const policy = new PolicyEnvelope(catalog, config);
+Prune expired entries before capacity checks. Refuse with CONFIRMATION_UNAVAILABLE if the bounded ledger is
+full or a unique ID cannot be allocated after exactly four attempts. Never evict an unexpired challenge
+to admit another one.
 
-    await expect(
-      dispatchCapability(
-        { name: 'test_write', arguments: { value: 'forged' } },
-        { config, catalog, policy, transport: 'stdio' }
-      )
-    ).resolves.toMatchObject({ kind: 'refused', code: 'READ_ONLY' });
-    expect(handler).not.toHaveBeenCalled();
-  });
-});
-```
+The dispatcher factory accepts an optional installation callback that receives one adapter settlement
+closure. That closure is adapter authority and remains outside CapabilityDispatcher. It accepts an exact
+decision (accept or decline), claims (confirmationId, capabilityId, argumentsSha256), the repeated
+CapabilityRequest, and the current CapabilityInvocationContext. For either decision it must synchronously,
+before its first await and before handler startup:
 
-Run:
+1. locate the pending entry; an unknown ID changes nothing;
+2. delete a known entry immediately so every settlement attempt is one-shot, including malformed, expired,
+   cross-capability, cross-transport, or cross-principal attempts;
+3. validate expiry, capability, digest, MCP name, transport, and principal binding;
+4. rerun authorizeRequest() to reparse the repeated arguments and recompute their canonical digest;
+5. require an exact effective-scope array match, thereby repeating the current
+   transport/read-only/feature/resource gates;
+6. execute only the fresh normalized input returned by this settlement's authorizeRequest() call.
 
-```bash
-npx vitest run tests/capabilities/dispatch.test.ts
-```
+Any mismatch returns CONFIRMATION_INVALID, leaves no known challenge reusable, and does not invoke the
+handler. A valid decline returns
+CONFIRMATION_DECLINED without invoking. Whether the decision is decline or accepted execution succeeds,
+fails, times out, is cancelled, or produces invalid output, the deleted confirmation remains consumed.
+Sequential and concurrent replay therefore both fail. Confirmation of one request can never authorize
+another capability, arguments object, transport, or principal.
 
-Expected: one facade test passes and its handler is never called.
+After successful output-schema parsing, canonical-snapshot and deeply freeze the output before placing it in
+CapabilityResult. Never return a schema-owned or handler-owned reference. Mutation of a nested output after
+handler resolution must not alter the result or introduce an unvalidated/sensitive value.
 
-- [ ] **Step 7: Export the envelope surface**
+The completion closure is passed only to the MCP adapter during composition in Task 6. It is never attached
+to ApplicationContext, ServerContext, CapabilityDispatcher, a definition, the package root, or a global.
+The Task 4 test captures it directly only to exercise the security boundary.
 
-Append to `src/index.ts`:
+Write confirmation tests for:
 
-```ts
-export { PolicyEnvelope } from './security/policy-envelope.js';
-export { dispatchCapability } from './capabilities/dispatch.js';
-export type {
-  CapabilityRequest,
-  CapabilityResult,
-  ServerContext
-} from './capabilities/types.js';
-export type {
-  DispatchOutcome,
-  DispatchRequest,
-  PolicyEnvelopeOptions,
-  RefusalCode
-} from './security/policy-envelope.js';
-```
+- challenge format, TTL, and absence of CapabilityDefinition/handler data;
+- exact success once;
+- exact decline once followed by a rejected replay;
+- wrong ID, capability, digest, repeated arguments, transport, and principal;
+- mutation of a nested caller-owned object after challenge issuance; settlement hashes and executes only a
+  fresh parse and never the mutated first-round reference;
+- mutation of repeated arguments after settlement begins and mutation of handler-owned nested output after
+  resolution; both returned snapshots remain unchanged and deeply frozen;
+- expiration;
+- sequential replay;
+- two concurrent completion calls, exactly one of which can reach the handler;
+- handler failure consumes the challenge;
+- ledger capacity and expired-entry pruning;
+- no confirmation settlement field on CapabilityRequest, CapabilityInvocationContext, CapabilityDispatcher,
+  or any result.
 
-- [ ] **Step 8: Run policy and full deterministic tests**
+- [ ] **Step 5: Add the architecture gate before application composition**
 
-Run:
+Create tests/architecture/execution-boundary.test.ts. It reads source/package metadata and fails if:
 
-```bash
-npx vitest run tests/security/policy-envelope.test.ts tests/capabilities/dispatch.test.ts
-npm test
+- invokeCapabilityHandler, VerifiedConfirmation, verifiedConfirmationFromAdapter, or a public confirmation
+  property reappears;
+- any module outside src/capabilities/kernel.ts declares or reads capabilityHandlers;
+- any module other than src/capabilities/catalog.ts imports isKernelDefinedCapability;
+- src/index.ts exports CapabilityDispatcher, createCapabilityDispatcher, a settlement closure/type, handler
+  authority, policy options, or raw kernel internals;
+- package.json adds an internal subpath export;
+- a CapabilityDefinition exposes handler, preflight, service, or confirmation authority.
+
+Task 4 adds no execution export at the package root. defineCapability() remains an internal relative import
+for capability factories. Task 6 adds the opaque application binding and public free-function facade.
+
+- [ ] **Step 6: Run focused and complete deterministic gates**
+
+Run with Node 22:
+
+~~~bash
+npx vitest run \
+  tests/security/canonical-json.test.ts \
+  tests/security/policy-kernel.test.ts \
+  tests/capabilities/catalog.test.ts \
+  tests/architecture/execution-boundary.test.ts
+npm run build
 npm run typecheck
 npm run lint
-```
+npm run format:check
+npm test
+npm audit --omit=dev
+git diff --check
+~~~
 
-Expected: five policy tests and one facade test pass, the full test suite passes, and static gates exit `0`.
+Expected: all tests and static gates exit 0; npm audit reports zero production vulnerabilities; no handler
+can be reached outside the kernel; allow-list/listing behavior is identical; confirmation replay and
+cross-binding tests pass without sleeps; no result contains test secrets.
 
-- [ ] **Step 9: Commit the envelope atomically**
+- [ ] **Step 7: Commit the policy kernel atomically**
 
-```bash
-git add src/security src/capabilities/dispatch.ts src/capabilities/types.ts src/index.ts \
-  tests/security/policy-envelope.test.ts tests/capabilities/dispatch.test.ts
-git commit -m "feat: enforce minimal capability policy envelope"
-```
-
+~~~bash
+git add src/capabilities src/security tests/capabilities \
+  tests/security tests/architecture tests/fixtures/capabilities.ts
+git commit -m "feat: enforce closed capability policy kernel"
+~~~
 ### Task 5: Add concise instructions and three pedagogical prompts
 
 **Files:**
@@ -2159,1102 +1999,473 @@ git add src/mcp/instructions.ts src/mcp/prompts.ts \
 git commit -m "feat: add pedagogical MCP guidance"
 ```
 
-### Task 6: Assemble `buildServer`, signed elicitation, and dual-era in-memory tests
+### Task 6: Assemble an opaque application, buildServer, and signed one-shot elicitation
 
 **Files:**
-- Create: `src/app/application-context.ts`
-- Create: `src/mcp/results.ts`
-- Create: `src/mcp/confirmation.ts`
-- Create: `src/mcp/register-capabilities.ts`
-- Create: `src/server/build-server.ts`
-- Create: `src/mcp/server-factory.ts`
-- Create: `tests/helpers/connect.ts`
-- Create: `tests/mcp/factory.test.ts`
-- Create: `tests/mcp/elicitation.test.ts`
-- Modify: `src/index.ts`
+- Create: src/app/application-context.ts
+- Create: src/capabilities/dispatch.ts
+- Create: src/mcp/results.ts
+- Create: src/mcp/confirmation.ts
+- Create: src/mcp/register-capabilities.ts
+- Create: src/server/build-server.ts
+- Create: src/mcp/server-factory.ts
+- Create: tests/helpers/connect.ts
+- Create: tests/capabilities/dispatch.test.ts
+- Create: tests/mcp/factory.test.ts
+- Create: tests/mcp/elicitation.test.ts
+- Modify: src/capabilities/types.ts
+- Modify: tests/architecture/execution-boundary.test.ts
+- Modify: src/index.ts
 
 **Interfaces:**
-- `createApplicationContext(config, catalog?)` owns immutable configuration, catalog, and policy.
-- `buildServer(context: ServerContext): McpServer` is the only registration point.
-- `createServerFactory(application, transport): McpServerFactory` adapts that function to the SDK.
-- `completeConfirmation(...)` accepts only SDK-verified request state and client-advertised form elicitation; unsupported, declined, expired, or argument-mismatched consent returns a refusal and never calls the handler.
+- createApplicationContext(config, catalog?) snapshots runtime policy/secrets, owns one catalog, one closed
+  dispatcher, and one one-shot confirmation settlement authority.
+- Public ApplicationContext exposes exactly the safe catalog reference. Configuration, HMAC key, HTTP token,
+  dispatcher, settlement authority, and future product services live only in a module-private WeakMap.
+- dispatchCapability(request, context) is the sole package-root execution facade.
+- buildServer(application, transport): McpServer is the only MCP registration point.
+- createServerFactory(application, transport): McpServerFactory adapts that function to the v2 beta SDK.
+- Signed request state proves SDK round continuity; the kernel ledger remains authoritative for capability,
+  exact arguments/effective scopes, transport, principal, expiry, and replay prevention.
+- Unsupported, declined, expired, tampered, replayed, or argument-mismatched consent never invokes a handler.
 
-- [ ] **Step 1: Write factory and elicitation tests before assembly code**
+The confirmation ledger is deliberately process-local because the supported product deployment is one local
+MCP process. createMcpHandler() may create a fresh McpServer per HTTP request, but every factory call closes
+over the same opaque ApplicationContext internals. Multi-worker/horizontally scaled HTTP is unsupported until
+a shared atomic consume-if-present store exists; signed requestState alone is not replay prevention. A future
+worker-mode option must fail closed until that store and cross-worker tests exist.
 
-Create `tests/helpers/connect.ts`:
+- [ ] **Step 1: Write opaque-context, dispatch, dual-era, and elicitation tests first**
 
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import {
-  Client,
-  InMemoryTransport,
-  StreamableHTTPClientTransport,
-  type ClientOptions
-} from '@modelcontextprotocol/client';
-import { createMcpHandler } from '@modelcontextprotocol/server';
-import type { ApplicationContext } from '../../src/app/application-context.js';
-import { buildServer } from '../../src/server/build-server.js';
-import { createServerFactory } from '../../src/mcp/server-factory.js';
+Create tests/capabilities/dispatch.test.ts. Prove:
 
-export interface ConnectedClient {
-  readonly client: Client;
-  readonly close: () => Promise<void>;
-}
+- a valid context reaches the bound kernel and a forged/stale name still traverses every gate;
+- spreading, cloning, or constructing an ApplicationContext-shaped object is rejected with a fixed
+  initialization refusal/error;
+- dispatchCapability() contains no duplicate policy condition;
+- the caller cannot obtain a dispatcher or settlement function.
 
-export async function connectLegacy(
-  application: ApplicationContext,
-  options: ClientOptions = {}
-): Promise<ConnectedClient> {
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = buildServer({
-    ...application,
-    transport: 'stdio'
-  });
-  const client = new Client({ name: 'foundation-test', version: '1.0.0' }, options);
-  await server.connect(serverTransport);
-  await client.connect(clientTransport);
-  return {
-    client,
-    close: async () => {
-      await client.close();
-      await server.close();
-    }
-  };
-}
+Create tests/helpers/connect.ts with two no-socket clients:
 
-export async function connectModern(
-  application: ApplicationContext,
-  options: ClientOptions = {}
-): Promise<ConnectedClient> {
-  const handler = createMcpHandler(createServerFactory(application, 'http'));
-  const client = new Client(
-    { name: 'foundation-test', version: '1.0.0' },
-    {
-      ...options,
-      versionNegotiation: { mode: { pin: '2026-07-28' } }
-    }
-  );
-  const transport = new StreamableHTTPClientTransport(new URL('http://mcp.test/mcp'), {
-    fetch: async (input, init) => handler.fetch(new Request(input, init))
-  });
-  await client.connect(transport);
-  return {
-    client,
-    close: async () => {
-      await client.close();
-      await handler.close();
-    }
-  };
-}
-```
+- connectLegacy(application, options?) uses InMemoryTransport.createLinkedPair() and
+  buildServer(application, 'stdio');
+- connectModern(application, options?, authInfo?) creates
+  createMcpHandler(createServerFactory(application, 'http')), then gives StreamableHTTPClientTransport a
+  custom fetch that calls handler.fetch(new Request(...), { authInfo }); there is no linked-pair modern HTTP
+  transport in beta.4;
+- the modern client pins exactly
+  `versionNegotiation: { mode: { pin: '2026-07-28' } }`; the legacy client exercises 2025 behavior;
+- both connectors independently close every resource in a finally-capable close function.
 
-Create `tests/mcp/factory.test.ts`:
+Create tests/mcp/factory.test.ts and parameterize across both connectors:
 
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import { afterEach, describe, expect, it } from 'vitest';
-import { createApplicationContext } from '../../src/app/application-context.js';
-import { loadRuntimeConfig } from '../../src/config/runtime-config.js';
-import { SERVER_INSTRUCTIONS } from '../../src/mcp/instructions.js';
-import { connectLegacy, connectModern, type ConnectedClient } from '../helpers/connect.js';
+- initialize returns the exact server name/version/instructions;
+- tools/list contains the immutable exposed catalog and hides read-only mutations;
+- server_status returns textual plus structured output;
+- invalid arguments return a sanitized MCP error result;
+- Task 5 pedagogical prompts are registered;
+- a forged cached tool name is refused;
+- closing creates no process-global listener.
 
-const open: ConnectedClient[] = [];
-afterEach(async () => Promise.all(open.splice(0).map((connection) => connection.close())));
+Create tests/mcp/elicitation.test.ts with a confirmed write fixture. Prove across both eras:
 
-describe.each([
-  ['2025-11-25', connectLegacy],
-  ['2026-07-28', connectModern]
-] as const)('buildServer on %s', (era, connect) => {
-  it('exposes the same instructions, prompts, and read-only status tool', async () => {
-    const application = createApplicationContext(loadRuntimeConfig({}));
-    const connection = await connect(application);
-    open.push(connection);
+- a form-capable client receives one input-required round with a fixed pedagogical question and opaque signed
+  requestState;
+- accept executes exactly once; decline/cancel/missing/malformed accepted content consumes the known
+  challenge and executes zero times;
+- successful, declined, malformed, or binding-mismatched state cannot be replayed;
+- changed nested arguments, post-challenge mutation of caller-owned nested data, wrong capability, transport,
+  or principal fails;
+- tampered, unsigned, expired, or malformed requestState never reaches the settlement authority;
+- URL-only or absent form support is refused before challenge allocation;
+- an envelope present on a modern request is authoritative even if its form-capability key is absent; only a
+  truly absent envelope may use 2025 initialization capabilities;
+- no MCP result/input-required payload contains a definition, handler, HMAC key, HTTP token, ledger entry, or
+  sentinel secret.
 
-    expect(connection.client.getProtocolEra()).toBe(era === '2026-07-28' ? 'modern' : 'legacy');
-    expect(connection.client.getInstructions()).toBe(SERVER_INSTRUCTIONS);
-    expect((await connection.client.listPrompts()).prompts.map((prompt) => prompt.name)).toEqual([
-      'diagnose_network_problem',
-      'publish_internal_service',
-      'block_domain_for_device'
-    ]);
-    expect((await connection.client.listTools()).tools.map((tool) => tool.name)).toEqual([
-      'server_status'
-    ]);
-
-    const result = await connection.client.callTool({ name: 'server_status', arguments: {} });
-    expect(result.isError).not.toBe(true);
-    expect(result.structuredContent).toEqual({ status: 'ok', readOnly: true, version: '0.1.0' });
-  });
-});
-```
-
-Create `tests/mcp/elicitation.test.ts`:
-
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CapabilityCatalog } from '../../src/capabilities/catalog.js';
-import { createApplicationContext } from '../../src/app/application-context.js';
-import { loadRuntimeConfig } from '../../src/config/runtime-config.js';
-import { createMutationFixture } from '../fixtures/capabilities.js';
-import { connectLegacy, connectModern, type ConnectedClient } from '../helpers/connect.js';
-
-const open: ConnectedClient[] = [];
-afterEach(async () => Promise.all(open.splice(0).map((connection) => connection.close())));
-
-describe.each([connectLegacy, connectModern])('elicitation confirmation', (connect) => {
-  it('runs a confirmed fixture exactly once', async () => {
-    const called = vi.fn();
-    const application = createApplicationContext(
-      loadRuntimeConfig({ READ_ONLY: 'false', ALLOWED_RESOURCES: 'test.write' }),
-      new CapabilityCatalog([createMutationFixture(called)])
-    );
-    const connection = await connect(application, { capabilities: { elicitation: {} } });
-    open.push(connection);
-    connection.client.setRequestHandler('elicitation/create', async () => ({
-      action: 'accept',
-      content: { confirm: true }
-    }));
-
-    const result = await connection.client.callTool({
-      name: 'test_write',
-      arguments: { value: 'approved' }
-    });
-
-    expect(result.isError).not.toBe(true);
-    expect(result.structuredContent).toEqual({ accepted: 'approved' });
-    expect(called).toHaveBeenCalledTimes(1);
-  });
-
-  it('fails closed when the client does not advertise form elicitation', async () => {
-    const called = vi.fn();
-    const application = createApplicationContext(
-      loadRuntimeConfig({ READ_ONLY: 'false', ALLOWED_RESOURCES: 'test.write' }),
-      new CapabilityCatalog([createMutationFixture(called)])
-    );
-    const connection = await connect(application);
-    open.push(connection);
-
-    const result = await connection.client.callTool({
-      name: 'test_write',
-      arguments: { value: 'unconfirmed' }
-    });
-
-    expect(result.isError).toBe(true);
-    expect(called).not.toHaveBeenCalled();
-  });
-
-  it('fails closed for a URL-only elicitation client', async () => {
-    const called = vi.fn();
-    const application = createApplicationContext(
-      loadRuntimeConfig({ READ_ONLY: 'false', ALLOWED_RESOURCES: 'test.write' }),
-      new CapabilityCatalog([createMutationFixture(called)])
-    );
-    const connection = await connect(application, {
-      capabilities: { elicitation: { url: {} } }
-    });
-    open.push(connection);
-
-    const result = await connection.client.callTool({
-      name: 'test_write',
-      arguments: { value: 'url-only' }
-    });
-
-    expect(result.isError).toBe(true);
-    expect(called).not.toHaveBeenCalled();
-  });
-});
-```
-
-- [ ] **Step 2: Run the tests and verify the red state**
+Mutate every caller-owned RuntimeConfig collection and requestStateKey byte after createApplicationContext().
+Prove dispatch, listing, codec verification, Origin/Host lists later read by Task 7, and feature/scope gates
+retain the internal snapshot. Object.getOwnPropertyNames(), Object.getOwnPropertySymbols(), spread,
+structured serialization, and direct property access on ApplicationContext reveal only catalog.
 
 Run:
 
-```bash
-npx vitest run tests/mcp/factory.test.ts tests/mcp/elicitation.test.ts
-```
+~~~bash
+npx vitest run tests/capabilities/dispatch.test.ts tests/mcp/factory.test.ts \
+  tests/mcp/elicitation.test.ts
+~~~
 
-Expected: FAIL because the application context and MCP assembly modules do not exist.
+Expected: RED because opaque application composition and MCP assembly do not exist.
 
-- [ ] **Step 3: Compose application state and safe result formatting**
+- [ ] **Step 2: Bind the kernel to an opaque ApplicationContext**
 
-Create `src/app/application-context.ts`:
+Extend src/capabilities/types.ts with a type-only ApplicationContext import and:
 
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import { CAPABILITY_CATALOG, type CapabilityCatalog } from '../capabilities/catalog.js';
-import type { RuntimeConfig } from '../config/runtime-config.js';
-import { PolicyEnvelope } from '../security/policy-envelope.js';
+~~~ts
+export interface ServerContext extends CapabilityInvocationContext {
+  readonly application: ApplicationContext;
+}
+~~~
 
+Create src/app/application-context.ts. Its public shape is exact:
+
+~~~ts
 export interface ApplicationContext {
-  readonly config: RuntimeConfig;
   readonly catalog: CapabilityCatalog;
-  readonly policy: PolicyEnvelope;
 }
 
 export function createApplicationContext(
   config: RuntimeConfig,
   catalog: CapabilityCatalog = CAPABILITY_CATALOG
-): ApplicationContext {
-  return Object.freeze({
-    config,
-    catalog,
-    policy: new PolicyEnvelope(catalog, {
-      readOnly: config.readOnly,
-      allowedResourceScopes: config.allowedResourceScopes,
-      enabledFeatureFlags: config.enabledFeatureFlags
-    })
+): ApplicationContext;
+~~~
+
+On construction, copy every caller-owned value without trying to Object.freeze mutable native containers.
+Encode the copied request-state bytes to a private base64url string and recreate fresh bytes only inside the
+codec helper; normalize sets to frozen arrays and recreate private Sets only when constructing the kernel;
+copy/freeze ordinary arrays and records. Object.freeze(Uint8Array) throws on Node and Object.freeze(Set) does
+not block add(), so neither is an immutability mechanism. Create one dispatcher from the normalized snapshot
+and capture the kernel-installed settlement closure. Store all three in a
+module-private WeakMap keyed by the frozen { catalog } object. Never place internals on string/symbol
+properties, getters, methods, globals, or exported debug state.
+
+Expose only these source-internal narrow helpers:
+
+- listApplicationCapabilities(application, transport) -> immutable definitions;
+- dispatchApplicationCapability(application, request, invocation) -> CapabilityResult;
+- settleApplicationConfirmation(application, decision, claims, request, invocation) -> CapabilityResult;
+- createApplicationRequestStateCodec(application, bind) -> RequestStateCodec.
+
+The last helper constructs the codec internally from a copied key; it never returns key bytes. No helper
+returns a dispatcher, config snapshot, settlement closure, or token. An unknown/spread/forged application
+fails with a fixed secret-free initialization error. Architecture tests allow imports respectively only from
+register-capabilities.ts, dispatch.ts, confirmation.ts, and build-server.ts. Task 7 may add one equally narrow
+HTTP runtime constructor/helper without exposing its config.
+
+The kernel settlement function consumes a known confirmation ID before validating the remainder. Unknown IDs
+change nothing; any known attempt, including expiry or wrong bindings, is one-shot.
+
+- [ ] **Step 3: Add the sole package-root dispatch facade**
+
+Create src/capabilities/dispatch.ts:
+
+~~~ts
+export function dispatchCapability(
+  request: CapabilityRequest,
+  context: ServerContext
+): Promise<CapabilityResult> {
+  return dispatchApplicationCapability(context.application, request, {
+    transport: context.transport,
+    ...(context.signal === undefined ? {} : { signal: context.signal }),
+    ...(context.principalId === undefined ? {} : { principalId: context.principalId })
   });
 }
-```
+~~~
 
-Create `src/mcp/results.ts`:
+The file has no catalog lookup or policy branch. Root-export this function and safe
+CapabilityRequest/CapabilityResult/ServerContext/ConfirmationChallenge/RefusalCode types, but not
+CapabilityDispatcher or any application helper.
 
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import type { CallToolResult } from '@modelcontextprotocol/server';
-import type { DispatchOutcome } from '../security/policy-envelope.js';
+- [ ] **Step 4: Add secret-safe MCP result formatting**
 
-type RefusalOutcome = Extract<DispatchOutcome, { kind: 'refused' }>;
+Create src/mcp/results.ts. successResult() returns JSON text plus structuredContent only from validated
+output. refusalResult() returns isError true, the fixed message, and only RefusalCode in structuredContent.
+Unit-test every code with sentinel raw inputs, Zod issues, exceptions, state, and secrets that must stay
+absent.
 
-export function successResult(output: Record<string, unknown>): CallToolResult {
-  return {
-    content: [{ type: 'text', text: JSON.stringify(output) }],
-    structuredContent: output
-  };
-}
+- [ ] **Step 5: Implement signed elicitation against the exact beta.4 API**
 
-export function refusalResult(refusal: RefusalOutcome): CallToolResult {
-  return {
-    isError: true,
-    content: [{ type: 'text', text: refusal.message }],
-    structuredContent: { code: refusal.code }
-  };
-}
-```
+Create src/mcp/confirmation.ts with a strict ConfirmationStateSchema containing exactly a 43-character
+base64url confirmationId, non-empty capabilityId, and 64-character lowercase-hex argumentsSha256.
 
-- [ ] **Step 4: Implement SDK-verified confirmation rounds**
+Use acceptedContent(responses, 'confirmation', ConfirmationResponseSchema), never its unvalidated two-
+argument overload. Use inputResponse() to distinguish accept, decline, cancel, and missing/malformed content.
 
-Create `src/mcp/confirmation.ts`:
+For client capability detection, add one tiny typed adapter around the beta.4 declaration bug where
+RequestMetaEnvelope is generated as {}:
 
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import {
-  acceptedContent,
-  inputRequired,
-  inputResponse,
-  type CallToolResult,
-  type InputRequiredResult,
-  type McpServer,
-  type RequestStateCodec,
-  type ServerContext as McpHandlerContext
-} from '@modelcontextprotocol/server';
-import * as z from 'zod/v4';
-import { dispatchCapability } from '../capabilities/dispatch.js';
-import type { CapabilityDefinition, ServerContext } from '../capabilities/types.js';
-import type { DispatchOutcome } from '../security/policy-envelope.js';
-import { verifiedConfirmationFromAdapter } from '../security/verified-confirmation.js';
-import { refusalResult, successResult } from './results.js';
+- when context.mcpReq.envelope is present, read CLIENT_CAPABILITIES_META_KEY through the local checked cast;
+  that modern per-request envelope is authoritative even if the key is absent, so absent form support refuses;
+- only when the envelope itself is absent may the 2025 compatibility path read initialization capabilities;
+- no broader any cast and no fallback from a present modern envelope to legacy capabilities.
 
-export const ConfirmationStateSchema = z
-  .object({
-    capabilityId: z.string().min(1),
-    argumentsSha256: z.string().regex(/^[a-f0-9]{64}$/)
-  })
-  .strict();
-export type ConfirmationState = z.infer<typeof ConfirmationStateSchema>;
-type ConfirmationRequired = Extract<DispatchOutcome, { kind: 'confirmation-required' }>;
+The adapter flow is exact:
 
-const ConfirmationResponseSchema = z.object({ confirm: z.boolean() });
+1. A verified prior state round never performs a fresh initial dispatch.
+2. Strictly parse decoded requestState and the named response.
+3. Call settleApplicationConfirmation() with accept only for action accept plus schema-valid confirm: true.
+4. For confirm: false, decline, cancel, missing, dropped, or malformed content with otherwise valid signed
+   state, call settlement with decline so the known challenge is consumed without a handler.
+5. Format success/refusal; a second confirmation-required outcome becomes CONFIRMATION_INVALID.
+6. With no prior state, reject unexpected input responses.
+7. Before initial dispatch of an elicitation definition, reject clients without form support so no challenge
+   is allocated.
+8. Dispatch normally. For confirmation-required, call await codec.mint(claims, context) — passing context is
+   mandatory when bind is configured — and return inputRequired() with the fixed form request.
+9. Codec TTL is 300 seconds. Its bind callback includes MCP method plus exact principal:
+   stdio:local-connection for stdio, the validated AuthInfo.clientId for authenticated HTTP. The Foundation
+   bearer runtime intentionally represents its single shared local bearer as http:local-bearer; it does not
+   claim per-human identity.
 
-function hasFormElicitation(value: unknown): boolean {
-  if (typeof value !== 'object' || value === null || !('elicitation' in value)) return false;
-  const elicitation = value.elicitation;
-  if (typeof elicitation !== 'object' || elicitation === null) return false;
-  if ('form' in elicitation || 'url' in elicitation) return 'form' in elicitation;
-  return true;
-}
+Never create a VerifiedConfirmation object or import a confirmation mint/port.
 
-function supportsFormElicitation(server: McpServer, context: McpHandlerContext): boolean {
-  const modernCapabilities =
-    context.mcpReq.envelope?.['io.modelcontextprotocol/clientCapabilities'];
-  if (modernCapabilities !== undefined) return hasFormElicitation(modernCapabilities);
+- [ ] **Step 6: Register the catalog and assemble one v2 server**
 
-  // The 2025 shim has no per-request capability envelope; initialization is its authority.
-  // eslint-disable-next-line @typescript-eslint/no-deprecated
-  return hasFormElicitation(server.server.getClientCapabilities());
-}
+Create src/mcp/register-capabilities.ts:
 
-export async function completeConfirmation(
-  server: McpServer,
-  codec: RequestStateCodec<ConfirmationState>,
-  serverContext: ServerContext,
-  capability: CapabilityDefinition,
-  rawInput: unknown,
-  context: McpHandlerContext,
-  required: ConfirmationRequired
-): Promise<CallToolResult | InputRequiredResult> {
-  const priorState = context.mcpReq.requestState<ConfirmationState>();
-  const priorResponse = inputResponse(context.mcpReq.inputResponses, 'confirmation');
-
-  if (priorState !== undefined) {
-    const parsedState = ConfirmationStateSchema.safeParse(priorState);
-    if (
-      !parsedState.success ||
-      parsedState.data.capabilityId !== capability.id ||
-      parsedState.data.argumentsSha256 !== required.argumentsSha256
-    ) {
-      return refusalResult({
-        kind: 'refused',
-        code: 'CONFIRMATION_INVALID',
-        message: 'Confirmation is invalid.'
-      });
-    }
-    const accepted = acceptedContent(
-      context.mcpReq.inputResponses,
-      'confirmation',
-      ConfirmationResponseSchema
-    );
-    if (accepted?.confirm !== true) {
-      return refusalResult({
-        kind: 'refused',
-        code: 'CONFIRMATION_INVALID',
-        message: 'Confirmation was not accepted.'
-      });
-    }
-    const principalId = context.http?.authInfo?.clientId;
-    const outcome = await dispatchCapability(
-      { name: capability.mcpName, arguments: rawInput },
-      {
-        ...serverContext,
-        signal: context.mcpReq.signal,
-        ...(principalId === undefined ? {} : { principalId }),
-        confirmation: verifiedConfirmationFromAdapter(
-          parsedState.data.capabilityId,
-          parsedState.data.argumentsSha256
-        )
-      }
-    );
-    if (outcome.kind === 'success') return successResult(outcome.output);
-    if (outcome.kind === 'refused') return refusalResult(outcome);
-    return refusalResult({
-      kind: 'refused',
-      code: 'CONFIRMATION_INVALID',
-      message: 'Confirmation could not be completed.'
-    });
-  }
-
-  if (priorResponse.kind !== 'missing' || !supportsFormElicitation(server, context)) {
-    return refusalResult({
-      kind: 'refused',
-      code: 'CONFIRMATION_INVALID',
-      message: 'This client cannot collect the required confirmation.'
-    });
-  }
-
-  const requestState = await codec.mint(
-    {
-      capabilityId: capability.id,
-      argumentsSha256: required.argumentsSha256
-    },
-    context
-  );
-  return inputRequired({
-    requestState,
-    inputRequests: {
-      confirmation: inputRequired.elicit({
-        message: `Confirm ${capability.title} with the exact arguments already shown.`,
-        requestedSchema: ConfirmationResponseSchema
-      })
-    }
-  });
-}
-```
-
-- [ ] **Step 5: Register the closed catalog through the policy envelope**
-
-Create `src/mcp/register-capabilities.ts`:
-
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import type { McpServer, RequestStateCodec } from '@modelcontextprotocol/server';
-import { dispatchCapability } from '../capabilities/dispatch.js';
-import type { ServerContext } from '../capabilities/types.js';
-import { completeConfirmation, type ConfirmationState } from './confirmation.js';
-import { refusalResult, successResult } from './results.js';
-
+~~~ts
 export function registerCapabilities(
   server: McpServer,
-  serverContext: ServerContext,
+  application: ApplicationContext,
+  transport: TransportKind,
   codec: RequestStateCodec<ConfirmationState>
-): void {
-  const exposed = serverContext.policy.listExposed(serverContext.transport);
+): void;
+~~~
 
-  for (const capability of exposed) {
-    server.registerTool(
-      capability.mcpName,
-      {
-        title: capability.title,
-        description: capability.description,
-        inputSchema: capability.inputSchema,
-        outputSchema: capability.outputSchema,
-        annotations: capability.annotations
-      },
-      async (rawInput, context) => {
-        const principalId = context.http?.authInfo?.clientId;
-        const outcome = await dispatchCapability(
-          { name: capability.mcpName, arguments: rawInput },
-          {
-            ...serverContext,
-            signal: context.mcpReq.signal,
-            ...(principalId === undefined ? {} : { principalId })
-          }
-        );
-        if (outcome.kind === 'success') return successResult(outcome.output);
-        if (outcome.kind === 'confirmation-required') {
-          return completeConfirmation(
-            server,
-            codec,
-            serverContext,
-            capability,
-            rawInput,
-            context,
-            outcome
-          );
-        }
-        return refusalResult(outcome);
-      }
-    );
-  }
-}
-```
+List only through listApplicationCapabilities(). Register immutable metadata. Each callback builds a
+ServerContext containing the opaque application plus transport, request signal, and exact principal; ordinary
+calls go only through dispatchCapability(). Continuation/decline calls use the narrow settlement helper from
+confirmation.ts, never raw authority. No policy rule is copied into the adapter.
 
-- [ ] **Step 6: Make `buildServer` the single assembly point**
+Create src/server/build-server.ts:
 
-Create `src/server/build-server.ts`:
-
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import {
-  createRequestStateCodec,
-  McpServer
-} from '@modelcontextprotocol/server';
-import type { ServerContext } from '../capabilities/types.js';
-import { type ConfirmationState } from '../mcp/confirmation.js';
-import { SERVER_INSTRUCTIONS } from '../mcp/instructions.js';
-import { registerPedagogicalPrompts } from '../mcp/prompts.js';
-import { registerCapabilities } from '../mcp/register-capabilities.js';
-
-export function buildServer(context: ServerContext): McpServer {
-  const codec = createRequestStateCodec<ConfirmationState>({
-    key: context.config.requestStateKey,
-    ttlSeconds: 300,
-    bind: (serverContext) =>
-      `${serverContext.mcpReq.method}\0${serverContext.http?.authInfo?.clientId ?? 'local-connection'}`
-  });
-  const server = new McpServer(
-    { name: 'opnsense-mcp', version: '0.1.0' },
-    {
-      instructions: SERVER_INSTRUCTIONS,
-      inputRequired: { legacyShim: true, maxRounds: 4, roundTimeoutMs: 120_000 },
-      requestState: { verify: (state, serverContext) => codec.verify(state, serverContext) }
-    }
-  );
-  registerPedagogicalPrompts(server);
-  registerCapabilities(server, context, codec);
-  return server;
-}
-```
-
-Create `src/mcp/server-factory.ts`:
-
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import type { McpServerFactory } from '@modelcontextprotocol/server';
-import type { ApplicationContext } from '../app/application-context.js';
-import type { TransportKind } from '../capabilities/types.js';
-import { buildServer } from '../server/build-server.js';
-
-export function createServerFactory(
+~~~ts
+export function buildServer(
   application: ApplicationContext,
   transport: TransportKind
-): McpServerFactory {
-  return () => buildServer({ ...application, transport });
-}
-```
+): McpServer;
+~~~
 
-Append to `src/index.ts`:
+It creates the codec through createApplicationRequestStateCodec(), then constructs the beta.4 McpServer with
+requestState: { verify: codec.verify }, SERVER_INSTRUCTIONS, and the legacy input-required shim bounded to
+four rounds/120000 ms. Register prompts and capabilities exactly once. Do not spread ApplicationContext.
 
-```ts
-export { createApplicationContext } from './app/application-context.js';
-export { buildServer } from './server/build-server.js';
-export { createServerFactory } from './mcp/server-factory.js';
-```
+Create src/mcp/server-factory.ts returning () => buildServer(application, transport).
 
-- [ ] **Step 7: Run both eras and all deterministic gates**
+- [ ] **Step 7: Strengthen the architecture gate**
 
-Run:
+tests/architecture/execution-boundary.test.ts fails if:
 
-```bash
-npx vitest run tests/mcp/factory.test.ts tests/mcp/elicitation.test.ts
+- ApplicationContext exposes config, capabilities, dispatcher, HTTP token, HMAC bytes, service, settlement,
+  completion, or any symbol property;
+- any narrow application helper is imported outside its exact adapter allow-list;
+- a dispatcher/settlement/config object crosses a helper return;
+- root exports CapabilityDispatcher, createCapabilityDispatcher, application internals, confirmation
+  state/schema, codec, kernel constructor, or settlement authority;
+- register/confirmation/build-server duplicate policy conditions;
+- package.json adds any internal subpath export.
+
+- [ ] **Step 8: Run dual-era and deterministic gates**
+
+Run with Node 22:
+
+~~~bash
+npx vitest run tests/capabilities/dispatch.test.ts tests/mcp/factory.test.ts \
+  tests/mcp/elicitation.test.ts tests/architecture/execution-boundary.test.ts
+npm run build
 npm run typecheck
 npm run lint
 npm run format:check
-```
+npm test
+npm audit --omit=dev
+git diff --check
+~~~
 
-Expected: eight parameterized cases pass across legacy and modern eras; a confirmed fixture runs exactly once, and clients without form elicitation never reach the handler. All static gates exit `0`.
+Expected: all cases pass; handlers execute once only after valid acceptance; opaque application inspection
+reveals no authority/secret; the beta.4 modern envelope cast is isolated; all static gates and production
+audit exit 0.
 
-- [ ] **Step 8: Commit server assembly atomically**
+- [ ] **Step 9: Commit server assembly atomically**
 
-```bash
-git add src/app src/mcp src/server src/index.ts tests/helpers/connect.ts \
-  tests/mcp/factory.test.ts tests/mcp/elicitation.test.ts
-git commit -m "feat: assemble dual-era MCP server factory"
-```
-
-### Task 7: Add dual-era stdio and hardened opt-in HTTP entrypoints
+~~~bash
+git add src/app src/capabilities/dispatch.ts src/capabilities/types.ts src/mcp src/server \
+  src/index.ts tests/helpers/connect.ts tests/capabilities/dispatch.test.ts \
+  tests/mcp/factory.test.ts tests/mcp/elicitation.test.ts \
+  tests/architecture/execution-boundary.test.ts
+git commit -m "feat: assemble opaque dual-era MCP v2 application"
+~~~
+### Task 7: Add owned stdio and hardened opt-in HTTP entrypoints
 
 **Files:**
-- Create: `src/entrypoints/stdio.ts`
-- Create: `src/main.ts`
-- Create: `src/http/auth.ts`
-- Create: `src/http/origin.ts`
-- Create: `src/http/limits.ts`
-- Create: `src/http/runtime.ts`
-- Create: `src/entrypoints/http.ts`
-- Create: `tests/mcp/stdio.test.ts`
-- Create: `tests/http/runtime.test.ts`
-- Modify: `package.json`
-- Modify: `src/index.ts`
+- Create: src/app/default-application.ts
+- Create: src/entrypoints/stdio.ts
+- Create: src/main.ts
+- Create: src/http/auth.ts
+- Create: src/http/origin.ts
+- Create: src/http/limits.ts
+- Create: src/http/runtime.ts
+- Create: src/entrypoints/http.ts
+- Create: tests/app/default-application.test.ts
+- Create: tests/mcp/stdio.test.ts
+- Create: tests/http/runtime.test.ts
+- Create: tests/integration/process-lifecycle.test.ts
+- Modify: src/app/application-context.ts
+- Modify: tests/architecture/execution-boundary.test.ts
+- Modify: package.json
+- Modify: src/index.ts
 
 **Interfaces:**
-- `startStdio(application?)` calls `serveStdio(createServerFactory(...))` and writes diagnostic errors only to stderr.
-- `bearerAuthentication(expectedToken)` attaches a validated `AuthInfo` to `req.auth` using constant-time digest comparison.
-- `exactOriginValidation(allowedOrigins)` compares a present raw Origin header against exact configured serialized origins. Absence is allowed for non-browser clients; `null`, malformed, scheme/host/port variants, and all browser origins under the default empty list receive HTTP 403 before authentication or MCP dispatch.
-- `DEFAULT_HTTP_LIMITS` fixes a 256 KiB JSON body, 32 concurrent requests, 16 subscriptions, 10-second body receipt, 30-second ordinary execution, 5-minute stream lifetime, 2-minute legacy-session idle timeout, 8 legacy sessions, 5-second headers/keep-alive timeouts, and 100 requests per socket. The primary handler keeps 2025 Streamable HTTP explicitly stateless (`legacy: 'stateless'`), so it retains zero Streamable sessions between requests.
-- `startHttp(application, options?)` returns `{ url, limits, close }`, accepts only loopback configuration, enforces Host, exact Origin, body, concurrency, request/stream deadlines, and bearer authentication before `/mcp`, then uses the official beta.4 `createMcpHandler` and `toNodeHandler`. Streamable HTTP remains present after Task 7b adds optional SSE routes.
+- createDefaultApplicationRuntime() is the only executable composition seam and returns
+  { application, close }. Foundation owns no external service, so close is an idempotent no-op; Product Task 5
+  replaces the body with the real product composition and owned cleanup, and Guided Task 5 later adds
+  workflows.
+- startStdio(application?) serves both eras. When no application is injected it owns the default runtime and
+  its returned close() settles both server and runtime exactly once. An injected application remains owned by
+  the caller.
+- buildApplicationHttpSecurity(application) is source-internal and returns public HTTP settings plus a bearer
+  middleware closure; it never returns the token or internal config.
+- startHttp(application, options?) returns { url, limits, close }. The caller owns application; runtime close
+  independently settles handler and Node server.
+- HTTP is loopback-only, exact Host/Origin, authenticated, bounded, and disabled by default.
 
-- [ ] **Step 1: Write child-process stdio and live HTTP tests first**
+Exact limits: 256 KiB JSON body, 32 concurrent requests, 16 subscriptions, 10-second body receipt,
+30-second ordinary execution, 5-minute stream lifetime, 2-minute legacy-session idle timeout, 8 legacy
+sessions, 5-second headers/keep-alive timeouts, and 100 requests per socket. Primary Streamable HTTP keeps
+2025 compatibility stateless with legacy: 'stateless'.
 
-Create `tests/mcp/stdio.test.ts`:
+- [ ] **Step 1: Write executable, HTTP, ownership, and partial-failure tests first**
 
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import { Client } from '@modelcontextprotocol/client';
-import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
-import { describe, expect, it } from 'vitest';
+tests/app/default-application.test.ts proves the Foundation default runtime lists only server_status, close()
+is idempotent, and src/main.ts plus src/entrypoints/http.ts reach application construction only through this
+seam. It also records the downstream contract: later plans must replace this exact body and binary tests,
+not add a parallel factory.
 
-describe.each([
-  ['legacy', undefined],
-  ['modern', { mode: { pin: '2026-07-28' as const } }]
-] as const)('stdio %s era', (_name, versionNegotiation) => {
-  it('starts from the package executable and keeps stdout protocol-clean', async () => {
-    const transport = new StdioClientTransport({
-      command: process.execPath,
-      args: ['dist/main.js'],
-      env: { PATH: process.env.PATH ?? '', READ_ONLY: 'true' },
-      stderr: 'pipe'
-    });
-    const client = new Client(
-      { name: 'stdio-test', version: '1.0.0' },
-      versionNegotiation === undefined ? {} : { versionNegotiation }
-    );
-    await client.connect(transport);
-    try {
-      expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual([
-        'server_status'
-      ]);
-      expect(client.getProtocolEra()).toBe(_name);
-    } finally {
-      await client.close();
-    }
-  });
-});
-```
+tests/mcp/stdio.test.ts spawns dist/main.js for both 2025 and pinned 2026-07-28, passes only sentinel
+environment, proves stdout is protocol-clean, stderr contains no secret, tools/list is server_status, and
+SIGINT/SIGTERM/explicit close settle owned cleanup once.
 
-Create `tests/http/runtime.test.ts`:
+tests/http/runtime.test.ts uses injected Foundation applications and covers:
 
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import { request as nodeRequest } from 'node:http';
-import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { afterEach, describe, expect, it } from 'vitest';
-import { createApplicationContext } from '../../src/app/application-context.js';
-import { loadRuntimeConfig } from '../../src/config/runtime-config.js';
-import { DEFAULT_HTTP_LIMITS } from '../../src/http/limits.js';
-import { startHttp, type HttpRuntime } from '../../src/http/runtime.js';
+- HTTP-disabled refusal;
+- loopback host only;
+- missing/wrong bearer 401 with no dispatch;
+- foreign Host 403;
+- absent Origin allowed for non-browser clients, present Origin exact-match only, default browser deny;
+- scheme/host/port variants, null, opaque, malformed, and duplicate Origin headers denied before auth;
+- oversized/slow bodies, request concurrency, execution deadline, stream/subscription/session bounds;
+- validated auth reaches beta.4 createMcpHandler/toNodeHandler and receives server_status in both supported
+  eras;
+- AuthInfo has token, scopes [], and the honest single-principal clientId http:local-bearer;
+- no log/error/result contains the bearer.
 
-const token = '0123456789abcdef0123456789abcdef';
-const open: HttpRuntime[] = [];
-afterEach(async () => Promise.all(open.splice(0).map((runtime) => runtime.close())));
+tests/integration/process-lifecycle.test.ts injects controlled close functions and proves:
 
-async function rawStatus(url: URL, headers: Record<string, string>): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const req = nodeRequest(url, { method: 'POST', headers }, (response) => {
-      response.resume();
-      resolve(response.statusCode ?? 0);
-    });
-    req.on('error', reject);
-    req.end('{}');
-  });
+- listen/start failure closes any handler/server/default runtime already created;
+- handler close failure cannot skip server or application cleanup;
+- server close failure cannot skip application cleanup;
+- SIGINT and SIGTERM use one idempotent aggregate shutdown;
+- two close callers execute each owned cleanup once and receive an AggregateError containing every failure.
+
+Run build plus these tests; expected RED for missing entrypoints/runtime.
+
+- [ ] **Step 2: Add the narrow HTTP security projection**
+
+Modify application-context.ts with one source-internal
+buildApplicationHttpSecurity(application): ApplicationHttpSecurity. It looks up the private snapshot and
+returns a frozen object containing enabled/host/port/copied allowedHosts/copied allowedOrigins/
+legacySseEnabled plus an authenticate RequestHandler already closed over the expected token. The token is
+never a property, callback argument, serialization value, or return value. Only src/http/runtime.ts may
+import this helper; add the import allow-list to the architecture test.
+
+Create src/http/auth.ts. Compare SHA-256 digests with timingSafeEqual and set validated AuthInfo using a local
+typed Express Request & { auth?: AuthInfo } cast because Express 5 Request has no auth declaration while
+toNodeHandler reads req.auth. Do not use any or a global mutable augmentation. Set exactly:
+
+~~~ts
+{
+  token: expectedToken,
+  clientId: 'http:local-bearer',
+  scopes: []
+}
+~~~
+
+The closure must never log/throw the token, digest, or Authorization value.
+
+Create exact Origin middleware that treats a present Origin as a single exact serialized value; reject
+duplicates and comma-joined values. Absence is allowed. Host validation uses the official adapter helper or
+an equivalently strict exact allow-list and runs first.
+
+- [ ] **Step 3: Implement the replaceable owned default runtime and stdio**
+
+Create src/app/default-application.ts:
+
+~~~ts
+export interface OwnedApplicationRuntime {
+  readonly application: ApplicationContext;
+  close(): Promise<void>;
 }
 
-describe('HTTP runtime', () => {
-  it('rejects missing bearer and a foreign Host', async () => {
-    const application = createApplicationContext(
-      loadRuntimeConfig({ MCP_HTTP_ENABLED: 'true', MCP_HTTP_TOKEN: token })
-    );
-    const runtime = await startHttp(application, { port: 0 });
-    open.push(runtime);
-
-    expect((await fetch(runtime.url, { method: 'POST' })).status).toBe(401);
-    expect(
-      await rawStatus(runtime.url, {
-        authorization: `Bearer ${token}`,
-        host: 'foreign.example',
-        'content-type': 'application/json'
-      })
-    ).toBe(403);
-  });
-
-  it('uses an exact serialized Origin allow-list before authentication', async () => {
-    const allowedOrigin = 'https://console.example:8443';
-    const application = createApplicationContext(
-      loadRuntimeConfig({
-        MCP_HTTP_ENABLED: 'true',
-        MCP_HTTP_TOKEN: token,
-        MCP_ALLOWED_ORIGINS: allowedOrigin
-      })
-    );
-    const runtime = await startHttp(application, { port: 0 });
-    open.push(runtime);
-
-    expect(
-      (await fetch(runtime.url, { method: 'POST', headers: { origin: allowedOrigin } })).status
-    ).toBe(401);
-
-    for (const rejectedOrigin of [
-      'http://console.example:8443',
-      'https://other.example:8443',
-      'https://console.example:9443',
-      'null',
-      'not-an-origin',
-      'https://foreign.example'
-    ]) {
-      expect(
-        (
-          await fetch(runtime.url, {
-            method: 'POST',
-            headers: {
-              authorization: `Bearer ${token}`,
-              origin: rejectedOrigin
-            }
-          })
-        ).status
-      ).toBe(403);
-    }
-  });
-
-  it('defaults browser origins to deny and enforces explicit HTTP limits', async () => {
-    const application = createApplicationContext(
-      loadRuntimeConfig({ MCP_HTTP_ENABLED: 'true', MCP_HTTP_TOKEN: token })
-    );
-    const runtime = await startHttp(application, { port: 0 });
-    open.push(runtime);
-
-    expect(runtime.limits).toEqual(DEFAULT_HTTP_LIMITS);
-    expect(
-      (
-        await fetch(runtime.url, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${token}`,
-            origin: 'http://localhost:3000'
-          }
-        })
-      ).status
-    ).toBe(403);
-
-    const oversized = JSON.stringify({ padding: 'x'.repeat(DEFAULT_HTTP_LIMITS.jsonBodyBytes) });
-    expect(
-      (
-        await fetch(runtime.url, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${token}`,
-            'content-type': 'application/json'
-          },
-          body: oversized
-        })
-      ).status
-    ).toBe(413);
-  });
-
-  it('serves modern MCP with validated authentication', async () => {
-    const application = createApplicationContext(
-      loadRuntimeConfig({ MCP_HTTP_ENABLED: 'true', MCP_HTTP_TOKEN: token })
-    );
-    const runtime = await startHttp(application, { port: 0 });
-    open.push(runtime);
-    const transport = new StreamableHTTPClientTransport(runtime.url, {
-      requestInit: { headers: { authorization: `Bearer ${token}` } }
-    });
-    const client = new Client(
-      { name: 'http-test', version: '1.0.0' },
-      { versionNegotiation: { mode: { pin: '2026-07-28' } } }
-    );
-    await client.connect(transport);
-    try {
-      expect(client.getProtocolEra()).toBe('modern');
-      expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual([
-        'server_status'
-      ]);
-    } finally {
-      await client.close();
-    }
-  });
-});
-```
-
-- [ ] **Step 2: Build and run the tests to establish the red state**
-
-Run:
-
-```bash
-npm run build
-npx vitest run tests/mcp/stdio.test.ts tests/http/runtime.test.ts
-```
-
-Expected: FAIL because the executable and HTTP runtime do not exist.
-
-- [ ] **Step 3: Implement the default dual-era stdio executable**
-
-Create `src/entrypoints/stdio.ts`:
-
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import { serveStdio, type StdioServerHandle } from '@modelcontextprotocol/server/stdio';
-import { createApplicationContext, type ApplicationContext } from '../app/application-context.js';
-import { loadRuntimeConfig } from '../config/runtime-config.js';
-import { createServerFactory } from '../mcp/server-factory.js';
-
-export function startStdio(
-  application: ApplicationContext = createApplicationContext(loadRuntimeConfig())
-): StdioServerHandle {
-  return serveStdio(createServerFactory(application, 'stdio'), {
-    legacy: 'serve',
-    maxSubscriptions: 64,
-    onerror: (error) => process.stderr.write(`MCP stdio error: ${error.name}\n`)
-  });
-}
-```
-
-Create `src/main.ts`:
-
-```ts
-#!/usr/bin/env node
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import { startStdio } from './entrypoints/stdio.js';
-
-try {
-  startStdio();
-} catch (error) {
-  const name = error instanceof Error ? error.name : 'Error';
-  process.stderr.write(`Unable to start MCP stdio: ${name}\n`);
-  process.exitCode = 1;
-}
-```
-
-- [ ] **Step 4: Implement constant-time local bearer authentication**
-
-Create `src/http/auth.ts`:
-
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import { createHash, timingSafeEqual } from 'node:crypto';
-import type { RequestHandler } from 'express';
-
-function digest(value: string): Buffer {
-  return createHash('sha256').update(value, 'utf8').digest();
-}
-
-export function bearerAuthentication(expectedToken: string): RequestHandler {
-  const expectedDigest = digest(expectedToken);
-  return (request, response, next) => {
-    const authorization = request.header('authorization');
-    const supplied = authorization?.startsWith('Bearer ') ? authorization.slice(7) : '';
-    if (!timingSafeEqual(digest(supplied), expectedDigest)) {
-      response.setHeader('WWW-Authenticate', 'Bearer');
-      response.status(401).json({ error: 'unauthorized' });
-      return;
-    }
-    request.auth = {
-      token: supplied,
-      clientId: 'local-http-client',
-      scopes: ['mcp:invoke']
-    };
-    next();
-  };
-}
-```
-
-- [ ] **Step 5: Implement exact serialized-Origin and finite HTTP limits**
-
-Create `src/http/origin.ts`:
-
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import type { RequestHandler } from 'express';
-
-export function exactOriginValidation(allowedOrigins: readonly string[]): RequestHandler {
-  const allowed = new Set(allowedOrigins);
-  return (request, response, next) => {
-    const origin = request.header('origin');
-    if (origin === undefined) {
-      next();
-      return;
-    }
-    if (!allowed.has(origin)) {
-      response.status(403).json({ error: 'forbidden_origin' });
-      return;
-    }
-    next();
-  };
-}
-
-export function sdkOriginHostnames(allowedOrigins: readonly string[]): string[] {
-  return [...new Set(allowedOrigins.map((origin) => new URL(origin).hostname))];
-}
-```
-
-`sdkOriginHostnames` supplies the official Express adapter's supplemental hostname-only check. It is never the authorization decision: `exactOriginValidation` compares the complete serialized value, including scheme and port, and runs before bearer authentication and every MCP/SSE route.
-
-Create `src/http/limits.ts`:
-
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import type { Server } from 'node:http';
-import type { Request, RequestHandler } from 'express';
-
-export interface HttpLimits {
-  readonly jsonBodyLimit: '256kb';
-  readonly jsonBodyBytes: 262_144;
-  readonly maxConcurrentRequests: 32;
-  readonly maxSubscriptions: 16;
-  readonly requestBodyTimeoutMs: 10_000;
-  readonly requestExecutionTimeoutMs: 30_000;
-  readonly streamLifetimeMs: 300_000;
-  readonly legacySessionIdleTimeoutMs: 120_000;
-  readonly maxLegacySseSessions: 8;
-  readonly headersTimeoutMs: 5_000;
-  readonly keepAliveTimeoutMs: 5_000;
-  readonly maxRequestsPerSocket: 100;
-}
-
-export const DEFAULT_HTTP_LIMITS: HttpLimits = Object.freeze({
-  jsonBodyLimit: '256kb',
-  jsonBodyBytes: 262_144,
-  maxConcurrentRequests: 32,
-  maxSubscriptions: 16,
-  requestBodyTimeoutMs: 10_000,
-  requestExecutionTimeoutMs: 30_000,
-  streamLifetimeMs: 300_000,
-  legacySessionIdleTimeoutMs: 120_000,
-  maxLegacySseSessions: 8,
-  headersTimeoutMs: 5_000,
-  keepAliveTimeoutMs: 5_000,
-  maxRequestsPerSocket: 100
-});
-
-function isLongLivedStream(request: Request): boolean {
-  if (request.method === 'GET' && request.path === '/sse') return true;
-  const body: unknown = request.body;
-  return (
-    typeof body === 'object' &&
-    body !== null &&
-    'method' in body &&
-    body.method === 'subscriptions/listen'
-  );
-}
-
-export function enforceHttpLimits(limits: HttpLimits = DEFAULT_HTTP_LIMITS): RequestHandler {
-  let activeRequests = 0;
-  return (request, response, next) => {
-    if (activeRequests >= limits.maxConcurrentRequests) {
-      response.status(503).json({ error: 'request_capacity_exceeded' });
-      return;
-    }
-
-    activeRequests += 1;
-    const lifetimeMs = isLongLivedStream(request)
-      ? limits.streamLifetimeMs
-      : limits.requestExecutionTimeoutMs;
-    const deadline = setTimeout(() => {
-      if (response.headersSent) response.destroy();
-      else response.status(504).json({ error: 'request_deadline_exceeded' });
-    }, lifetimeMs);
-    deadline.unref();
-
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      clearTimeout(deadline);
-      activeRequests -= 1;
-    };
-    response.once('finish', release);
-    response.once('close', release);
-    next();
-  };
-}
-
-export function configureNodeHttpLimits(
-  server: Server,
-  limits: HttpLimits = DEFAULT_HTTP_LIMITS
-): void {
-  server.headersTimeout = limits.headersTimeoutMs;
-  server.requestTimeout = limits.requestBodyTimeoutMs;
-  server.keepAliveTimeout = limits.keepAliveTimeoutMs;
-  server.maxRequestsPerSocket = limits.maxRequestsPerSocket;
-}
-```
-
-- [ ] **Step 6: Wire official Express, Node, and MCP v2 adapters**
-
-Create `src/http/runtime.ts`:
-
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import type { Server } from 'node:http';
-import { createMcpExpressApp } from '@modelcontextprotocol/express';
-import { toNodeHandler } from '@modelcontextprotocol/node';
-import { createMcpHandler } from '@modelcontextprotocol/server';
-import type { ApplicationContext } from '../app/application-context.js';
-import { createServerFactory } from '../mcp/server-factory.js';
-import { bearerAuthentication } from './auth.js';
-import {
-  configureNodeHttpLimits,
-  DEFAULT_HTTP_LIMITS,
-  enforceHttpLimits,
-  type HttpLimits
-} from './limits.js';
-import { exactOriginValidation, sdkOriginHostnames } from './origin.js';
-
-export interface HttpRuntime {
-  readonly url: URL;
-  readonly limits: HttpLimits;
-  readonly close: () => Promise<void>;
-}
-
-export async function startHttp(
-  application: ApplicationContext,
-  options: { readonly port?: number; readonly onerror?: (error: Error) => void } = {}
-): Promise<HttpRuntime> {
-  const { http } = application.config;
-  if (!http.enabled || http.token === undefined) {
-    throw new Error('HTTP transport is disabled or missing authentication.');
-  }
-  const onerror = options.onerror ?? (() => undefined);
-  const app = createMcpExpressApp({
-    host: http.host,
-    allowedHosts: [...http.allowedHosts],
-    allowedOrigins: sdkOriginHostnames(http.allowedOrigins),
-    jsonLimit: DEFAULT_HTTP_LIMITS.jsonBodyLimit
-  });
-  const handler = createMcpHandler(createServerFactory(application, 'http'), {
-    legacy: 'stateless',
-    maxSubscriptions: DEFAULT_HTTP_LIMITS.maxSubscriptions,
-    onerror
-  });
-  const nodeHandler = toNodeHandler(handler, { onerror });
-  app.use(exactOriginValidation(http.allowedOrigins));
-  app.use(enforceHttpLimits());
-  app.use('/mcp', bearerAuthentication(http.token));
-  app.all('/mcp', (request, response) => {
-    void nodeHandler(request, response, request.body);
-  });
-
-  const server = await new Promise<Server>((resolve, reject) => {
-    const listening = app.listen(options.port ?? http.port, http.host, () => resolve(listening));
-    configureNodeHttpLimits(listening);
-    listening.once('error', reject);
-  });
-  const address = server.address();
-  if (address === undefined || address === null || typeof address === 'string') {
-    await handler.close();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    throw new Error('HTTP listener did not expose a TCP address.');
-  }
-  return {
-    url: new URL(`http://${http.host}:${String(address.port)}/mcp`),
-    limits: DEFAULT_HTTP_LIMITS,
+export function createDefaultApplicationRuntime(): OwnedApplicationRuntime {
+  const application = createApplicationContext(loadRuntimeConfig());
+  let closed = false;
+  return Object.freeze({
+    application,
     close: async () => {
-      await handler.close();
-      await new Promise<void>((resolve, reject) =>
-        server.close((error) => (error === undefined ? resolve() : reject(error)))
-      );
+      if (closed) return;
+      closed = true;
     }
-  };
-}
-```
-
-Create `src/entrypoints/http.ts`:
-
-```ts
-// SPDX-License-Identifier: AGPL-3.0-or-later
-import { createApplicationContext } from '../app/application-context.js';
-import { loadRuntimeConfig } from '../config/runtime-config.js';
-import { startHttp } from '../http/runtime.js';
-
-try {
-  const runtime = await startHttp(createApplicationContext(loadRuntimeConfig()), {
-    onerror: (error) => process.stderr.write(`MCP HTTP error: ${error.name}\n`)
   });
-  process.stderr.write(`MCP HTTP listening on ${runtime.url.origin}\n`);
-} catch (error) {
-  const name = error instanceof Error ? error.name : 'Error';
-  process.stderr.write(`Unable to start MCP HTTP: ${name}\n`);
-  process.exitCode = 1;
 }
-```
+~~~
 
-Add these scripts to `package.json`:
+No other production file calls createApplicationContext(loadRuntimeConfig()). Product Task 5 must replace
+this function body rather than adding another default composition root.
 
-```json
-"start": "node dist/main.js",
-"start:http": "node dist/entrypoints/http.js"
-```
+Create startStdio(application?). Wrap serveStdio(createServerFactory(...), { legacy: 'serve', ... }). When no
+application is supplied, create one owned runtime. Its returned handle close() uses an idempotent aggregate
+settler so server close and owned runtime close are both attempted and all failures retained. Diagnostic
+errors write only error.name to stderr.
 
-Append to `src/index.ts`:
+main.ts starts stdio, installs once-only SIGINT/SIGTERM handlers that await handle.close(), sets a non-zero
+exit code on failure, and never writes to stdout. Do not put credentials in process arguments.
 
-```ts
-export { startStdio } from './entrypoints/stdio.js';
-export { startHttp } from './http/runtime.js';
-export type { HttpRuntime } from './http/runtime.js';
-```
+- [ ] **Step 4: Implement bounded Streamable HTTP and independent cleanup**
 
-- [ ] **Step 7: Run transport and regression gates**
+Create DEFAULT_HTTP_LIMITS and the documented body/concurrency/subscription/request/stream/session/socket
+bounds. Reject invalid option overrides at construction.
 
-Run:
+startHttp(application, options?) obtains buildApplicationHttpSecurity(application), refuses disabled or
+unsafe configuration, then creates the beta.4 handler and Node/Express adapter. Middleware order is exact:
+Host, Origin, body/time/size/concurrency bounds, bearer auth, then /mcp. Keep 2025 traffic stateless.
 
-```bash
+Construction/listen is wrapped in try/finally: if any stage fails, independently close every resource already
+created. Returned close() is idempotent and independently settles handler.close() and server.close(); one
+failure never skips another and an AggregateError retains all failures.
+
+src/entrypoints/http.ts creates the owned default runtime, starts HTTP, and installs the same once-only
+SIGINT/SIGTERM aggregate shutdown over HTTP plus application runtime. If startHttp fails, it still closes the
+owned application. Log only the public listening origin or error.name.
+
+Add start/start:http scripts. Root-export startStdio, startHttp, and safe runtime/limit types, but not default
+composition internals, HTTP security projection, expected token, or middleware authority.
+
+- [ ] **Step 5: Run transport, lifecycle, architecture, and regression gates**
+
+~~~bash
 npm run build
-npx vitest run tests/mcp/stdio.test.ts tests/http/runtime.test.ts
+npx vitest run tests/app/default-application.test.ts tests/mcp/stdio.test.ts \
+  tests/http/runtime.test.ts tests/integration/process-lifecycle.test.ts \
+  tests/architecture/execution-boundary.test.ts
 npm test
 npm run typecheck
 npm run lint
-```
+npm run format:check
+npm audit --omit=dev
+git diff --check
+~~~
 
-Expected: both stdio eras connect; missing authentication and foreign Host are refused; an exact configured Origin reaches authentication while scheme, host, port, opaque, malformed, and foreign variants receive 403; the default empty browser-origin list receives 403; an oversized body receives 413; all finite limits have their declared values; the authenticated modern client lists only `server_status`; and all deterministic gates exit `0`.
+Expected: both eras pass; HTTP checks run before dispatch; all partial-init/close branches settle independently;
+ApplicationContext/config/token remain opaque; stdout is protocol-only; audit is zero.
 
-- [ ] **Step 8: Commit transport adapters atomically**
+- [ ] **Step 6: Commit entrypoints atomically**
 
-```bash
-git add package.json src/entrypoints src/http src/main.ts src/index.ts \
-  tests/mcp/stdio.test.ts tests/http/runtime.test.ts
-git commit -m "feat: add dual-era stdio and hardened HTTP"
-```
-
+~~~bash
+git add package.json src/app/default-application.ts src/app/application-context.ts \
+  src/entrypoints src/http src/main.ts src/index.ts tests/app/default-application.test.ts \
+  tests/mcp/stdio.test.ts tests/http/runtime.test.ts \
+  tests/integration/process-lifecycle.test.ts tests/architecture/execution-boundary.test.ts
+git commit -m "feat: add owned hardened MCP entrypoints"
+~~~
 ### Task 7b: Add isolated default-off deprecated SSE compatibility
 
 **Files:**
@@ -3268,12 +2479,25 @@ git commit -m "feat: add dual-era stdio and hardened HTTP"
 
 **Interfaces:**
 - `@modelcontextprotocol/sdk@1.29.0` is the exact, installable legacy dependency and the only source of deprecated `McpServer`, `SSEServerTransport`, and test `SSEClientTransport` types. No v1 object is passed to `@modelcontextprotocol/server@2.0.0-beta.4`.
-- `buildLegacySseServer(application)` is private to `src/http/legacy-sse.ts`; it derives listed tools from `application.policy.listExposed('http')` and calls the shared `dispatchCapability` facade. It contains no firewall or business handler.
+- `buildLegacySseServer(application)` is private to `src/http/legacy-sse.ts`; it derives listed tools through
+  the narrow `listApplicationCapabilities(application, 'http')` helper and calls the shared
+  `dispatchCapability` facade with `{ application, transport: 'http', ... }`. It contains no firewall or
+  business handler. The architecture allow-list permits this one additional listing-helper import; it still
+  receives no dispatcher or settlement authority.
+- Legacy SSE has no safe elicitation continuation channel. Before registration it omits every sealed
+  definition whose `policy.confirmation !== 'none'`; it never dispatches a call merely to translate an
+  unusable confirmation challenge. This prevents deprecated clients from filling the process-wide
+  confirmation ledger.
 - `mountLegacySseCompatibility(...)` adds authenticated `GET /sse` and `POST /messages` only when `MCP_LEGACY_SSE_ENABLED=true`. The routes sit behind the same global Host, exact-Origin, body, concurrency, and deadline middleware as `/mcp`, enforce bearer authentication on both requests, cap sessions at 8, expire idle sessions after 2 minutes, and use the normal HTTP policy context.
 - `startHttp` still exposes Streamable HTTP at `/mcp`; the deprecated package is dynamically imported only when compatibility is enabled.
 - `npm run release:check:legacy-sse` is a networked pre-release drift gate. It fails if the registry's sole `latest` tag differs from the exact approved pin; release review must also decide whether the adapter can be removed and run `npm audit --omit=dev`.
 
 - [ ] **Step 1: Write the default-off, security, capacity, and compatibility tests first**
+
+In addition to transport tests, inject one confirmed-write definition. Prove it is absent from legacy
+`tools/list`, a forged legacy call is method-not-found, repeated attempts allocate no pending confirmation,
+and a subsequent modern/stdio confirmation still succeeds when tested at ledger capacity. Ordinary
+registered legacy calls must still traverse dispatchCapability().
 
 Create `tests/http/legacy-sse.test.ts`:
 
@@ -3358,7 +2582,7 @@ describe('deprecated SSE compatibility', () => {
     ).toBe(403);
     expect(
       (
-        await fetch(new URL('/messages?sessionId=missing-session', runtime.url), {
+        await fetch(new URL('/messages?sessionId=missing-session-1', runtime.url), {
           method: 'POST',
           headers: {
             authorization: `Bearer ${token}`,
@@ -3453,7 +2677,10 @@ import { McpServer as LegacyMcpServer } from '@modelcontextprotocol/sdk/server/m
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import type { CallToolResult as LegacyCallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { Express, RequestHandler } from 'express';
-import type { ApplicationContext } from '../app/application-context.js';
+import {
+  listApplicationCapabilities,
+  type ApplicationContext
+} from '../app/application-context.js';
 import { dispatchCapability } from '../capabilities/dispatch.js';
 import { SERVER_INSTRUCTIONS } from '../mcp/instructions.js';
 import { DEFAULT_HTTP_LIMITS } from './limits.js';
@@ -3486,7 +2713,7 @@ function legacyResult(outcome: DispatchOutcome): LegacyCallToolResult {
   }
   return {
     isError: true,
-    content: [{ type: 'text', text: 'Confirmation is unavailable on deprecated SSE.' }],
+    content: [{ type: 'text', text: 'The requested operation is unavailable on deprecated SSE.' }],
     structuredContent: { code: 'CONFIRMATION_INVALID' }
   };
 }
@@ -3497,7 +2724,8 @@ function buildLegacySseServer(application: ApplicationContext): LegacyMcpServer 
     { instructions: SERVER_INSTRUCTIONS }
   );
 
-  for (const capability of application.policy.listExposed('http')) {
+  for (const capability of listApplicationCapabilities(application, 'http')) {
+    if (capability.policy.confirmation !== 'none') continue;
     server.registerTool(
       capability.mcpName,
       {
@@ -3512,7 +2740,7 @@ function buildLegacySseServer(application: ApplicationContext): LegacyMcpServer 
         const outcome = await dispatchCapability(
           { name: capability.mcpName, arguments: rawInput },
           {
-            ...application,
+            application,
             transport: 'http',
             signal: extra.signal,
             ...(principalId === undefined ? {} : { principalId })
@@ -3610,7 +2838,15 @@ export function mountLegacySseCompatibility(
 
   return {
     close: async () => {
-      await Promise.all([...sessions.keys()].map((sessionId) => closeSession(sessionId)));
+      const results = await Promise.allSettled(
+        [...sessions.keys()].map((sessionId) => closeSession(sessionId))
+      );
+      const failures = results
+        .filter((result) => result.status === 'rejected')
+        .map((result) => result.reason);
+      if (failures.length > 0) {
+        throw new AggregateError(failures, 'Legacy SSE cleanup failed.');
+      }
     }
   };
 }
@@ -3623,7 +2859,7 @@ The deprecated SDK imports are confined to this file. In particular, do not cast
 In `src/http/runtime.ts`, replace the authentication and route-mounting block with:
 
 ```ts
-const authentication = bearerAuthentication(http.token);
+const authentication = http.authenticate;
 app.use(exactOriginValidation(http.allowedOrigins));
 app.use(enforceHttpLimits());
 const legacySse = http.legacySseEnabled
@@ -3640,15 +2876,10 @@ app.all('/mcp', (request, response) => {
 });
 ```
 
-Then replace the beginning of `HttpRuntime.close` with:
-
-```ts
-close: async () => {
-  await legacySse.close();
-  await handler.close();
-```
-
-Keep the existing listener-close promise after those two lines. `runtime.url` remains `/mcp`, proving Streamable HTTP has not been replaced.
+Add `legacySse.close()` as another independently settled operation in Task 7's existing idempotent aggregate
+close path beside `handler.close()` and the listener-close promise. Never replace that path with sequential
+awaits: every owned resource is attempted exactly once and all failures are retained in one AggregateError.
+`runtime.url` remains `/mcp`, proving Streamable HTTP has not been replaced.
 
 - [ ] **Step 5: Add the explicit pre-release dependency-drift gate**
 
@@ -3726,8 +2957,9 @@ git commit -m "feat: add isolated legacy SSE compatibility"
 
 **Interfaces:**
 - `node scripts/run-conformance.mjs 2025-11-25` runs official `server-initialize`, `ping`, and `tools-list` scenarios against the real product server.
-- `node scripts/run-conformance.mjs 2026-07-28` runs official `tools-list` at the draft revision against the real product server.
-- The harness binds the real factory to an ephemeral loopback port, passes no expected-failure file, propagates every non-zero exit, and always closes both handler and listener.
+- `node scripts/run-conformance.mjs 2026-07-28` runs official `tools-list` and `input-required-result-unsupported-methods` at the draft revision against the real product server.
+- The harness reaches the final executable composition seam, binds the real factory to an ephemeral loopback port, passes no expected-failure file, propagates every non-zero exit, and always independently closes the handler, listener, owned application runtime, and private temporary state directory.
+- The runner forcibly replaces ambient firewall credentials with inert sentinels and forces read-only mode. Listing and lifecycle scenarios must never contact an OPNsense target.
 
 - [ ] **Step 1: Prove the conformance entry is absent**
 
@@ -3747,12 +2979,14 @@ Create `scripts/run-conformance.mjs`:
 ```js
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { spawn } from 'node:child_process';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createMcpExpressApp } from '@modelcontextprotocol/express';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpHandler } from '@modelcontextprotocol/server';
-import { createApplicationContext } from '../dist/app/application-context.js';
-import { loadRuntimeConfig } from '../dist/config/runtime-config.js';
+import { createDefaultApplicationRuntime } from '../dist/app/default-application.js';
 import {
   configureNodeHttpLimits,
   DEFAULT_HTTP_LIMITS,
@@ -3766,34 +3000,44 @@ if (version !== '2025-11-25' && version !== '2026-07-28') {
   throw new Error('Usage: node scripts/run-conformance.mjs 2025-11-25|2026-07-28');
 }
 
-const application = createApplicationContext(
-  loadRuntimeConfig({ READ_ONLY: 'true', MCP_REQUEST_STATE_SECRET: '0'.repeat(32) })
-);
-const handler = createMcpHandler(createServerFactory(application, 'http'), {
-  legacy: 'stateless',
-  maxSubscriptions: DEFAULT_HTTP_LIMITS.maxSubscriptions,
-  onerror: (error) => process.stderr.write(`Conformance host error: ${error.name}\n`)
+const stateDirectory = await mkdtemp(join(tmpdir(), 'opnsense-mcp-conformance-'));
+for (const key of Object.keys(process.env)) {
+  if (
+    /^(OPNSENSE_|MCP_|ENABLE_|IAC_)/.test(key) ||
+    key === 'READ_ONLY' ||
+    key === 'ALLOWED_RESOURCES' ||
+    key === 'ENABLED_FEATURE_FLAGS'
+  ) {
+    delete process.env[key];
+  }
+}
+Object.assign(process.env, {
+  READ_ONLY: 'true',
+  ALLOWED_RESOURCES: '',
+  ENABLED_FEATURE_FLAGS: '',
+  MCP_REQUEST_STATE_SECRET: '0'.repeat(32),
+  MCP_HTTP_ENABLED: 'false',
+  MCP_LEGACY_SSE_ENABLED: 'false',
+  MCP_ALLOWED_HOSTS: '127.0.0.1,localhost',
+  MCP_ALLOWED_ORIGINS: '',
+  OPNSENSE_URL: 'https://127.0.0.1:9/api',
+  OPNSENSE_API_KEY: 'conformance-sentinel-key',
+  OPNSENSE_API_SECRET: 'conformance-sentinel-secret',
+  OPNSENSE_VERIFY_TLS: 'true',
+  OPNSENSE_BACKUP_PATH: join(stateDirectory, 'backups'),
+  OPNSENSE_AUDIT_LOG: join(stateDirectory, 'audit.jsonl')
 });
-const nodeHandler = toNodeHandler(handler, {
-  onerror: (error) => process.stderr.write(`Conformance adapter error: ${error.name}\n`)
-});
-const app = createMcpExpressApp({
-  host: '127.0.0.1',
-  allowedHosts: ['127.0.0.1', 'localhost'],
-  allowedOrigins: [],
-  jsonLimit: DEFAULT_HTTP_LIMITS.jsonBodyLimit
-});
-app.use(exactOriginValidation([]));
-app.use(enforceHttpLimits());
-app.all('/mcp', (request, response) => void nodeHandler(request, response, request.body));
+
+let applicationRuntime;
+let handler;
 let server;
 
-function listen() {
+function listen(app) {
   return new Promise((resolve, reject) => {
     const listening = app.listen(0, '127.0.0.1', () => {
-      server = listening;
       resolve();
     });
+    server = listening;
     configureNodeHttpLimits(listening);
     listening.once('error', reject);
   });
@@ -3809,7 +3053,7 @@ function closeServer() {
 const scenarios =
   version === '2025-11-25'
     ? ['server-initialize', 'ping', 'tools-list']
-    : ['tools-list'];
+    : ['tools-list', 'input-required-result-unsupported-methods'];
 
 async function runScenario(url, scenario) {
   const executable = fileURLToPath(
@@ -3839,21 +3083,69 @@ async function runScenario(url, scenario) {
   }
 }
 
-await listen();
+let primaryError;
 try {
+  applicationRuntime = createDefaultApplicationRuntime();
+  handler = createMcpHandler(
+    createServerFactory(applicationRuntime.application, 'http'),
+    {
+      legacy: 'stateless',
+      maxSubscriptions: DEFAULT_HTTP_LIMITS.maxSubscriptions,
+      onerror: (error) => process.stderr.write(`Conformance host error: ${error.name}\n`)
+    }
+  );
+  const nodeHandler = toNodeHandler(handler, {
+    onerror: (error) => process.stderr.write(`Conformance adapter error: ${error.name}\n`)
+  });
+  const app = createMcpExpressApp({
+    host: '127.0.0.1',
+    allowedHosts: ['127.0.0.1', 'localhost'],
+    allowedOrigins: [],
+    jsonLimit: DEFAULT_HTTP_LIMITS.jsonBodyLimit
+  });
+  app.use(exactOriginValidation([]));
+  app.use(enforceHttpLimits());
+  app.all('/mcp', (request, response) => void nodeHandler(request, response, request.body));
+
+  await listen(app);
   const address = server?.address();
   if (address === undefined || address === null || typeof address === 'string') {
     throw new Error('Conformance listener did not expose a TCP address.');
   }
   const url = `http://127.0.0.1:${address.port}/mcp`;
   for (const scenario of scenarios) await runScenario(url, scenario);
+} catch (error) {
+  primaryError = error;
 } finally {
-  await handler.close();
-  await closeServer();
+  const cleanupErrors = [];
+  for (const closePhase of [
+    () => closeServer(),
+    () => handler?.close() ?? Promise.resolve(),
+    () => applicationRuntime?.close() ?? Promise.resolve(),
+    () => rm(stateDirectory, { recursive: true, force: true })
+  ]) {
+    const [result] = await Promise.allSettled([Promise.resolve().then(closePhase)]);
+    if (result.status === 'rejected') cleanupErrors.push(result.reason);
+  }
+  if (primaryError !== undefined || cleanupErrors.length > 0) {
+    throw new AggregateError(
+      primaryError === undefined ? cleanupErrors : [primaryError, ...cleanupErrors],
+      'Conformance host or cleanup failed.'
+    );
+  }
 }
 ```
 
 This loopback listener is deliberately test-only. It still applies the product exact-Origin and finite HTTP limits, but omits bearer authentication solely because the official conformance process has no token option. Product HTTP continues to go through `startHttp` and therefore cannot bypass authentication, Host validation, exact-Origin validation, or limits.
+
+The atomic `server-stateless` scenario mixes useful generic checks with mandatory conformance-only tools,
+dynamic list mutation, and fixture behavior; the remaining unselected `input-required-result-*` scenarios
+similarly prescribe named `test_*` tools or response schemas that are not product APIs. The harness cannot
+select only the generic assertions inside one scenario. Do not add those tools to the product catalog merely
+to make a generic server look conformant. Task 6 directly covers the omitted generic stateless/MRTR
+guarantees through beta.4: modern metadata validation, discovery/capabilities, version binding, signed request
+state, method/principal binding, tamper and replay rejection, and multi-round confirmation. This is an
+explicit coverage limit, not an expected-failure baseline.
 
 - [ ] **Step 3: Ensure every conformance script builds first**
 
@@ -3865,7 +3157,7 @@ Replace the three conformance scripts in `package.json` with:
 "test:conformance": "npm run test:conformance:2025 && npm run test:conformance:2026"
 ```
 
-- [ ] **Step 4: Run all four targeted official invocations without a baseline**
+- [ ] **Step 4: Run all five targeted official invocations without a baseline**
 
 Run:
 
@@ -3874,7 +3166,7 @@ npm run test:conformance:2025
 npm run test:conformance:2026
 ```
 
-Expected: all four scenario invocations report zero failures and warnings; both commands exit `0`; no invocation uses `--suite`, `--force`, or `--expected-failures`. This is targeted interoperability evidence against the product surface, not full-suite conformance.
+Expected: all five scenario invocations report zero failures and warnings; both commands exit `0`; no invocation uses `--suite`, `--force`, or `--expected-failures`. This is targeted interoperability evidence against the product surface, not full-suite conformance.
 
 - [ ] **Step 5: Re-run deterministic gates**
 
@@ -4011,7 +3303,7 @@ npm run verify
 npm run test:conformance
 ```
 
-`npm run verify` runs formatting, lint, strict TypeScript, the JavaScript/TypeScript AGPL header gate, build, and deterministic Vitest tests. `npm run test:conformance` runs four targeted official invocations: `server-initialize`, `ping`, and `tools-list` at `2025-11-25`, then `tools-list` at draft `2026-07-28`. There is no expected-failure baseline. This is targeted interoperability evidence, not full-suite conformance.
+`npm run verify` runs formatting, lint, strict TypeScript, the JavaScript/TypeScript AGPL header gate, build, and deterministic Vitest tests. `npm run test:conformance` runs five targeted official invocations: `server-initialize`, `ping`, and `tools-list` at `2025-11-25`, then `tools-list` and `input-required-result-unsupported-methods` at draft `2026-07-28`. There is no expected-failure baseline. This is targeted interoperability evidence, not full-suite conformance.
 
 The MCP packages are deliberately pinned to `2.0.0-beta.4` for this foundation. Before public package publication, all MCP packages must be repinned to one stable MCP v2 release and every deterministic and conformance gate must pass again.
 
@@ -4055,7 +3347,7 @@ npm run test:conformance:2025
 npm run test:conformance:2026
 ```
 
-The first command runs targeted `server-initialize`, `ping`, and `tools-list` scenarios at `2025-11-25`. The second runs targeted `tools-list` at draft `2026-07-28`. Do not introduce an expected-failure baseline or describe these four invocations as a full suite.
+The first command runs targeted `server-initialize`, `ping`, and `tools-list` scenarios at `2025-11-25`. The second runs targeted `tools-list` and `input-required-result-unsupported-methods` at draft `2026-07-28`. Do not introduce an expected-failure baseline or describe these five invocations as a full suite.
 
 ## Change discipline
 
@@ -4136,7 +3428,7 @@ git status --short
 Expected:
 - dependency installation exits `0` under Node 22.19.0;
 - formatting, lint, typecheck, build, and all Vitest tests pass;
-- the four targeted official invocations report zero failures and warnings;
+- the five targeted official invocations report zero failures and warnings;
 - whitespace validation exits `0`;
 - `git status --short` lists only the four files created by this task before commit.
 
@@ -4160,6 +3452,6 @@ git diff --check
 git status --short
 ```
 
-Expected: every command exits `0`, all four targeted protocol invocations remain clean, and `git status --short` prints nothing.
+Expected: every command exits `0`, all five targeted protocol invocations remain clean, and `git status --short` prints nothing.
 
 The implementation is ready for a separate firewall-adapter plan only after this final state is reproduced. Public package publication remains blocked until the four MCP v2 beta pins are changed together to one stable release, the isolated legacy `@modelcontextprotocol/sdk@1.29.0` pin is removed or explicitly re-approved after its drift/audit gate, Guided Task 8 finalizes the independently authored public docs, and the same final state is reproduced again.

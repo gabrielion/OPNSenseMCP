@@ -4,7 +4,7 @@
 
 **Goal:** Deliver three safe, pedagogical OPNsense workflows, one-command installation for Codex, Claude Code, OpenCode, and Kimi, verified npm and MCP Registry distribution, approachable project documentation, and an evidence-backed first release.
 
-**Architecture:** Workflow capability factories plug into the foundation catalog and consume the parity layer only through one typed resource gateway. For an apply call, the sole envelope parses and admits the request, reserves and revalidates its single-use prepared plan in sealed preflight state, writes the audit intent, creates one strict backup, and only then invokes the handler. Mutations register idempotent compensation before outbound writes, verification and inverse rollback are explicit, and rollback uses an independent bounded signal. Codex and Claude Code install primarily through repository marketplace plugins, current Node-based Kimi Code uses its native plugin manifest, and OpenCode uses its native top-level `mcp` configuration because OpenCode's JS/TS hook plugins are not MCP-server packages. Direct MCP configuration remains the documented Codex/Claude/Kimi fallback. Package, plugin, Registry, documentation, and release claims are generated from committed manifests and canonical attestations.
+**Architecture:** Workflow capability factories plug into the foundation catalog and consume the parity layer only through one typed resource gateway. For an apply call, the single closed kernel pipeline parses and admits the request, reserves and revalidates its single-use prepared plan in sealed preflight state, writes the audit intent, creates one strict backup, and only then invokes the handler. Mutations register idempotent compensation before outbound writes, verification and inverse rollback are explicit, and rollback uses an independent bounded signal. Codex and Claude Code install primarily through repository marketplace plugins, current Node-based Kimi Code uses its native plugin manifest, and OpenCode uses its native top-level `mcp` configuration because OpenCode's JS/TS hook plugins are not MCP-server packages. Direct MCP configuration remains the documented Codex/Claude/Kimi fallback. Package, plugin, Registry, documentation, and release claims are generated from committed manifests and canonical attestations.
 
 **Tech Stack:** Node.js `>=22.19 <23`, strict TypeScript ESM, the existing direct `zod/v4` dependency, the existing Vitest runner, exact MCP SDK packages selected by the foundation plan, JSON Schema, ShellCheck, disposable OPNsense 26 VM, Codex CLI, Claude Code, OpenCode, Kimi Code CLI, Claude Code's `sonnet` model selector with the resolved model identity recorded in every attestation, npm, MCP Inspector, and the official MCP Registry publisher. Exact clients and test tools, their source, and artifact hashes are release inputs recorded in `tests/clients/versions.json`, not timeless claims in this plan.
 
@@ -18,8 +18,8 @@
 - Require one successful strict OPNsense configuration backup before the first outbound mutation of every apply execution. A failed backup aborts the workflow.
 - Never expose a private key, API secret, backup XML, audit payload, or credential-bearing command line in MCP content, logs, process listings, fixtures, attestations, or documentation.
 - Keep credentials in one private file outside the repository. Marketplace plugins resolve the documented platform-default path and honor `OPNSENSE_CONFIG_FILE` as an override; direct MCP configurations contain only that path in `OPNSENSE_CONFIG_FILE`, never a credential.
-- Treat prompts, skills, descriptions, annotations, and caller booleans as guidance rather than authorization. The catalog and dispatch envelope remain authoritative.
-- Use an opaque prepared-plan token for each mutation. Bind it to the caller subject, workflow, operation, normalized arguments, observed-state digest, expiry, reservation, and single-use state. Acquire and hold the per-firewall mutation lock, then reserve and live-revalidate the plan in envelope preflight after parse, dynamic scope checks, confirmation handling, and limiter admission but before audit intent and backup. The lease seals configuration and relevant-state digests. After backup and before handler invocation, the envelope requires the backup hash to match the sealed configuration digest and performs bounded read-only revalidation of both digests; otherwise it refuses before mutation. Only the sealed reserved plan may reach the handler; caller input and execution context can never inject it.
+- Treat prompts, skills, descriptions, annotations, and caller booleans as guidance rather than authorization. The closed catalog and kernel remain authoritative.
+- Use an opaque prepared-plan token for each mutation. Bind it to the caller subject, workflow, operation, normalized arguments, observed-state digest, expiry, reservation, and single-use state. Acquire and hold the per-firewall mutation lock, then reserve and live-revalidate the plan in kernel preflight after parse, dynamic scope checks, confirmation handling, and limiter admission but before audit intent and backup. The lease seals configuration and relevant-state digests. After backup and before handler invocation, the kernel requires the backup hash to match the sealed configuration digest and performs bounded read-only revalidation of both digests; otherwise it refuses before mutation. Only the sealed reserved plan may reach the handler; caller input and execution context can never inject it.
 - Ask at most one material clarification question in one response. Never infer an interface, virtual IP, DNS scope, certificate trust, device identity, or public reachability.
 - Restrict the first publication workflow to internal DNS and an internal CA. Do not claim public DNS, public certificate issuance, ISP traversal, or Internet reachability.
 - Run one managed VM at a time and prove reverse cleanup. Every VM-backed command in this plan must use the shared `npm run vm:with -- npm run test:vm` launcher shape, whose `finally` path aggregates residue and stop failures; raw provision/test/stop chains are forbidden. If the lab packet filter is disabled, report only guest-side DNS, TLS, HAProxy, backend, and configuration evidence.
@@ -36,17 +36,17 @@ This plan starts after the MCP v2 foundation and OPNsense product-parity tasks h
 
 | Owner | Export | Contract consumed here |
 | --- | --- | --- |
-| Foundation | `src/server/build-server.ts::buildServer(context: ServerContext): McpServer` | Registers the workflow capabilities, prompts, and `SERVER_INSTRUCTIONS` without leaking MCP transport types into domain code. |
+| Foundation | `src/server/build-server.ts::buildServer(application: ApplicationContext, transport: TransportKind): McpServer` | Registers the workflow capabilities, prompts, and `SERVER_INSTRUCTIONS` without leaking MCP transport types into domain code. |
 | Foundation | `src/capabilities/catalog.ts::CapabilityCatalog` with `getByMcpName(name)` | Closed catalog instance owned by `ApplicationContext` and used for listing, dispatch, docs, and coverage. |
-| Foundation | `src/capabilities/dispatch.ts::dispatchCapability(request, context): Promise<DispatchOutcome>` | Sole execution facade. Public requests use `name` and `arguments`; the facade alone adapts them to the policy envelope's internal names. Direct dispatch still passes through the catalog and policy envelope. |
-| Foundation | `src/capabilities/types.ts::defineCapability`, `CapabilityDefinition`, `CapabilityExecutionContext`, and `ServerContext`; `src/app/application-context.ts::ApplicationContext`; `src/security/policy-envelope.ts::DispatchOutcome` | Capability factories provide typed handlers to `defineCapability`; `CapabilityDefinition` exposes policy and schemas but no public handler. |
+| Foundation | `src/capabilities/dispatch.ts::dispatchCapability(request, context): Promise<CapabilityResult>` | Sole package-root execution facade. Public requests use `name` and `arguments`; every dispatch remains inside the closed catalog and policy kernel. |
+| Foundation | package-internal `src/capabilities/kernel.ts::defineCapability`; safe contracts `CapabilityDefinition`, `CapabilityExecutionContext`, `ServerContext`, and `CapabilityResult` from `src/capabilities/types.ts`; opaque `src/app/application-context.ts::ApplicationContext` | Capability factories provide typed handlers to the closed kernel; `CapabilityDefinition` exposes policy and schemas but no handler or confirmation authority. The internal dispatcher is not a cross-plan/public contract. |
 | Parity | `src/app/product-context.ts::createProductApplicationContext(config, dependencies, extensions): ApplicationContext` and `ProductDependencies` | Sole production composition root; injects domain services and policy dependencies without globals. |
-| Parity Task 5 | `src/capabilities/types.ts::CapabilityPreflightContext`, `CapabilityPreflightLease`, `FirewallPreflightObservation`, `PreflightExecutionMetadata`, `MutationExecutionMetadata`, `requirePreflightValue`, and `requireMutationMetadata` | Private preflight and mutation handoff. `defineCapability` stores `preflight` and handlers in private weak maps; `CapabilityDefinition` exposes neither. Only the envelope creates/settles sealed metadata. |
+| Parity Task 5 | Types `CapabilityPreflightContext`, `CapabilityPreflightLease`, `FirewallPreflightObservation`, `PreflightExecutionMetadata`, and `MutationExecutionMetadata` from `src/capabilities/types.ts`; package-internal `requirePreflightValue` and `requireMutationMetadata` from `src/capabilities/kernel.ts` | Private preflight and mutation handoff. `defineCapability` stores preflight and handlers in private weak maps; `CapabilityDefinition` exposes neither. Only the kernel creates/settles sealed metadata. |
 | Parity Task 5 | `src/security/firewall-preflight.ts::createFirewallPreflight` | Builds the mandatory sealed configuration/relevant-state observation for a firewall-write preflight without exposing mutation metadata. |
 | Parity | `src/opnsense/client.ts::createOPNsenseClient(config): OPNsenseClient` | HTTPS boundary for direct probes that are not typed resources. |
 | Parity | `src/opnsense/catalog/resources.ts::getResource(name)` and `listResources()` | Exact 96-resource catalog. |
 | Parity | `src/opnsense/generic/service.ts::createGenericResourceService(client, catalog)` | Resource list/get/create/update/delete/apply primitives. |
-| Parity | `src/features/backup/service.ts::BackupService` | Strict pre-change snapshot invoked by the foundation envelope. Workflow handlers receive only backup metadata. |
+| Parity | `src/features/backup/service.ts::BackupService` | Strict pre-change snapshot invoked by the kernel pipeline. Workflow handlers receive only backup metadata. |
 | Parity | `src/security/audit-log.ts::AuditLog` | Redacted intent, refusal, completion, and rollback events. |
 
 Add one adapter over the parity layer. Workflow modules must not construct controller paths or call mutation endpoints directly.
@@ -130,16 +130,17 @@ Foundation vocabulary exactly: `policy.effect`, `policy.resourceScopes`,
 `policy.requiredFeatureFlags`, `policy.backup`, `policy.audit`, `policy.confirmation`, and
 `policy.timeoutMs`. Guided workflows require no feature flag; `requiredFeatureFlags` is `[]`, rather than an
 invented workflow flag. Catalog lookups use `getByMcpName()`. `createServerFactory()` and `buildServer()`
-continue to receive the ordinary `ApplicationContext`/`ServerContext`.
+continue to receive the ordinary `ApplicationContext` plus an explicit transport; request callbacks create
+the safe `ServerContext` only for `dispatchCapability()`.
 
-The Product Task 5 envelope order is fixed: catalog/exposure/read-only/feature checks; Zod parse and
+The Product Task 5 kernel order is fixed: catalog/exposure/read-only/feature checks; Zod parse and
 normalization; dynamic resource scopes and allow-list; Foundation elicitation if declared; limiter
 admission plus acquisition of the per-firewall mutation lock; sealed preflight; fsynced audit intent; strict
 backup; handler invocation; output validation; final audit. Preflight receives
 `CapabilityPreflightContext`, never mutation metadata, and returns a
 `CapabilityPreflightLease` with `{ value, release(), consume(), firewallObservation? }`. Every
 firewall-write lease includes an observation with `configurationSha256`, `relevantStateSha256`, and bounded
-`revalidate(signal)`. The envelope calls `release()` exactly
+`revalidate(signal)`. The kernel calls `release()` exactly
 once if execution stops before handler invocation, or `consume()` exactly once when invocation begins,
 including handler/output/final-audit failure. Lease-settlement failures are aggregated with the primary
 failure.
@@ -149,11 +150,11 @@ must not perform mutation I/O. An apply preflight atomically reserves the token,
 subject/workflow/operation/expiry and current observed-state digest, and seals both that digest and the
 exact effect plan in a branded immutable `ReservedPreparedPlan` lease value. The handler
 obtains it only with `requirePreflightValue(context, ReservedPreparedPlanSchema.parse)`; it never consumes a
-token itself. The envelope also supplies Product Task 5's immutable
+token itself. The kernel also supplies Product Task 5's immutable
 `CapabilityExecutionContext.mutation`. Handlers fail closed if either sealed value is missing before
 touching the gateway, using `requireMutationMetadata(context)` rather than trusting a structural object.
 The mutation lock remains held through handler verification/rollback, lease settlement, and final audit.
-After strict backup but before constructing handler metadata, the envelope requires
+After strict backup but before constructing handler metadata, the kernel requires
 `backup.sha256 === firewallObservation.configurationSha256`, calls
 `firewallObservation.revalidate(signal)`, and compares both returned digests with the sealed values. A
 mismatch returns Product Task 5's `PRECONDITION_CHANGED`, releases the plan lease because invocation never
@@ -252,7 +253,7 @@ CLAUDE.md
 - Create: `tests/workflows/execution.test.ts`
 
 **Interfaces:**
-- Consumes: `CapabilityExecutionContext`, `CapabilityPreflightLease`, `requirePreflightValue()`, `requireMutationMetadata()`, `ApplicationContext`, `ProductDependencies`, `createProductApplicationContext()`, `createGenericResourceService()`, `getResource()`, and `listResources()` from the fixed cross-plan contracts. Backup/audit/limiter services remain envelope-owned Product dependencies and are not injected into workflow handlers.
+- Consumes: `CapabilityExecutionContext`, `CapabilityPreflightLease`, `requirePreflightValue()`, `requireMutationMetadata()`, `ApplicationContext`, `ProductDependencies`, `createProductApplicationContext()`, `createGenericResourceService()`, `getResource()`, and `listResources()` from the fixed cross-plan contracts. Backup/audit/limiter services remain kernel-owned Product dependencies and are not injected into workflow handlers.
 - Produces: an immutable independently reviewed workflow-contract extension plus evidence manifest;
   `PreparedPlanStore`, `PreparedPlan`, `WorkflowResourceGateway`, `WorkflowExecution`, `RollbackAction`,
   `executePreparedWorkflow()`, `createWorkflowCapabilities()`, and `createWorkflowApplicationContext()`.
@@ -498,17 +499,17 @@ definitions as extensions to `createProductApplicationContext`. Do not add these
 `policy.confirmation: 'none'`, and declare only valid Foundation feature
 flags. A firewall-write factory composes the plan reservation with
 `createFirewallPreflight()` so its returned lease includes the mandatory sealed configuration and
-relevant-state observation. Assert that the envelope acquires the target lock before calling it, matches
+relevant-state observation. Assert that the kernel acquires the target lock before calling it, matches
 the strict backup hash and bounded revalidation before handler invocation, and releases the plan lease on
 `PRECONDITION_CHANGED`. Assert that `preflight` and `mutation` metadata are present only in execution
-contexts created by the envelope at their documented phases and cannot be caller-set.
+contexts created by the kernel at their documented phases and cannot be caller-set.
 
 - [ ] **Step 7: Run the workflow runtime and foundation safety gates**
 
 Run:
 
 ```bash
-npx vitest run tests/workflows/prepared-plans.test.ts tests/workflows/execution.test.ts tests/security/product-policy-envelope.test.ts tests/integration/backup-dispatch.test.ts tests/contract/workflow-contract.test.ts
+npx vitest run tests/workflows/prepared-plans.test.ts tests/workflows/execution.test.ts tests/security/product-policy-kernel.test.ts tests/integration/backup-dispatch.test.ts tests/contract/workflow-contract.test.ts
 npm run typecheck
 npm run license:check
 ```
@@ -709,7 +710,7 @@ git commit -m "feat: prepare and verify internal service publication"
 const application = writableApplication(events);
 const result = await dispatchCapability(
   { name: 'apply_internal_service', arguments: { planToken: prepared.planToken } },
-  { ...application, transport: 'stdio' }
+  { application, transport: 'stdio' }
 );
 
 expect(events).toEqual([
@@ -783,7 +784,7 @@ The public `apply_internal_service` input schema accepts exactly `{ planToken: s
 `defineCapability` preflight callback atomically reserves the token, re-reads every observed object,
 verifies `observedStateHash` and the managed-object ownership markers, and returns the reserved plan in a
 `CapabilityPreflightLease` combined with `createFirewallPreflight()`'s sealed configuration/relevant-state
-observation. This happens under the target lock before audit and backup. The Product envelope matches the
+observation. This happens under the target lock before audit and backup. The Product kernel matches the
 strict backup hash and revalidation before handler invocation. The handler never looks up the token: it
 uses `requirePreflightValue(context, ReservedPreparedPlanSchema.parse)`, calls
 `requireMutationMetadata(context)`, and builds reversible steps from the sealed plan. Each executor registers its
@@ -791,7 +792,7 @@ idempotent compensation before the corresponding gateway mutation.
 
 Envelope and handler order is fixed:
 
-1. while the per-firewall lock is still held, the envelope matches the backup configuration hash and revalidates both sealed digests; refuse before handler invocation on drift;
+1. while the per-firewall lock is still held, the kernel matches the backup configuration hash and revalidates both sealed digests; refuse before handler invocation on drift;
 2. create the optional virtual IP and apply interfaces;
 3. create or reuse the managed internal CA and create the hostname certificate;
 4. create HAProxy server, backend, ACL, action, and shared-frontend link fields;
@@ -859,7 +860,7 @@ cached MCP name cannot bypass `catalog.getByMcpName()`, read-only mode, or an al
 Run:
 
 ```bash
-npx vitest run tests/workflows/internal-service-apply.test.ts tests/workflows/internal-service-rollback.test.ts tests/integration/internal-service-policy.test.ts tests/security/product-policy-envelope.test.ts tests/integration/backup-dispatch.test.ts tests/contract/workflow-contract.test.ts
+npx vitest run tests/workflows/internal-service-apply.test.ts tests/workflows/internal-service-rollback.test.ts tests/integration/internal-service-policy.test.ts tests/security/product-policy-kernel.test.ts tests/integration/backup-dispatch.test.ts tests/contract/workflow-contract.test.ts
 npm run typecheck
 ```
 
@@ -897,7 +898,7 @@ const DeviceDomainInput = z.object({
 
 - [ ] Run `npx vitest run tests/workflows/device-domain.test.ts tests/integration/device-domain-policy.test.ts`; expect FAIL because the workflow factories are absent.
 - [ ] Implement preparation with a `/32` `source_nets` selector and normalized `blocklists`/`wildcards`. Store ownership as `'opnsense-mcp:device-domain:' + sha256(canonicalDeviceAndDomain).slice(0, 16)`. Disclose that application-level encrypted DNS or VPNs can bypass the firewall resolver; do not claim prevention.
-- [ ] Implement the capability factory's private preflight under the per-firewall mutation lock with atomic token reservation and bounded current-state revalidation before audit/backup. Compose its lease with `createFirewallPreflight()`; the envelope matches the strict backup configuration hash and revalidates both sealed digests before invoking the handler. The handler obtains only the sealed plan with `requirePreflightValue` and Product Task 5's sealed mutation value with `requireMutationMetadata`, then performs optional reservation, DNSBL settings write, one Unbound apply, source-specific DNS verification, and reverse rollback. Register every idempotent compensation before its mutation. Verification returns `blocked-for-device`, `not-blocked-for-device`, and an unchanged control-source result.
+- [ ] Implement the capability factory's private preflight under the per-firewall mutation lock with atomic token reservation and bounded current-state revalidation before audit/backup. Compose its lease with `createFirewallPreflight()`; the kernel matches the strict backup configuration hash and revalidates both sealed digests before invoking the handler. The handler obtains only the sealed plan with `requirePreflightValue` and Product Task 5's sealed mutation value with `requireMutationMetadata`, then performs optional reservation, DNSBL settings write, one Unbound apply, source-specific DNS verification, and reverse rollback. Register every idempotent compensation before its mutation. Verification returns `blocked-for-device`, `not-blocked-for-device`, and an unchanged control-source result.
 - [ ] Implement removal as prepare-only and make apply remove every owned duplicate while retaining unrelated device/domain entries. Factory definitions use nested Foundation policy fields, `requiredFeatureFlags: []`, and `confirmation: 'none'`; the prepared token is not a confirmation-policy value.
 - [ ] In the VM test, register fixture cleanup before setup mutation, create a synthetic `.home.arpa` override, query from two guest source addresses, prove the selected `/32` is blocked and the control source resolves, remove it, prove both resolve, and verify no owned object remains. The test body uses `try/finally`, while every invocation goes through the outer `npm run vm:with -- ...` wrapper so residue verification and VM stop also run after failure.
 - [ ] Run `npx vitest run tests/workflows/device-domain.test.ts tests/integration/device-domain-policy.test.ts tests/contract/workflow-contract.test.ts && npm run typecheck`; expect PASS. Defer the wrapped live command to Task 9.
@@ -911,13 +912,15 @@ git commit -m "feat: add device scoped domain blocking workflow"
 ### Task 5: Add pedagogical diagnosis, instructions, prompts, and skill
 
 **Files:** Create `src/workflows/diagnosis/{schemas,service,capabilities}.ts`,
+`src/app/workflow-runtime.ts`, `tests/app/default-workflow-runtime.test.ts`,
 `skills/opnsense-guide/SKILL.md`, `tests/workflows/diagnosis.test.ts`, and
 `tests/contract/workflow-runtime.test.ts`; modify the Foundation-owned
+`src/app/default-application.ts`,
 `src/mcp/instructions.ts`, `src/mcp/prompts.ts`, `tests/mcp/instructions.test.ts`,
 `tests/mcp/prompts.test.ts`, and `tests/mcp/elicitation.test.ts`, plus
 `src/workflows/catalog.ts`, `tests/evidence/opnsense-workflow-evidence.json`, and `package.json`.
 
-**Interfaces:** Produce read-only tool `diagnose_network_problem`; MCP prompts `diagnose_network_problem`, `publish_internal_service`, and `block_domain_for_device`; `SERVER_INSTRUCTIONS`; and skill `opnsense-guide`. Publication and blocking prompts may prepare a plan but never call apply.
+**Interfaces:** Produce read-only tool `diagnose_network_problem`; MCP prompts `diagnose_network_problem`, `publish_internal_service`, and `block_domain_for_device`; `SERVER_INSTRUCTIONS`; skill `opnsense-guide`; and `createWorkflowRuntimeFromEnvironment()` as the final executable composition root. Publication and blocking prompts may prepare a plan but never call apply.
 
 - [ ] Write failing diagnosis tests using the non-technical request “Internet est lent sur mon ordinateur, regarde sans rien modifier et explique-moi simplement.” Missing identity returns one plain-language question. A complete request reads DHCP/ARP, interface state, routes, matching rules, states, and bounded logs, with zero mutation and zero backup calls.
 - [ ] Assert the output contract separates `observations` with evidence/source, `hypotheses` with confidence/reason, `summary`, `nextQuestion`, `recommendedActions`, and literal `modified: false`. A hypothesis must never be labeled as proof.
@@ -934,28 +937,51 @@ schema-valid reviewed bundle and pass it explicitly. Run the focused tests plus 
 tests/capabilities/catalog.test.ts tests/contract/workflow-contract.test.ts
 tests/contract/workflow-runtime.test.ts && npm run workflow-contract:validate && npm run
 workflow-runtime:validate && npm run typecheck`; expect the exact union to pass and zero recorded mutation.
+- [ ] Implement `createWorkflowRuntimeFromEnvironment(env, factories?)` in
+`src/app/workflow-runtime.ts`. It calls the source-internal Product
+`createOwnedProductServicesFromEnvironment()`, builds one generic resource service, WorkflowResourceGateway,
+PreparedPlanStore, clock, and random source, then passes those exact dependencies to
+`createWorkflowApplicationContext()`. Initialization is transactional and `close()` delegates exactly once to
+the owned Product services even after partial workflow construction failure. No service, secret, dispatcher,
+or close authority is attached to opaque ApplicationContext.
+- [ ] Replace `src/app/default-application.ts::createDefaultApplicationRuntime()` with
+`createWorkflowRuntimeFromEnvironment(process.env)`. This is the final production composition root; no
+Foundation-only or Product-only default remains reachable from `dist/main.js` or the HTTP entrypoint.
+`tests/app/default-workflow-runtime.test.ts` uses read-only sentinel env/factories. It requires the safe
+catalog reference and contract validator to contain the exact reviewed base-plus-nine-workflow union, then
+uses the real buildServer to require `tools/list` to equal exactly the catalog's read-only exposed subset with
+every write absent, plus the three read-only product resources and three prompts. It calls a product read and
+`diagnose_network_problem`, proves no mutation on startup/listing, covers partial
+initialization/idempotent cleanup, and asserts all errors/results omit secrets.
 - [ ] Commit:
 
 ```bash
-git add src/workflows/diagnosis src/mcp/instructions.ts src/mcp/prompts.ts skills/opnsense-guide src/workflows/catalog.ts tests/evidence/opnsense-workflow-evidence.json tests/workflows/diagnosis.test.ts tests/contract/workflow-runtime.test.ts tests/mcp/instructions.test.ts tests/mcp/prompts.test.ts tests/mcp/elicitation.test.ts package.json
+git add src/app/workflow-runtime.ts src/app/default-application.ts src/workflows/diagnosis \
+  src/mcp/instructions.ts src/mcp/prompts.ts skills/opnsense-guide src/workflows/catalog.ts \
+  tests/app/default-workflow-runtime.test.ts tests/evidence/opnsense-workflow-evidence.json \
+  tests/workflows/diagnosis.test.ts tests/contract/workflow-runtime.test.ts \
+  tests/mcp/instructions.test.ts tests/mcp/prompts.test.ts tests/mcp/elicitation.test.ts package.json
 git commit -m "feat: add pedagogical guidance and read only diagnosis"
 ```
 
 ### Task 6: Build the private configuration and four client installers
 
-**Files:** Create `src/config/private-config.ts`, `src/cli/{index,doctor,uninstall}.ts`,
-`src/installers/{contracts,distribution-identity,ownership,codex,claude-code,opencode,kimi,skills}.ts`,
-`.agents/plugins/marketplace.json`, `.claude-plugin/marketplace.json`,
-`plugins/opnsense-mcp/.codex-plugin/plugin.json`,
-`plugins/opnsense-mcp/.claude-plugin/plugin.json`, root `kimi.plugin.json`,
-`plugins/opnsense-mcp/.mcp.json`,
-`plugins/opnsense-mcp/skills/opnsense-guide/SKILL.md`,
-`scripts/distribution/render-manifests.mjs`,
+**Files:** Create `src/cli/{index,doctor,uninstall}.ts`,
+`src/installers/{contracts,distribution-identity,ownership,codex,claude-code,opencode,kimi,skills}.ts`, root
+`kimi.plugin.json`, `scripts/distribution/render-manifests.mjs`,
 `tests/installers/{private-config,clients,plugins,uninstall}.test.ts`, and
-`tests/clients/{versions.json,smoke.mjs}`; modify the provenance-approved
-`src/cli/{install,serve}.ts`, `skills/opnsense-guide/SKILL.md`, and `package.json`.
+`tests/clients/{versions.json,smoke.mjs}`. Modify/adapt the already provenance-migrated
+`.agents/plugins/marketplace.json`, `.claude-plugin/marketplace.json`,
+`plugins/opnsense-mcp/{.codex-plugin/plugin.json,.claude-plugin/plugin.json,.mcp.json}`,
+`plugins/opnsense-mcp/skills/opnsense-guide/{SKILL.md,agents/openai.yaml}`,
+`src/cli/{install,serve}.ts`, `tests/plugin/package.test.mjs`, and
+`tests/installer/install.test.mjs`; extend Product Task 10's single
+`src/config/private-config.ts` store with interactive installer operations; modify the independently authored root
+`skills/opnsense-guide/SKILL.md` and `package.json`. Do not recreate or overwrite a migrated file as if it
+were new: preserve its provenance row while refactoring it to the final client contract.
 
-**Interfaces:** `opnsense-mcp` with no arguments serves stdio; `install --client
+**Interfaces:** `opnsense-mcp` with no arguments serves stdio; `opnsense-mcp http` starts the same hardened
+authenticated loopback HTTP entrypoint for explicit local use and accepts no token/secret flag; `install --client
 codex|claude-code|opencode|kimi|all`, `doctor`, and `uninstall` manage only owned entries. Codex and
 Claude Code use marketplace/plugin commands by default and accept `--direct-mcp` only as a documented
 fallback. Current Node-based Kimi Code uses its native plugin as the primary documented flow and current
@@ -1075,7 +1101,7 @@ git commit -m "feat: install OPNsense MCP in four coding clients"
 ### Task 7: Package npm and MCP Registry distribution
 
 **Files:** Create `server.json`,
-`scripts/release/{check-namespaces,validate-package,validate-plugins,publish}.mjs`, and
+`scripts/release/{check-namespaces,validate-package,validate-plugins,verify-remote-clients,publish}.mjs`, and
 `tests/release/{package,names,distribution}.test.ts`; modify `package.json`,
 `tests/clients/versions.json`, the Task 6 distribution manifests, and `.github/workflows/ci.yml`.
 
@@ -1118,12 +1144,30 @@ proves that every rendered source resolves from the anticipated tag name and pac
 floating ref. After tag creation, the release validator resolves the signed tag locally, verifies its full
 target commit SHA is the current evidence commit, and verifies every tag-pinned manifest from those resolved
 bytes without rewriting a manifest.
-- [ ] Implement `publish.mjs` as dry-run by default. `--execute` requires a clean signed release tag whose
-resolved full target commit SHA equals `HEAD`, successful namespace/name/license/plugin/package checks,
-exact package and tool hashes, and immutable release-rendered manifests pinned to that tag name; then run
-`spawn('npm', ['publish', tarballPath, '--access', 'public'])`, verify
-through `npm view`, authenticate the pinned `mcp-publisher`, publish the Registry record, and verify the
-Registry API in that order. It must never download an unpinned latest tool during release.
+- [ ] Implement `publish.mjs` as dry-run by default and as three explicit resumable execute phases; there is
+no one-shot execute mode. Every phase revalidates the clean signed tag, exact HEAD, namespace/name/license,
+plugin/package checks, hashes, and immutable manifests and prints the irreversible action before doing it:
+  1. `--execute --phase git` pushes the evidence commit and signed tag, then reads the remote GitHub tag back
+     and requires its peeled commit SHA to equal HEAD;
+  2. `--execute --phase npm` requires that verified remote tag, runs
+     `spawn('npm', ['publish', tarballPath, '--access', 'public'])`, and verifies the exact immutable package
+     through `npm view` plus a clean install;
+  3. `--execute --phase registry` requires the separately signed remote-client attestation described below,
+     authenticates the pinned `mcp-publisher`, publishes the Registry record, and verifies the Registry API.
+The script never downloads an unpinned latest tool. It writes resumable operational state only outside the
+repository and binds it to tag, HEAD, package hash, manifest hash, and tool hashes; a mismatch refuses the
+next phase. Local pre-push plugin validation resolves the signed tag through an isolated local bare-repository
+fixture, not GitHub.
+- [ ] Implement `verify-remote-clients.mjs --execute` as the mandatory command between npm and Registry
+phases. It loads the phase state, verifies the remote Git tag and exact npm artifact again, creates clean
+isolated homes, and runs the exact pinned Codex, Claude, Kimi and OpenCode install/handshake checks. It writes
+canonical `remote-client-attestation.json` only to the external operational state directory, binding full
+HEAD, signed tag object and peeled commit, package/tarball/manifest/tool hashes, exact client versions,
+commands as redacted argument arrays, exit results, and timestamp. Sign that JSON with the same configured
+operator identity used for the Git tag (support Git's OpenPGP or SSH signing modes; fail closed for an
+unsupported/unverifiable signer), then immediately verify the detached signature. Inject signer/verifier and
+client runners in tests; never log private signing material. Registry phase re-verifies the signature and
+every binding and refuses stale, copied, unsigned, partially successful, or differently hashed evidence.
 - [ ] Run `npx vitest run tests/release && node scripts/release/validate-package.mjs && node scripts/release/validate-plugins.mjs && npm run license:check && git diff --check`; expect PASS without publishing and with no tarball or temporary plugin home left in the repository.
 - [ ] Commit `git add package.json server.json scripts/release tests/release tests/clients/versions.json .agents .claude-plugin plugins kimi.plugin.json .github/workflows/ci.yml && git commit -m "build: prepare npm, plugin, and MCP Registry distribution"`.
 
@@ -1183,6 +1227,7 @@ VM wrapper, preflight-before-backup boundary, AGPL/name gates, evidence limitati
 **Files:** Modify the provenance-approved `tests/agentic/deepeval/run_eval.py`,
 `tests/agentic/model-config.json`, `tests/agentic/ground-truth.csv`, and `tests/vm/` workflow harness;
 create `tests/agentic/deepeval/test_workflow_oracles.py`,
+`tests/release/installed-runtime.test.mjs`,
 `scripts/provenance/generate-release-audit.mjs`, and
 `tests/provenance/release-audit.test.mjs`. In the final evidence-only commit, create
 `tests/agentic/attestations/v0.1.0/report.json` and
@@ -1211,7 +1256,8 @@ run:
 
 ```bash
 git add tests/agentic/deepeval tests/agentic/model-config.json tests/agentic/ground-truth.csv tests/vm \
-  scripts/provenance/generate-release-audit.mjs tests/provenance/release-audit.test.mjs
+  tests/release/installed-runtime.test.mjs scripts/provenance/generate-release-audit.mjs \
+  tests/provenance/release-audit.test.mjs
 git commit -m "test: add guided workflow evaluation profiles"
 ```
 
@@ -1226,12 +1272,23 @@ require exactly 105
 `approved-migrated`, 3 `independently-rewritten`, and 8 `discarded` rows. Commit every SDK, generated
 manifest, reviewed provenance, workflow evidence, or documentation change now. After this point, any
 non-evidence change invalidates the candidate and restarts the review, sealing, and gates.
-- [ ] On that clean candidate parent, run offline and protocol gates: `./scripts/test`, all four committed
+- [ ] On that clean candidate parent, run offline and protocol gates: `./scripts/test`, all five committed
 applicable official MCP scenarios for the supported 2025 and 2026 protocol versions, the exact hashed MCP
 Inspector CLI smoke, `node scripts/release/validate-package.mjs`,
 `node scripts/release/validate-plugins.mjs`, `npm run provenance:verify`, secret scan,
 dependency/license/name review, and `git diff --check`. Every command must exit `0`; evidence must call this
 targeted interoperability and must not claim the complete artificial-fixture suite.
+- [ ] Pack the exact candidate, install the tarball into a fresh temporary directory, and run
+`tests/release/installed-runtime.test.mjs` against the repository mock OPNsense with sentinel credentials.
+Through the installed `opnsense-mcp` binary, require stdio and authenticated loopback HTTP to expose the same
+read-only exposed subset derived from the reviewed product-plus-nine-workflow catalog, three resources, three
+prompts, read-only default, and working `server_status` plus one product read. Inspect the opaque
+application's safe catalog reference (or the generated reviewed contract resource) separately to require the
+complete exact union, including hidden writes. Launch HTTP only as `opnsense-mcp http` with sentinel
+MCP_HTTP environment; the command accepts no token argument. Assert every write is absent from `tools/list`,
+the Foundation-only and Product-only default factories are unreachable, cleanup is idempotent, stdout is
+protocol-clean, and no packed file/output contains a sentinel secret. This test is mandatory inside
+`validate-package.mjs`, not an optional client smoke.
 - [ ] Run `./scripts/test --clients`; require all four exact client artifacts and test tools to match
 `tests/clients/versions.json`, all three isolated local candidate native plugin installs to succeed, all four handshakes,
 and the real OpenCode end-to-end tool call. OpenCode's desktop-only `1.18.3` observation is insufficient; a
@@ -1300,12 +1357,24 @@ hashes, package, Registry metadata, AGPL declaration, plugin tag/version, name g
 exactly.
 - [ ] After explicit operator authorization, create signed tag `v0.1.0` at the evidence commit. Verify that
 the diff from the attested parent to the signed tag is still only the report, redacted trace, and generated
-README evidence block plus the narrowly scoped manifest and release-audit updates. Rerun `node
-scripts/release/publish.mjs`, inspect its immutable dry-run summary, then
-run `node scripts/release/publish.mjs --execute`. Verify exact-version npm installation, Registry lookup,
-Codex `marketplace add --ref v0.1.0` plus plugin add, Claude marketplace/plugin install resolving the pinned
-tag/version, Kimi native plugin install from that tag, and clean-room OpenCode native-MCP plus Kimi
-direct-MCP fallback installs before pushing the tag.
+README evidence block plus the narrowly scoped manifest and release-audit updates. Resolve that signed tag
+through an isolated local bare-repository fixture and rerun every plugin/package test against the packed
+artifact. Inspect `node scripts/release/publish.mjs` dry-run output, then execute the irreversible phases in
+dependency order:
+
+```bash
+node scripts/release/publish.mjs --execute --phase git
+node scripts/release/publish.mjs --execute --phase npm
+node scripts/release/verify-remote-clients.mjs --execute
+node scripts/release/publish.mjs --execute --phase registry
+```
+
+After the Git phase, require the GitHub tag's peeled SHA to equal the local signed tag. After npm, verify the
+exact-version clean install, then verify Codex `marketplace add --ref v0.1.0` plus plugin add, Claude
+marketplace/plugin install resolving the pinned tag/version, Kimi native plugin install from that tag, and
+clean-room OpenCode native-MCP plus Kimi direct-MCP fallback. A remote client failure stops before Registry
+publication and is reported as a partial release requiring correction/new version; never move or overwrite
+the published tag/package. Registry lookup is verified only after the final phase.
 
 Release is complete only when complete parity, deterministic tests, the named applicable official MCP
 protocol scenarios, four client handshakes, OpenCode end-to-end execution, disposable-VM

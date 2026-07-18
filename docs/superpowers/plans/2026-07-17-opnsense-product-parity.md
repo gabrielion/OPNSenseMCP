@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Rebuild the independently reviewed public OPNsense product contract behind the MCP v2 capability catalog and safety envelope, with independently implemented runtime code and executable evidence for every declared behavior.
+**Goal:** Rebuild the independently reviewed public OPNsense product contract behind the MCP v2 capability catalog and closed policy kernel, with independently implemented runtime code and executable evidence for every declared behavior.
 
 **Architecture:** A versioned, independently reviewed public contract is the normative source for exact capability names, policy, feature flags, resource scopes, and mutation lifecycle requirements. A small OPNsense HTTPS client feeds a generated typed resource catalog and one generic CRUD engine; curated domain capabilities compose the same client and safety contracts for behavior that cannot be expressed by the catalog. A separate mutable evidence manifest links the immutable contract to offline, disposable-VM, and agentic evidence.
 
@@ -18,6 +18,10 @@
 - Never place credentials in process arguments, logs, audit records, fixtures, or MCP results.
 - Use only the disposable managed OPNsense VM for live operations.
 - Preserve all 96 typed OPNsense resources and exactly the capabilities in the reviewed public contract.
+- Foundation's temporary `advanced-api` fixture vocabulary exists only before Product Task 5. Product Task 5
+  atomically replaces it with distinct `raw-api`, `configure`, and `iac` flags (plus `restore`, `shell`, and
+  `ssh`) before any advanced product capability exists; no released product configuration accepts the
+  aggregate value.
 - An unsupported or unclassified mutation fails closed; a mutation without an exact resolved resource scope
   is refused whenever `ALLOWED_RESOURCES` is active.
 - Construct domain capability definitions through `createProductCatalog(dependencies)`. Handlers close over
@@ -211,7 +215,8 @@ Expected: FAIL because the contract, digest, review, evidence manifest, and vali
 
 Create strict JSON rows with this shape; every property shown is required and unknown properties fail
 validation. `policy.resourceScopes` is the exact static set or, for a parsed resolver, the exact allowed upper
-bound. The only valid feature flags are the Foundation values `advanced-api`, `restore`, `shell`, and `ssh`.
+bound. The only valid feature flags are `raw-api`, `configure`, `iac`, `restore`, `shell`, and `ssh`.
+The three advanced surfaces remain distinct so one opt-in never grants another.
 
 ```json
 {
@@ -289,7 +294,7 @@ policy, flags, scopes, or VM recipes. The evidence key set must equal the contra
 - [ ] **Step 5: Implement the exact validator**
 
 ```js
-const featureFlags = new Set(['advanced-api', 'restore', 'shell', 'ssh']);
+const featureFlags = new Set(['raw-api', 'configure', 'iac', 'restore', 'shell', 'ssh']);
 const effects = new Set(['read', 'local-write', 'firewall-write']);
 
 export function validateProductContractData(contract, evidence) {
@@ -806,26 +811,33 @@ git commit -m "feat: add generic OPNsense read operations"
 - Create: `src/security/call-limits.ts`
 - Create: `src/security/firewall-preflight.ts`
 - Modify: `src/security/audit-log.ts`
-- Modify: `src/security/policy-envelope.ts`
+- Modify: `src/capabilities/kernel.ts`
 - Modify: `src/capabilities/dispatch.ts`
 - Modify: `src/app/application-context.ts`
+- Modify: `src/app/default-application.ts`
 - Create: `src/app/product-context.ts`
+- Create: `src/app/product-runtime.ts`
 - Create: `src/config/product-feature-flags.ts`
+- Create: `src/config/product-runtime-config.ts`
+- Modify: `src/config/feature-flags.ts`
 - Modify: `src/config/runtime-config.ts`
 - Modify: `tests/capabilities/catalog.test.ts`
-- Create: `tests/security/product-policy-envelope.test.ts`
+- Create: `tests/security/product-policy-kernel.test.ts`
 - Create: `tests/app/product-context.test.ts`
+- Create: `tests/app/default-product-runtime.test.ts`
 - Create: `tests/contract/backup-storage.test.ts`
 - Create: `tests/integration/backup-dispatch.test.ts`
 - Create: `tests/security/call-limits.test.ts`
 
 **Interfaces:**
-- Consumes: Foundation `defineCapability`, `CapabilityCatalog.getByMcpName()`, `CapabilityPolicy`,
-  `CapabilityExecutionContext`, `PolicyEnvelope`, `ApplicationContext`, the OPNsense history export endpoint,
+- Consumes: Foundation kernel-internal `defineCapability`, `CapabilityCatalog.getByMcpName()`,
+  `CapabilityPolicy`, `CapabilityExecutionContext`, opaque `ApplicationContext`,
+  `OwnedApplicationRuntime`, the OPNsense history export endpoint,
   filesystem configuration, and the migrated `AuditLog` contract.
 - Produces: sealed parsed-input resource resolution and preflight leases; `PreflightExecutionMetadata`,
   `MutationExecutionMetadata`, `PolicyRuntimeDependencies`, `ProductDependencies`,
-  `createFirewallPreflight()`, `createProductCatalog()`, `createProductApplicationContext()`;
+  `createFirewallPreflight()`, `createProductCatalog()`, `createProductApplicationContext()`,
+  `createProductRuntimeFromEnvironment()`;
   `BackupService.create`, `list`,
   `getMetadata`, `verify`, `delete`, and `restoreGuidance`; and the typed environment-to-`FeatureFlag` map.
 
@@ -906,11 +918,17 @@ it('resolves parsed dynamic scopes, reserves preflight, then audits and backs up
     resourceScopes: ['firewall_filter', 'firewall_alias'],
     requiredFeatureFlags: []
   });
-  const outcome = await dispatchConfirmed(
-    createProductPolicy(catalog, fakePolicyDependencies(events)),
+  const application = createProductApplicationContext(
+    writableTestConfig(),
+    fakeProductDependencies(events),
+    [capability]
+  );
+  const outcome = await callConfirmedCapability(
+    application,
+    'opn_create',
     { resource: 'firewall_filter' }
   );
-  expect(outcome).toEqual({ kind: 'success', output: { changed: true } });
+  expect(outcome).toMatchObject({ structuredContent: { changed: true } });
   expect(events).toEqual([
     'lock',
     'preflight',
@@ -925,22 +943,24 @@ it('resolves parsed dynamic scopes, reserves preflight, then audits and backs up
 });
 
 it('releases a preflight reservation when strict backup refuses before handler entry', async () => {
-  const { policy, events } = policyWithFailingBackupAndPreparedCapability();
-  await expect(dispatchConfirmed(policy, preparedInput)).resolves.toMatchObject({
-    kind: 'refused',
-    code: 'BACKUP_REQUIRED'
-  });
+  const { application, events } = applicationWithFailingBackupAndPreparedCapability();
+  await expect(callConfirmedCapability(application, 'prepared_apply', preparedInput))
+    .resolves.toMatchObject({
+      isError: true,
+      structuredContent: { code: 'BACKUP_REQUIRED' }
+    });
   expect(events).toEqual([
     'lock', 'preflight', 'audit-intent', 'backup', 'release', 'audit-refusal', 'unlock'
   ]);
 });
 
 it('consumes the reservation once handler invocation starts, including handler failure', async () => {
-  const { policy, events } = policyWithFailingPreparedHandler();
-  await expect(dispatchConfirmed(policy, preparedInput)).resolves.toMatchObject({
-    kind: 'refused',
-    code: 'EXECUTION_FAILED'
-  });
+  const { application, events } = applicationWithFailingPreparedHandler();
+  await expect(callConfirmedCapability(application, 'prepared_apply', preparedInput))
+    .resolves.toMatchObject({
+      isError: true,
+      structuredContent: { code: 'EXECUTION_FAILED' }
+    });
   expect(events).toEqual([
     'lock', 'preflight', 'audit-intent', 'backup', 'revalidate', 'handler', 'consume',
     'audit-failure', 'unlock'
@@ -955,6 +975,12 @@ it('does not expose sealed handler, resolver, or preflight callbacks on a defini
 });
 ```
 
+`callConfirmedCapability()` is a test-only helper built on the pinned official MCP Client and its form
+elicitation handler. It connects to `buildServer(application, transport)` and accepts the elicitation round;
+it does not import the kernel constructor, settlement port, ledger, or a raw dispatch method. All product
+policy integration tests therefore exercise `createProductApplicationContext()` and the same signed,
+one-shot adapter path as the executable.
+
 Also cover: resolver execution only after successful input parsing; resolver output must be non-empty, unique,
 and a subset of declared `policy.resourceScopes`; an allow-list is checked against resolved scopes, not the
 whole declared upper bound; a thrown resolver or preflight is sanitized; preflight never receives mutation
@@ -965,12 +991,16 @@ test proving the per-firewall-target lock is held before the first preflight rea
 lease settlement. Add two TOCTOU tests: one changes configuration between preflight and backup, and one
 changes relevant prepared state after backup. Both return `PRECONDITION_CHANGED`, never invoke the handler,
 release the reservation, audit the refusal, and retain the strict snapshot as an ordinary verified backup.
+Add an ignored-abort firewall-write fixture: advance the cancellation deadline while its handler is paused,
+prove dispatch and the target lock remain pending, let the handler settle, then require
+`OUTCOME_INDETERMINATE`, consumed lease, redacted indeterminate audit, retained backup, released lock, and no
+side effect after the returned result.
 
 - [ ] **Step 2: Verify the Foundation-extension red state**
 
-Run: `npm test -- tests/security/product-policy-envelope.test.ts tests/app/product-context.test.ts tests/capabilities/catalog.test.ts && npm run typecheck`
+Run: `npm test -- tests/security/product-policy-kernel.test.ts tests/app/product-context.test.ts tests/app/default-product-runtime.test.ts tests/capabilities/catalog.test.ts && npm run typecheck`
 
-Expected: FAIL because the Foundation types, sealed callbacks, envelope dependencies, and product composition
+Expected: FAIL because the Foundation types, sealed kernel hooks, policy dependencies, and product composition
 root do not yet exist. No product mutation capability may be implemented before this test becomes green.
 
 - [ ] **Step 3: Extend `defineCapability`, catalog exposure, and execution context**
@@ -1020,15 +1050,12 @@ export interface CapabilityExecutionContext {
   readonly mutation?: MutationExecutionMetadata;
 }
 
-export function requirePreflightValue<T>(
-  context: CapabilityExecutionContext,
-  parse: (value: unknown) => T
-): T;
-
-export function requireMutationMetadata(
-  context: CapabilityExecutionContext
-): MutationExecutionMetadata;
 ```
+
+Keep `src/capabilities/types.ts` pure. Define `requirePreflightValue()` and
+`requireMutationMetadata()` beside the private seals in `src/capabilities/kernel.ts`; capability factories
+may import these package-internal helpers by relative source path, but `src/index.ts` and package exports
+must not expose them.
 
 Extend the private generic input accepted by `defineCapability()` with:
 
@@ -1041,16 +1068,33 @@ readonly preflight?: (
 ```
 
 Store both callbacks in module-private `WeakMap<CapabilityDefinition, ...>` instances beside the Foundation
-handler map. Seal `PreflightExecutionMetadata` and `MutationExecutionMetadata` with module-private
-`WeakSet`s; `requirePreflightValue()` and `requireMutationMetadata()` reject absent or structurally forged
-values. Export only envelope-facing invocation
-functions, not either callback. The immutable `CapabilityDefinition` retains nested `policy.effect`,
-`policy.resourceScopes`, and `policy.requiredFeatureFlags`; it exposes no handler, resolver, preflight, lease,
-or service. `CapabilityCatalog` continues to use `getByMcpName()`. When an allow-list is active,
-`listExposed()` keeps a parsed-scope capability visible if its declared upper bound intersects the allow-list;
-direct dispatch remains authoritative for the exact parsed scope.
+handler vault in `src/capabilities/kernel.ts`. Seal `PreflightExecutionMetadata` and
+`MutationExecutionMetadata` with module-private `WeakSet`s there; kernel-internal
+`requirePreflightValue()` and `requireMutationMetadata()` reject absent or structurally forged values.
+Export no callback getter or raw invoker. Add immutable safe metadata
+`resourceScopeMode: 'fixed' | 'dynamic'` to `CapabilityDefinition`; defineCapability() computes it from the
+presence of the sealed resolver, callers cannot set it, and kernel definition validation proves the metadata
+matches its private WeakMap. The definition retains nested `policy.effect`, `policy.resourceScopes`, and
+`policy.requiredFeatureFlags`; it exposes no handler, resolver, preflight, lease, or service.
+`CapabilityCatalog` continues to use `getByMcpName()` and may read only resourceScopeMode. When an allow-list is active, ordinary
+fixed-scope definitions retain the Foundation all-declared-scopes predicate. A definition with a sealed
+dynamic resolver is visible only when its non-empty declared upper bound intersects the allow-list; direct
+dispatch resolves a non-empty exact scope set and requires every resolved scope to be allowed. Tests
+distinguish those two cases so the generic resource capability is usable without weakening fixed-scope
+exposure.
 
-- [ ] **Step 4: Extend the central envelope and product composition root**
+Extend the Foundation kernel's single authorizeRequest() helper, not dispatch or the MCP adapter. On initial
+dispatch, a sealed resolver produces a unique UTF-16-sorted frozen effective-scope array before confirmation
+issuance; every scope must belong to the declared upper bound. The pending confirmation entry binds that
+exact array. On settlement the Foundation has already deleted every known confirmation ID synchronously,
+before any binding or authorization validation. The same helper then reparses input, reruns the resolver and
+allow-list check, and requires exact canonical array equality; no failure may restore or reinsert the consumed
+entry. A changed, empty, duplicate, out-of-upper-bound, or newly disallowed scope returns
+CONFIRMATION_INVALID and never enters the limiter or preflight. Add accepted-round tests for scope drift and
+allow-list refusal, plus sequential/concurrent replay after each mismatch, with handler, limiter, preflight,
+audit, and backup spies all untouched.
+
+- [ ] **Step 4: Extend the closed kernel and product composition root**
 
 Define these exact Task 5 composition contracts:
 
@@ -1088,9 +1132,12 @@ export function createFirewallPreflight<TInput extends Record<string, unknown>>(
 Place `createFirewallPreflight()` in `src/security/firewall-preflight.ts`; the observation and lease types
 remain in `src/capabilities/types.ts` with the other sealed capability contracts.
 
-Extend `createApplicationContext(config, catalog?, policyDependencies?)` without changing the Foundation
-read-only default. `createProductApplicationContext()` builds one catalog, then passes the same
-backup/audit/limiter instances to the one `PolicyEnvelope`. Construction fails if a catalog containing a
+Add a source-internal `createApplicationContextWithPolicyRuntime(config, catalog, policyDependencies)`
+composition helper without changing the public Foundation `createApplicationContext(config, catalog?)`
+or its read-only default. Only `src/app/product-context.ts` may import this helper; it still captures the
+confirmation adapter port in the Foundation module-private WeakMap. `createProductApplicationContext()`
+builds one catalog, then passes the same backup/audit/limiter instances to the one closed capability kernel.
+Construction fails if a catalog containing a
 local-write or firewall-write definition lacks policy dependencies. Product and extension capability
 factories close over injected typed services and call `defineCapability()`; they never spread definitions,
 replace a sealed handler, or import mutable singletons.
@@ -1101,13 +1148,13 @@ also requires its lease to contain `firewallObservation`.
 Extend the Foundation `RefusalCode` union with the exact product codes `AUDIT_REQUIRED`, `BACKUP_REQUIRED`,
 `PRECONDITION_CHANGED`, `RATE_LIMITED`, and `SERVER_BUSY`; all returned messages are static and secret-free.
 
-The envelope's exact order is:
+The kernel pipeline's exact order is:
 
 1. catalog lookup with `getByMcpName()`, transport, read-only, and `requiredFeatureFlags` gates;
 2. Zod input parsing and canonical argument digest;
 3. sealed resolver execution on parsed input; reject empty/duplicate/out-of-upper-bound scopes and enforce
    the allow-list against the resolved set;
-4. verified confirmation;
+4. kernel one-shot confirmation issuance or accepted one-shot settlement;
 5. rate/queue admission, then acquisition of the per-firewall-target mutation lock;
 6. sealed preflight reservation and bounded read-only observation while holding that lock;
 7. fsynced redacted audit intent;
@@ -1115,11 +1162,21 @@ The envelope's exact order is:
 9. handler invocation with conditionally spread, frozen `preflight` and `mutation` metadata;
 10. output parsing, lease settlement, final audit, and lock release.
 
+Foundation `OUTCOME_INDETERMINATE` is mandatory for an in-flight write whose cancellation deadline or caller
+abort wins before the handler settles. The kernel keeps the per-target lock, preflight lease, backup and audit
+ownership until that handler actually settles; it then records a fixed redacted indeterminate final audit,
+consumes the lease, and releases the lock. It never reports TIMEOUT, CANCELLED, success, or rollback for that
+write. The result includes only the static reconciliation code/guidance plus backup metadata already safe for
+MCP; it contains no late handler output/error. Every concrete mutation task must provide a bounded readback
+verification path used by operator-directed reconciliation, and live tests cover an ignored-signal late
+handler: dispatch remains pending until settlement, no side effect happens after the result, the lock spans
+settlement/final audit, and the backup remains available. Automatic restore is forbidden.
+
 `preflight` runs before audit, backup, or any firewall mutation I/O and receives no mutation metadata. It may
 perform bounded read-only revalidation through a service captured by the capability factory (for example,
 re-reading a prepared plan's observed state); it cannot invoke a mutating service or construct mutation
 metadata. A callback that reserves state and then fails before returning its lease releases that reservation
-in its own `finally`; add a focused test for this path. The envelope
+in its own `finally`; add a focused test for this path. The kernel
 calls `release()` exactly once when execution stops after reservation but before handler invocation. Once
 handler invocation begins, it calls `consume()` exactly once even if the handler, output parser, or final
 audit fails. The handler receives only sealed `preflight.value`, never the lease methods. A prepared-plan
@@ -1140,7 +1197,25 @@ revalidation before constructing frozen `MutationExecutionMetadata`. Use conditi
 not `undefined`, when inapplicable. This common metadata is the only backup/audit authorization passed to
 product and later guided-workflow handlers.
 
-- [ ] **Step 5: Add the typed environment-to-feature mapping**
+- [ ] **Step 5: Add secret-safe product runtime configuration and feature mapping**
+
+Create `loadProductRuntimeConfiguration(env)` in `src/config/product-runtime-config.ts`. It composes the
+Foundation `loadRuntimeConfig(env)` with a strict `OPNsenseClientConfig` and private filesystem paths. The
+default executable requires `OPNSENSE_URL`, `OPNSENSE_API_KEY`, and `OPNSENSE_API_SECRET`; direct test/library
+construction through `createProductApplicationContext(config, dependencies)` remains environment-free.
+Use canonical variables only:
+
+- `OPNSENSE_VERIFY_TLS` defaults true and accepts only true/false;
+- optional `OPNSENSE_CA_FILE` is an absolute regular non-symlink file, at most 1 MiB, read synchronously only
+  during startup because the default composition seam is synchronous;
+- bounded response/connect/operation/retry settings map exactly to `OPNsenseClientConfig`;
+- `OPNSENSE_BACKUP_PATH` and `OPNSENSE_AUDIT_LOG` default below the platform state directory
+  (`XDG_STATE_HOME` when absolute, otherwise `homedir()/.local/state/opnsense-mcp`), never inside the repo;
+- limiter variables use the exact bounds in Step 8.
+
+Validation errors contain only field names. They never contain URL credentials, key, secret, CA contents,
+token, or a supplied path basename. Add table tests for missing/malformed secrets, unsafe URL/TLS/CA/path,
+every numeric boundary, and sentinel absence. Do not accept secrets in command-line arguments.
 
 ```ts
 import type { FeatureFlag } from './feature-flags.js';
@@ -1154,9 +1229,9 @@ export type ProductFeatureEnvironmentKey =
   | 'ENABLE_SSH_FEATURES';
 
 export const PRODUCT_FEATURE_ENV = {
-  ENABLE_RAW_API_TOOL: 'advanced-api',
-  ENABLE_CONFIGURE_TOOL: 'advanced-api',
-  IAC_ENABLED: 'advanced-api',
+  ENABLE_RAW_API_TOOL: 'raw-api',
+  ENABLE_CONFIGURE_TOOL: 'configure',
+  IAC_ENABLED: 'iac',
   ENABLE_RESTORE_TOOLS: 'restore',
   ENABLE_SHELL_TOOLS: 'shell',
   ENABLE_SSH_FEATURES: 'ssh'
@@ -1165,8 +1240,10 @@ export const PRODUCT_FEATURE_ENV = {
 
 Extend runtime parsing to accept only `true` or `false` for these six environment keys and union enabled
 mapped values with `ENABLED_FEATURE_FLAGS`. Capability policy always stores the resulting valid
-`FeatureFlag` (`advanced-api`, `restore`, `shell`, or `ssh`), never an environment-variable name. Add table-
-driven tests for every mapping and for unknown/invalid values.
+`FeatureFlag` (`raw-api`, `configure`, `iac`, `restore`, `shell`, or `ssh`), never an environment-variable
+name. Extend Foundation's schema to this exact six-value vocabulary in this task, update its focused tests,
+and reject the former aggregate `advanced-api` value. Add table-driven tests proving every mapping is
+one-to-one and that enabling one advanced environment key leaves the other two flags disabled.
 
 - [ ] **Step 6: Write failing filesystem and backup-dispatch tests**
 
@@ -1221,13 +1298,33 @@ export interface BackupService {
 Use exclusive creation, `lstat` before and after opening, private modes, checksum verification, atomic
 metadata replacement, and XML-free MCP result projections.
 
-Implement the call limiter as an injected, deterministic envelope dependency. Defaults are 8 concurrent
+Implement the call limiter as an injected, deterministic kernel dependency. Defaults are 8 concurrent
 reads, 1 active write per firewall target, 32 queued calls, and 120 calls per principal per rolling minute. Parse
 `MCP_MAX_CONCURRENT_READS`, `MCP_MAX_QUEUED_CALLS`, and `MCP_RATE_LIMIT_PER_MINUTE` as bounded positive
 integers. Queue/rate admission and the per-target mutation lock happen before preflight, intent, and backup;
-once admitted, the envelope preserves the required lock → preflight → audit-intent → backup →
+once admitted, the kernel pipeline preserves the required lock → preflight → audit-intent → backup →
 revalidation → handler → final-audit → unlock order. No handler may acquire
 or bypass the limiter directly.
+
+Implement `createOwnedProductServicesFromEnvironment(env, factories?)` and
+`createProductRuntimeFromEnvironment(env, factories?)` in `src/app/product-runtime.ts`. The first constructs
+exactly one validated RuntimeConfig, OPNsenseClient, BackupService, AuditLog, and CallLimiter and returns the
+source-internal `{ config, dependencies, close }` ownership record. Only product-runtime.ts itself and the
+later guided `src/app/workflow-runtime.ts` may import that service factory; it is not a package-root export or
+ApplicationContext property. The second passes those same instances to
+`createProductApplicationContext()` and returns the Foundation `OwnedApplicationRuntime` shape. The optional
+factories object is source-internal and exists only for sentinel tests. Initialization is transactional: if
+any later constructor fails, independently close every already-created closeable. `close()` is idempotent and
+independently closes the OPNsense dispatcher and any future closeable audit/backup resource; one failure never
+skips another and all are aggregated.
+
+Replace the body of `src/app/default-application.ts::createDefaultApplicationRuntime()` with
+`createProductRuntimeFromEnvironment(process.env)`. This is a required product gate, not a release follow-up.
+No executable may call the Foundation-only `createApplicationContext(loadRuntimeConfig())` path afterward.
+`tests/app/default-product-runtime.test.ts` builds with sentinel environment and fake owned services, starts
+the real `buildServer(runtime.application, 'stdio')`, and proves tools/list contains the exact product catalog
+implemented through this task (including a product read and backup metadata capability), not only
+`server_status`. It also covers partial construction, idempotent close, and secret-free errors.
 
 Define backup/restore capability factories only after Steps 3–5 compile. Build every definition through
 `defineCapability()` with the exact nested policy from the reviewed contract. `restore_backup_ssh` is a
@@ -1235,23 +1332,26 @@ Define backup/restore capability factories only after Steps 3–5 compile. Build
 local backup deletion is a separately audited local-write. No handler reads a global client or backup
 singleton.
 
-- [ ] **Step 9: Run type, backup, audit, policy, and redaction gates**
+- [ ] **Step 9: Run type, default-composition, backup, audit, policy, and redaction gates**
 
-Run: `npm run typecheck && npm test -- tests/capabilities/catalog.test.ts tests/app/product-context.test.ts tests/contract/backup-storage.test.ts tests/integration/backup-dispatch.test.ts tests/security`
+Run: `npm run typecheck && npm test -- tests/capabilities/catalog.test.ts tests/app/product-context.test.ts tests/app/default-product-runtime.test.ts tests/contract/backup-storage.test.ts tests/integration/backup-dispatch.test.ts tests/security`
 
 Expected: PASS with private modes and no XML or secret output.
 
 - [ ] **Step 10: Commit the Foundation extension, product context, and safety services**
 
 ```bash
-git add src/capabilities src/features/backup src/security src/app src/config tests/capabilities/catalog.test.ts tests/app/product-context.test.ts tests/contract/backup-storage.test.ts tests/integration/backup-dispatch.test.ts tests/security
+git add src/capabilities src/features/backup src/security src/app src/config \
+  tests/capabilities/catalog.test.ts tests/app/product-context.test.ts \
+  tests/app/default-product-runtime.test.ts tests/contract/backup-storage.test.ts \
+  tests/integration/backup-dispatch.test.ts tests/security
 git commit -m "feat: add sealed product mutation safety runtime"
 ```
 
 The staged set also includes every adapted `security-backup` destination from provenance Task 6. The commit
 is forbidden unless both the new Vitest contracts and migrated Node tests are green.
 
-### Task 6: Implement generic mutations through the safety envelope
+### Task 6: Implement generic mutations through the closed kernel
 
 **Files:**
 - Modify: `src/opnsense/generic/service.ts`
@@ -1263,7 +1363,7 @@ is forbidden unless both the new Vitest contracts and migrated Node tests are gr
 
 **Interfaces:**
 - Consumes: Task 5 `ProductDependencies`, sealed `MutationExecutionMetadata`, dynamic-scope resolver,
-  `defineCapability()`, and central safety envelope.
+  `defineCapability()`, and central policy kernel.
 - Produces: `create`, `update`, `delete`, `apply`, and contract-declared service methods returning
   `GenericOperationResult`, plus `createGenericCapabilities(dependencies)`.
 
@@ -1372,7 +1472,7 @@ before the service can send its first POST.
 Keep read-only service status and a mutating service action in separately classified contract capabilities;
 never branch from a Foundation `effect: 'read'` definition into a restart/reload handler. The integration
 test asserts `audit-intent`, `backup`, first outbound mutation, optional apply, and final audit order. Backup
-is performed only by the envelope; the generic service neither accepts nor constructs backup metadata.
+is performed only by the kernel; the generic service neither accepts nor constructs backup metadata.
 
 - [ ] **Step 4: Run mutation, policy, and backup tests**
 
@@ -1589,7 +1689,10 @@ git commit -m "feat: implement contracted service capabilities"
 - Create: `src/features/ssh/capabilities.ts`
 - Create: `src/features/ssh/php/` parameterized assets listed by the reviewed contract
 - Modify: `src/app/product-context.ts`
+- Modify: `src/app/product-runtime.ts`
+- Modify: `src/config/product-runtime-config.ts`
 - Create: `tests/contract/ssh-capabilities.test.ts`
+- Modify: `tests/app/default-product-runtime.test.ts`
 - Create: `tests/vm/ssh-capabilities.test.mjs`
 
 **Interfaces:**
@@ -1657,13 +1760,28 @@ export async function executeFixedSsh<
 
 Credentials travel through protected stdin or file descriptors, never argv. Assets accept JSON on stdin and
 never interpolate caller text into a command. The executor must not call `BackupService` itself: the central
-dispatch envelope creates exactly one strict pre-change snapshot and passes its ID in `context.mutation`.
+dispatch kernel creates exactly one strict pre-change snapshot and passes its ID in `context.mutation`.
 Each SSH capability is created through `defineCapability()` with valid `requiredFeatureFlags` (`ssh`, plus
 `restore` for restore) and calls `requireMutationMetadata(capabilityContext)` before constructing the internal
 `FixedSshExecutionContext`. Firewall-writing SSH definitions install `createFirewallPreflight()` using the
 fixed asset's independent readback state. Extend `ProductDependencies` in this task with
 `readonly fixedSsh?: FixedSshExecutor`; bind factories to that injected instance with conditional spreads,
 and fail product-context construction if an enabled contract capability requires a missing executor.
+
+Extend product runtime configuration and ownership in this same task. When the normalized `ssh` feature is
+disabled, construct no SSH object and read no SSH credential file. When enabled, require a validated
+username, port, pinned known-hosts file, and exactly one private key file or password file; every path is
+absolute, regular, non-symlink, outside the repository, mode `0600` on POSIX, and bounded to 1 MiB. Derive the
+default host only from the already validated OPNsense URL, permit an explicit host override only after exact
+hostname/IP validation, and never offer an insecure host-key option. The executor passes credentials through
+protected stdin/file descriptors, never argv or logs.
+
+`createOwnedProductServicesFromEnvironment()` constructs and owns exactly one FixedSshTransport/Executor when
+required, adds it to the same ProductDependencies used by createProductApplicationContext(), and closes it
+independently with the existing client/backup/audit resources. Initialization remains transactional. Add
+default-runtime tests for feature disabled (no credential read), feature enabled with missing/unsafe config
+(fail closed), successful sentinel construction, capability reachability, partial failure, idempotent close,
+and secret-free errors. No test uses the production firewall.
 
 - [ ] **Step 4: Run offline tests, then the disposable VM tests**
 
@@ -1677,7 +1795,9 @@ each mutation, applies and reads back, reverses cleanup, proves zero residue, an
 - [ ] **Step 5: Commit fixed SSH capabilities**
 
 ```bash
-git add src/features/ssh src/app/product-context.ts tests/contract/ssh-capabilities.test.ts tests/vm/ssh-capabilities.test.mjs
+git add src/features/ssh src/app/product-context.ts src/app/product-runtime.ts \
+  src/config/product-runtime-config.ts tests/app/default-product-runtime.test.ts \
+  tests/contract/ssh-capabilities.test.ts tests/vm/ssh-capabilities.test.mjs
 git commit -m "feat: implement contracted fixed SSH operations"
 ```
 
@@ -1685,15 +1805,20 @@ git commit -m "feat: implement contracted fixed SSH operations"
 
 **Files:**
 - Create: `src/features/advanced/raw-api.ts`
+- Create: `src/features/advanced/configure.ts`
 - Create: `src/features/advanced/shell.ts`
 - Create: `src/features/advanced/iac.ts`
 - Create: `src/features/advanced/capabilities.ts`
+- Create: `src/config/private-config.ts`
 - Modify: `src/app/product-context.ts`
+- Modify: `src/app/product-runtime.ts`
+- Modify: `src/config/product-runtime-config.ts`
 - Create: `tests/contract/advanced-capabilities.test.ts`
 - Create: `tests/integration/advanced-policy.test.ts`
+- Modify: `tests/app/default-product-runtime.test.ts`
 
 **Interfaces:**
-- Consumes: valid Foundation `FeatureFlag` values, the Task 5 safety envelope, strict backups, audit,
+- Consumes: valid Foundation `FeatureFlag` values, the Task 5 policy kernel, strict backups, audit,
   OPNsense client, and optional SSH/shell transports.
 - Produces: the raw API, legacy shell, configuration, and IaC capabilities declared by the reviewed contract.
 
@@ -1761,10 +1886,42 @@ spreads. Product-context construction fails when an enabled contract row lacks i
 default context, and a context enabling only unrelated flags, compiles without constructing shell, SSH, or
 IaC services.
 
+Extend `createOwnedProductServicesFromEnvironment()` in this task rather than leaving those interfaces
+dependency-injection-only. Construct each adapter only for its own flag: `raw-api` wraps the already owned
+OPNsenseClient, `iac` constructs the IaC adapter/state, and `configure` constructs the secure configure
+service. Enabling any one must neither construct nor expose the other two. The configure tool atomically
+writes the validated platform private configuration for the next process start and returns restart guidance;
+it never hot-swaps the opaque ApplicationContext, returns credentials, or changes the current target
+mid-request.
+Create the minimal permission-hardened `src/config/private-config.ts` store here and make
+loadProductRuntimeConfiguration() resolve `OPNSENSE_CONFIG_FILE`/the documented platform default with
+explicit environment overrides. Guided Task 6 later extends this same module with interactive installer UX;
+it must not add a second store. Use Guided Task 6's already specified version-1 JSON shape now, reject unknown
+top-level/credential fields, write atomically, and enforce `0700`/`0600` on POSIX or the documented current-
+user/SYSTEM/Administrators ACL on Windows.
+When all three required OPNsense credential environment fields are present, configuration loading must not
+open the platform-default private file at all; this is required for hermetic conformance/release processes.
+An explicitly set OPNSENSE_CONFIG_FILE remains validated and authoritative according to the documented merge
+contract. Tests use a trap file to prove the complete-environment path performs no private-file read.
+
+When `shell` is active, require the validated SSH configuration from Task 9 and construct bounded legacy CLI
+and SSH adapters over that remote transport; never execute a caller command on the MCP host. If the required
+feature is enabled but its config/service cannot be constructed, default runtime startup fails with field
+names only. If disabled, no IaC state, SSH credential, shell transport, or configure store is opened.
+IaC state lives under the validated platform state directory with private permissions and is independently
+closed. Extend the owned cleanup/partial-initialization aggregate to every advanced service.
+
+Default-runtime tests enable each feature combination separately and together, list the expected exposed
+rows, execute a harmless sentinel adapter call, prove missing dependencies/configuration fail closed, and
+prove partial initialization/idempotent aggregate cleanup with no secret or path basename in errors. The
+complete default composition must therefore remain executable after Tasks 9 and 10, not merely compilable
+through injected test dependencies.
+
 `createContractCapability()` looks up the immutable reviewed row and calls `defineCapability()` with its
 exact nested policy. It never passes `ENABLE_RAW_API_TOOL`, `ENABLE_CONFIGURE_TOOL`, `IAC_ENABLED`, or any
-other environment name as a feature flag: the policies use only `advanced-api`, `restore`, `shell`, and
-`ssh`. IaC apply/destroy definitions install a sealed parsed-input scope resolver whose output is a non-empty
+other environment name as a feature flag: raw API rows use only `raw-api`, configure uses only `configure`,
+IaC rows use only `iac`, and the remaining policies use `restore`, `shell`, or `ssh` as reviewed. IaC
+apply/destroy definitions install a sealed parsed-input scope resolver whose output is a non-empty
 subset of the row's declared `policy.resourceScopes`. Raw/free-text operations have no safe resolver and are
 therefore refused whenever a resource allow-list is active.
 
@@ -1810,11 +1967,14 @@ Run: `npm test -- tests/contract/advanced-capabilities.test.ts tests/integration
 
 Expected: PASS with every advanced capability hidden and refused by default.
 
-- [ ] **Step 5: Commit advanced capabilities**
+- [ ] **Step 5: Commit advanced adapters and executable ownership**
 
 ```bash
-git add src/features/advanced src/app/product-context.ts tests/contract/advanced-capabilities.test.ts tests/integration/advanced-policy.test.ts
-git commit -m "feat: implement contracted advanced capabilities"
+git add src/features/advanced src/config/private-config.ts src/config/product-runtime-config.ts \
+  src/app/product-context.ts src/app/product-runtime.ts tests/contract/advanced-capabilities.test.ts \
+  tests/integration/advanced-policy.test.ts tests/integration/iac-capabilities.test.ts \
+  tests/app/default-product-runtime.test.ts
+git commit -m "feat: compose gated advanced capabilities"
 ```
 
 ### Task 11: Pass the exact offline contract gate and expose read-only MCP resources
@@ -1822,8 +1982,12 @@ git commit -m "feat: implement contracted advanced capabilities"
 **Files:**
 - Modify: `scripts/contracts/validate-opnsense-product.mjs`
 - Modify: `tests/evidence/opnsense-product-evidence.json`
+- Modify: `src/app/application-context.ts`
+- Modify: `src/app/product-context.ts`
+- Create: `src/app/resource-document.ts`
 - Create: `src/mcp/product-resources.ts`
 - Modify: `src/server/build-server.ts`
+- Modify: `tests/architecture/execution-boundary.test.ts`
 - Create: `docs/operations.md`
 - Create: `tests/mcp/product-resources.test.ts`
 - Create: `tests/integration/full-surface.test.ts`
@@ -1905,8 +2069,8 @@ it('publishes summaries and operational guidance without mutation entry points',
 ```
 
 Also prove unknown URIs return the MCP resource-not-found error, resource reads never call
-`PolicyEnvelope.dispatch()`, and neither listing nor reading receives `PreflightExecutionMetadata` or
-`MutationExecutionMetadata`.
+`dispatchCapability()` or the kernel handler path, and neither listing nor reading receives
+`PreflightExecutionMetadata` or `MutationExecutionMetadata`.
 
 - [ ] **Step 3: Run the complete contract, mock, and resource gate and inspect failures**
 
@@ -1934,11 +2098,11 @@ markers and do not relax exact set equality.
 
 - [ ] **Step 5: Implement and register the read-only product resources**
 
-`src/mcp/product-resources.ts` is the only MCP-SDK-facing module in this task. Define transport-neutral
-`ProductResourceDocument` values first, then register each with the Foundation-owned `McpServer`:
+Keep `src/mcp/product-resources.ts` transport-neutral; it imports no MCP SDK type. Define immutable data-only
+`ApplicationResourceDocument` values:
 
 ```ts
-export interface ProductResourceDocument {
+export interface ApplicationResourceDocument {
   readonly uri: `opnsense://${string}`;
   readonly name: string;
   readonly description: string;
@@ -1947,16 +2111,11 @@ export interface ProductResourceDocument {
 }
 
 export function createProductResourceDocuments(
-  application: ApplicationContext,
+  catalog: CapabilityCatalog,
   resources: readonly ResourceDefinition[],
   contractSha256: string,
   operationsMarkdown: string
-): readonly ProductResourceDocument[];
-
-export function registerProductResources(
-  server: McpServer,
-  documents: readonly ProductResourceDocument[]
-): void;
+): readonly ApplicationResourceDocument[];
 ```
 
 The capability summary projects only `id`, `mcpName`, `title`, `policy.effect`, and
@@ -1964,8 +2123,19 @@ The capability summary projects only `id`, `mcpName`, `title`, `policy.effect`, 
 command names; it omits controller/apply paths. The operational document explains read-only defaults,
 feature flags, allow-lists, strict backups, audit behavior, disposable-VM-only testing, and authenticated
 proxy requirements without embedding environment values, credentials, backup XML, filesystem paths, or
-live status. Freeze documents at application construction, bound each document to 256 KiB, and register only
-the three literal URIs. `buildServer()` registers them for both stdio and HTTP.
+live status. Freeze documents at application construction, bound each document to 256 KiB, and accept only
+the three literal URIs.
+
+Extend the opaque application internals with a copied/frozen readonly resource-document array; the public
+ApplicationContext remains exactly `{ catalog }`. The existing source-internal product composition helper
+accepts the data-only documents, and `createProductApplicationContext()` always builds the three documents
+from the same catalog/resources/contract digest used by validation. Add one narrow
+`listApplicationResourceDocuments(application)` helper imported only by `src/server/build-server.ts`.
+`buildServer()` generically registers immutable constant read callbacks for every document for both stdio and
+HTTP. No callback, service, dispatcher, config, or mutation authority may enter a document. Foundation
+contexts list zero resources; product contexts list exactly three. Add architecture tests for the import
+allow-list and data-only keys, plus a test that spreading/forging an ApplicationContext loses the private
+documents and is rejected.
 
 - [ ] **Step 6: Run the full deterministic project gate**
 
@@ -1976,7 +2146,8 @@ Expected: all commands exit 0, exact capability set, 96 resources, and no dirty 
 - [ ] **Step 7: Commit offline contract completion and MCP resources**
 
 ```bash
-git add src/mcp/product-resources.ts src/server/build-server.ts docs/operations.md tests scripts/contracts package.json package-lock.json
+git add src/app src/mcp/product-resources.ts src/server/build-server.ts docs/operations.md \
+  tests scripts/contracts package.json package-lock.json
 git commit -m "test: prove offline product contract and resources"
 ```
 

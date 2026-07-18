@@ -569,7 +569,7 @@ git diff --check
 
 **Files:** The 10 `security-backup` approved destinations in Appendix A.
 
-### Step 1: Write new-envelope failures first
+### Step 1: Write new-kernel failures first
 
 Adapt tests first. Require forged-call refusal, read-only hiding and dispatch refusal, strict pre-mutation
 snapshotting, mutation refusal on snapshot failure, redacted private audit files, symlink refusal,
@@ -588,11 +588,20 @@ node --test tests/smoke/log-file-mode.mjs tests/smoke/redaction.mjs
 npm run provenance:copy -- --group security-backup
 ```
 
-Map audit logging to `src/security/audit-log.ts`, HTTP validation to `src/http/security.ts`, and tests to
-`buildServer(context)`. Integrate `src/security/operation-policy.ts` with the foundation's sole
-`src/security/policy-envelope.ts` and `src/capabilities/dispatch.ts`; it must not create a second dispatch
-or envelope. Product-parity Task 5 consumes the migrated audit log and must not create a second one. Do not
-copy the rewrite-class backup storage.
+Map audit logging to `src/security/audit-log.ts` and tests to
+`buildServer(application, transport)`. The two approved architectural destinations are adapted as reached,
+stateless seams rather than copied as competing implementations:
+
+- `src/security/operation-policy.ts` exports only pure product-policy decision/redaction helpers and is
+  imported by `src/capabilities/kernel.ts`; it owns no dispatcher, handler, ledger, backup, audit instance,
+  lock, or mutable state;
+- `src/http/security.ts` composes the already canonical Host/Origin/limit/auth middleware and is imported by
+  `src/http/runtime.ts`; it owns no listener, MCP handler, token property, session store, or alternate HTTP
+  server.
+
+Architecture tests require those exact incoming imports and reject any second dispatch/server tree. Keep
+`src/capabilities/dispatch.ts` as the package-root facade. Product-parity Task 5 consumes the migrated audit
+log and must not create a second one. Do not copy the rewrite-class backup storage.
 
 ### Step 3: Verify the group
 
@@ -1071,6 +1080,9 @@ the copier and are not extra public manifest fields.
 28. `tests/agentic/verify-bridge.mjs`
 
 ### Group `security-backup` — 10
+
+Rows 2 and 3 are mandatory reached behavior adaptations with the stateless roles defined in Task 6; they are
+not byte copies and may not retain the source architecture.
 
 1. `src/security/audit-log.ts`
 2. `src/security/operation-policy.ts`

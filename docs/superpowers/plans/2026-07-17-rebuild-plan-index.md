@@ -12,7 +12,7 @@ or release is allowed until every release gate in the approved design is green.
 
 1. `2026-07-17-mcp-v2-foundation.md`
    - establishes the Node/TypeScript project, pinned MCP v2 beta packages, server factory, capability catalog,
-     safety envelope, dual-era stdio, hardened HTTP, instructions/prompts and protocol conformance;
+     closed policy kernel, dual-era stdio, hardened HTTP, instructions/prompts and protocol conformance;
    - produces the stable interfaces consumed by every other plan.
 2. `2026-07-17-provenance-test-infrastructure-migration.md`, public Tasks 1–2, private checkpoint P0,
    then public Tasks 3–4
@@ -34,7 +34,7 @@ or release is allowed until every release gate in the approved design is green.
 
 ## Cross-plan checkpoints
 
-- After foundation: deterministic tests and the four named applicable official 2025/2026 MCP protocol
+- After foundation: deterministic tests and the five named applicable official 2025/2026 MCP protocol
   scenarios are green; this checkpoint makes no full-suite claim.
 - After provenance Tasks 1–4: public provenance, secrets, bootstrap and VM-doctor validators are green; the
   private source and baseline remain outside Git, while unsealed rows are explicitly pending.
