@@ -41,63 +41,52 @@ export interface CapabilityDefinition {
   readonly parseOutput: (value: unknown) => Record<string, unknown>;
 }
 
-const capabilityHandlers = new WeakMap<
-  CapabilityDefinition,
-  (input: unknown, context: CapabilityExecutionContext) => Promise<unknown>
->();
-
-interface TypedCapabilityDefinition<
-  TInput extends Record<string, unknown>,
-  TOutput extends Record<string, unknown>
-> {
-  readonly id: string;
-  readonly mcpName: string;
-  readonly title: string;
-  readonly description: string;
-  readonly inputSchema: z.ZodType<TInput>;
-  readonly outputSchema: z.ZodType<TOutput>;
-  readonly annotations: ToolAnnotations;
-  readonly transports: readonly TransportKind[];
-  readonly policy: CapabilityPolicy;
-  readonly handler: (input: TInput, context: CapabilityExecutionContext) => Promise<TOutput>;
+export interface CapabilityRequest {
+  readonly name: string;
+  readonly arguments: unknown;
 }
 
-export function defineCapability<
-  TInput extends Record<string, unknown>,
-  TOutput extends Record<string, unknown>
->(definition: TypedCapabilityDefinition<TInput, TOutput>): CapabilityDefinition {
-  const capability: CapabilityDefinition = Object.freeze({
-    id: definition.id,
-    mcpName: definition.mcpName,
-    title: definition.title,
-    description: definition.description,
-    inputSchema: definition.inputSchema,
-    outputSchema: definition.outputSchema,
-    annotations: Object.freeze({ ...definition.annotations }),
-    transports: Object.freeze([...definition.transports]),
-    policy: Object.freeze({
-      ...definition.policy,
-      resourceScopes: Object.freeze([...definition.policy.resourceScopes]),
-      requiredFeatureFlags: Object.freeze([...definition.policy.requiredFeatureFlags]),
-      redactFields: Object.freeze([...definition.policy.redactFields])
-    }),
-    parseInput: (value: unknown) => definition.inputSchema.parse(value),
-    parseOutput: (value: unknown) => definition.outputSchema.parse(value)
-  });
-  capabilityHandlers.set(capability, (input, context) =>
-    definition.handler(input as TInput, context)
-  );
-  return capability;
+export interface CapabilityInvocationContext {
+  readonly transport: TransportKind;
+  readonly signal?: AbortSignal;
+  readonly principalId?: string;
 }
 
-export function invokeCapabilityHandler(
-  capability: CapabilityDefinition,
-  input: unknown,
-  context: CapabilityExecutionContext
-): Promise<unknown> {
-  const handler = capabilityHandlers.get(capability);
-  if (handler === undefined) return Promise.reject(new Error('Undeclared capability handler'));
-  return handler(input, context);
+export interface ConfirmationChallenge {
+  readonly confirmationId: string;
+  readonly capabilityId: string;
+  readonly argumentsSha256: string;
+  readonly expiresAt: string;
+}
+
+export type RefusalCode =
+  | 'CANCELLED'
+  | 'CONFIRMATION_DECLINED'
+  | 'CONFIRMATION_INVALID'
+  | 'CONFIRMATION_UNAVAILABLE'
+  | 'EXECUTION_FAILED'
+  | 'FEATURE_DISABLED'
+  | 'INVALID_INPUT'
+  | 'INVALID_OUTPUT'
+  | 'INVALID_POLICY'
+  | 'OUTCOME_INDETERMINATE'
+  | 'READ_ONLY'
+  | 'RESOURCE_NOT_ALLOWED'
+  | 'TIMEOUT'
+  | 'UNKNOWN_CAPABILITY'
+  | 'UNSUPPORTED_TRANSPORT';
+
+export type CapabilityResult =
+  | { readonly kind: 'success'; readonly output: Record<string, unknown> }
+  | { readonly kind: 'confirmation-required'; readonly challenge: ConfirmationChallenge }
+  | { readonly kind: 'refused'; readonly code: RefusalCode; readonly message: string };
+
+export interface CapabilityDispatcher {
+  listExposed(transport: TransportKind): readonly CapabilityDefinition[];
+  dispatch(
+    request: CapabilityRequest,
+    context: CapabilityInvocationContext
+  ): Promise<CapabilityResult>;
 }
 
 export interface ExposureContext {

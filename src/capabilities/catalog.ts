@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { CapabilityDefinition, ExposureContext } from './types.js';
+import { areDeclaredResourceScopesAllowed } from './exposure.js';
 import { serverStatusCapability } from './foundation/server-status.js';
+import { isKernelDefinedCapability } from './kernel.js';
 
 function isExposed(capability: CapabilityDefinition, context: ExposureContext): boolean {
   if (!capability.transports.includes(context.transport)) return false;
@@ -11,9 +13,9 @@ function isExposed(capability: CapabilityDefinition, context: ExposureContext): 
     return false;
   }
   if (
-    context.allowedResourceScopes !== null &&
-    capability.policy.resourceScopes.some(
-      (resource) => !context.allowedResourceScopes?.has(resource)
+    !areDeclaredResourceScopesAllowed(
+      capability.policy.resourceScopes,
+      context.allowedResourceScopes
     )
   ) {
     return false;
@@ -28,6 +30,9 @@ export class CapabilityCatalog {
 
   constructor(definitions: readonly CapabilityDefinition[]) {
     for (const definition of definitions) {
+      if (!isKernelDefinedCapability(definition)) {
+        throw new Error('Capability definition was not created by the policy kernel');
+      }
       if (this.#byId.has(definition.id)) {
         throw new Error(`Duplicate capability id: ${definition.id}`);
       }

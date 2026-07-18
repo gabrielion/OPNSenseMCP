@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import * as z from 'zod/v4';
-import { defineCapability } from '../types.js';
+import { defineCapability } from '../kernel.js';
 
 export const serverStatusCapability = defineCapability({
   id: 'server.status',

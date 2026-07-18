@@ -5,6 +5,7 @@ import {
   CapabilityCatalog,
   getCapability
 } from '../../src/capabilities/catalog.js';
+import { areDeclaredResourceScopesAllowed } from '../../src/capabilities/exposure.js';
 import { createMutationFixture, createReadFixture } from '../fixtures/capabilities.js';
 
 describe('CapabilityCatalog', () => {
@@ -19,7 +20,7 @@ describe('CapabilityCatalog', () => {
 
   it('rejects duplicate IDs and duplicate MCP names', () => {
     const read = createReadFixture();
-    const duplicateName = { ...createMutationFixture(), mcpName: read.mcpName };
+    const duplicateName = createMutationFixture(() => undefined, { mcpName: read.mcpName });
 
     expect(() => new CapabilityCatalog([read, read])).toThrow('Duplicate capability id: test.read');
     expect(() => new CapabilityCatalog([read, duplicateName])).toThrow(
@@ -58,8 +59,7 @@ describe('CapabilityCatalog', () => {
   });
 
   it('filters capabilities unavailable on the selected transport', () => {
-    const read = createReadFixture();
-    const httpOnly = { ...read, transports: ['http'] as const };
+    const httpOnly = createReadFixture({ transports: ['http'] });
     const catalog = new CapabilityCatalog([httpOnly]);
 
     expect(
@@ -73,11 +73,7 @@ describe('CapabilityCatalog', () => {
   });
 
   it('filters capabilities whose feature flags are disabled', () => {
-    const read = createReadFixture();
-    const sshOnly = {
-      ...read,
-      policy: { ...read.policy, requiredFeatureFlags: ['ssh'] as const }
-    };
+    const sshOnly = createReadFixture({ requiredFeatureFlags: ['ssh'] });
     const catalog = new CapabilityCatalog([sshOnly]);
 
     expect(
@@ -90,22 +86,61 @@ describe('CapabilityCatalog', () => {
     ).toEqual([]);
   });
 
-  it('filters capabilities outside the active resource scope allow-list', () => {
-    const read = createReadFixture();
-    const restricted = {
-      ...read,
-      policy: { ...read.policy, resourceScopes: ['restricted'] as const }
-    };
-    const catalog = new CapabilityCatalog([restricted]);
+  it.each([
+    {
+      label: 'partially allowed',
+      scopes: ['test.read', 'restricted'],
+      allowed: new Set(['test.read'])
+    },
+    { label: 'disallowed', scopes: ['restricted'], allowed: new Set(['test.read']) },
+    { label: 'empty', scopes: [], allowed: new Set(['test.read']) }
+  ])('filters $label declared scopes with an active resource allow-list', ({ scopes, allowed }) => {
+    const capability = createReadFixture({ resourceScopes: scopes });
+    const catalog = new CapabilityCatalog([capability]);
 
     expect(
       catalog.listExposed({
         readOnly: false,
         transport: 'stdio',
         enabledFeatureFlags: new Set(),
-        allowedResourceScopes: new Set(['test.read'])
+        allowedResourceScopes: allowed
       })
     ).toEqual([]);
+  });
+
+  it('exposes only fully allowed declared scopes when an allow-list is active', () => {
+    const capability = createReadFixture({ resourceScopes: ['test.read', 'test.related'] });
+    const catalog = new CapabilityCatalog([capability]);
+
+    expect(
+      catalog.listExposed({
+        readOnly: false,
+        transport: 'stdio',
+        enabledFeatureFlags: new Set(),
+        allowedResourceScopes: new Set(['test.read', 'test.related'])
+      })
+    ).toEqual([capability]);
+  });
+
+  it('keeps empty declared scopes eligible when no allow-list is active', () => {
+    const capability = createReadFixture({ resourceScopes: [] });
+    const catalog = new CapabilityCatalog([capability]);
+
+    expect(
+      catalog.listExposed({
+        readOnly: false,
+        transport: 'stdio',
+        enabledFeatureFlags: new Set(),
+        allowedResourceScopes: null
+      })
+    ).toEqual([capability]);
+  });
+
+  it('shares the exact resource-scope predicate used by dispatch authorization', () => {
+    expect(areDeclaredResourceScopesAllowed([], null)).toBe(true);
+    expect(areDeclaredResourceScopesAllowed([], new Set())).toBe(false);
+    expect(areDeclaredResourceScopesAllowed(['one', 'two'], new Set(['one', 'two']))).toBe(true);
+    expect(areDeclaredResourceScopesAllowed(['one', 'two'], new Set(['one']))).toBe(false);
   });
 
   it('ships only the read-only server status capability', () => {
