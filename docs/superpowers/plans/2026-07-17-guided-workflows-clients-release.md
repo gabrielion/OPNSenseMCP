@@ -1175,8 +1175,9 @@ every binding and refuses stale, copied, unsigned, partially successful, or diff
 
 **Files:** Create `scripts/{bootstrap,doctor,test}`, `docs/{clients,workflows,security}.md`,
 `scripts/docs/validate-claims.mjs`, and `tests/docs/claims.test.ts`; modify the independently authored
-`README.md` and `CONTRIBUTING.md`, plus `AGENTS.md`, `CLAUDE.md`, `docs/testing.md`,
-`docs/release.md`, and the provenance-approved `tests/smoke/claude-doc-consistency.mjs`.
+`README.md` and `CONTRIBUTING.md`, the phase-scoped `tests/foundation/documentation.test.ts`, plus
+`AGENTS.md`, `CLAUDE.md`, `docs/testing.md`, `docs/release.md`, and the provenance-approved
+`tests/smoke/claude-doc-consistency.mjs`.
 
 - [ ] Write failing tests that require the first bytes of `CONTRIBUTING.md` to be the fenced commands
 `./scripts/bootstrap`, `./scripts/doctor`, and `./scripts/test`; derive every README package, plugin,
@@ -1185,9 +1186,29 @@ marketplace commands plus labeled direct-MCP fallbacks; reject forbidden legacy 
 without a committed canonical report, external-network claims, or missing/inconsistent non-affiliation and
 trademark language. Extend
 `tests/smoke/claude-doc-consistency.mjs` to compare `AGENTS.md`, `CLAUDE.md`, README, docs, package scripts,
-and all three native plugin manifests for exact commands and guardrails.
-- [ ] Run `npx vitest run tests/docs/claims.test.ts && node --test tests/smoke/claude-doc-consistency.mjs`; expect FAIL because the immediate-start contract, agent-guide revisions, generated install commands, and evidence sections are not yet coherent.
-- [ ] Implement `bootstrap` to require Node `>=22.19 <23`, run `npm ci`, create pinned Python environments,
+and all three native plugin manifests for exact commands and guardrails. In the same failing-test commit,
+modify or remove every foundation-only documentation assertion that would reject the now-implemented
+firewall capabilities; the README/CONTRIBUTING rewrite must never leave a stale no-mutation contract.
+Add a bootstrap process-seam test that records every spawned executable and argument separately and requires
+the dependency install call to be exactly `npm` with `['ci', '--ignore-scripts']`. Reject `npm install`,
+plain `npm ci`, `--foreground-scripts`, shell-string execution, and any second npm dependency-install
+invocation. This restriction does not forbid the separately confirmed `brew`/`apt-get` host-package
+installation behind `--install-host-deps`.
+- [ ] Run:
+
+  ```bash
+  if test -x /opt/homebrew/opt/node@22/bin/node; then
+    export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+  fi
+  node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
+  npx --no-install vitest run tests/docs/claims.test.ts
+  node --test tests/smoke/claude-doc-consistency.mjs
+  ```
+
+  Expect FAIL because the immediate-start contract, agent-guide revisions, generated install commands,
+  evidence sections, and foundation-to-product contract handoff are not yet coherent.
+- [ ] Implement `bootstrap` to require Node `>=22.19 <23`, run exactly
+`npm ci --ignore-scripts`, create pinned Python environments,
 verify every client/test-tool artifact against `tests/clients/versions.json`, and detect QEMU plus client
 CLIs. On macOS print the exact missing `brew install qemu coreutils` command; on Debian/Ubuntu print
 `sudo apt-get install qemu-system-x86 qemu-utils ovmf curl jq`. Install host packages only after
@@ -1219,8 +1240,36 @@ prepare/preflight/apply/recovery in `docs/workflows.md`, wrapped VM/conformance/
 `docs/testing.md`, safety boundaries in `docs/security.md`, and immutable package/plugin/tag release steps
 in `docs/release.md`. Revise `AGENTS.md` and `CLAUDE.md` with the same Node range, Vitest commands, single
 VM wrapper, preflight-before-backup boundary, AGPL/name gates, evidence limitations, and no-push rule.
-- [ ] Run `./scripts/bootstrap && ./scripts/doctor && ./scripts/test && npx vitest run tests/docs/claims.test.ts && node --test tests/smoke/claude-doc-consistency.mjs && npm run license:check && git diff --check`; expect PASS, with doctor clearly labeling unavailable optional live layers and the coherence test reporting no drift.
-- [ ] Commit `git add scripts README.md CONTRIBUTING.md AGENTS.md CLAUDE.md docs tests/docs tests/smoke/claude-doc-consistency.mjs && git commit -m "docs: simplify setup workflows and test evidence"`.
+- [ ] Run:
+
+  ```bash
+  if test -x /opt/homebrew/opt/node@22/bin/node; then
+    export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+  fi
+  node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
+  ./scripts/bootstrap
+  ./scripts/doctor
+  ./scripts/test
+  npx --no-install vitest run tests/docs/claims.test.ts
+  node --test tests/smoke/claude-doc-consistency.mjs
+  npm run license:check
+  git diff --check
+  ```
+
+  Expect PASS, with doctor clearly labeling unavailable optional live layers, the coherence test reporting
+  no drift, and the foundation-only documentation contract replaced or removed rather than weakened around
+  a stale no-mutation claim.
+- [ ] Commit:
+
+  ```bash
+  git add \
+    scripts/bootstrap scripts/doctor scripts/test scripts/docs/validate-claims.mjs \
+    README.md CONTRIBUTING.md AGENTS.md CLAUDE.md \
+    docs/clients.md docs/workflows.md docs/security.md docs/testing.md docs/release.md \
+    tests/docs/claims.test.ts tests/foundation/documentation.test.ts \
+    tests/smoke/claude-doc-consistency.mjs
+  git commit -m "docs: simplify setup workflows and test evidence"
+  ```
 
 ### Task 9: Prove workflows, run the canonical benchmark, and release
 

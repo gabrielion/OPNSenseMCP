@@ -4170,6 +4170,31 @@ cannot hang Vitest. Snapshot every `process.env` name a test changes and restore
 in `afterEach`, including `TMPDIR`, even after a partial assertion failure. Do not relax the real-run
 assertions or skip them in `npm test`.
 
+#### Task 8 review-remediation addendum
+
+The post-implementation security and quality reviews are part of Task 8's executable contract, not a later
+documentation task:
+
+- Open the single `checks.json` evidence file once with `O_NOFOLLOW`; use `fstat({ bigint: true })`, a bounded
+  `MAX_CONFORMANCE_REPORT_BYTES + 1` positional read on that same handle, and final path-chain revalidation.
+  Compare device, inode, size, type, `ctimeNs`, and `mtimeNs` before open, after read, and at final
+  revalidation. Reject atomic replacement, symlink substitution, growth, and same-inode equal-length
+  `WARNING -> SUCCESS -> WARNING` rewrites with the same redacted `ConformanceReportError`. Bound and verify
+  the handle close on every path.
+- Do not publish an upstream response before the inbound request body has ended within its byte bound.
+  Couple inbound request, upstream request, upstream response, and downstream response failures in both
+  directions; an early response followed by an oversized chunked body must still produce the fixed `413`
+  and close both legs.
+- The real 2025 and 2026 subprocess cases require stderr to be exactly empty. Alpha.9 verbose stdout is
+  accepted only through a strict parser proving exactly three ordered scenario blocks, one canonical
+  loopback proxy URL, result paths strictly below the dedicated `TMPDIR`, parseable check arrays containing
+  only `SUCCESS`/`INFO`, and no repository/executable/argv/auth/poison/sentinel value. Every `finally` that
+  may send `SIGKILL` must poll for `ESRCH` before releasing PID ownership.
+- The harness must independently prove all report symlink boundaries, a real occupied-port failure, the
+  seventeenth socket refusal before proxy close, every product-preflight field, all seven late-startup
+  acquisitions, and synchronous plus asynchronous cleanup failures. Assertions after global cleanup are
+  not evidence of the admission or ownership boundary being tested.
+
 Now change `vitest.config.ts` to `include: ['tests/**/*.test.{ts,mjs}']`. This is test-discovery
 infrastructure, not the runner implementation. Run
 `npx vitest list tests/conformance/run-conformance.test.mjs` and require it to print the harness test
@@ -5178,14 +5203,29 @@ git commit -m "test: enforce MCP v2 conformance"
 - Create: `README.md`
 - Create: `CONTRIBUTING.md`
 - Create: `tests/foundation/documentation.test.ts`
+- Create: `tests/foundation/ci-workflow.test.ts`
 - Create: `.github/workflows/ci.yml`
 
 **Interfaces:**
-- README and CONTRIBUTING are new, independently authored foundation documents, not migrated artifacts. They distinguish implemented foundation facts from future firewall integration and name the beta-to-stable publication gate; Guided Task 8 later expands and finalizes them under its provenance and full-product evidence contract.
-- CONTRIBUTING gives one deterministic local sequence and one explicit protocol sequence for this foundation phase.
-- CI runs Node 22.19 deterministic gates first, then official 2025 and draft 2026 protocol gates with no baseline.
+- README and CONTRIBUTING are new, independently authored, temporary foundation documents, not migrated
+  artifacts and not product-release documentation. They say prominently that this phase does not connect to
+  or administer OPNsense, distinguish implemented foundation facts from future firewall integration, and name
+  the beta-to-stable publication gate.
+- `tests/foundation/documentation.test.ts` is a phase-scoped contract. The first later task that registers a
+  firewall mutation must replace its no-mutation assertion in the same commit, and Guided Task 8 must modify
+  or remove the remaining foundation-only assertions when it expands and finalizes the public documents.
+- CONTRIBUTING gives one guarded deterministic local sequence and one explicit protocol sequence for this
+  foundation phase. Every copyable Node/npm block selects supported Node 22 and rejects a runtime outside
+  `>=22.19 <23`; every install uses exactly `npm ci --ignore-scripts`.
+- CI runs a lightweight Node 22.19.0 compatibility-floor lane, the full verification gate on the current
+  patched Node 22.23.1 runtime, then the public 2025 and draft 2026 protocol scripts on Node 22.23.1. GitHub
+  actions are immutable full-SHA pins and checkout never persists credentials.
+- The six scenario/version tuples run once inside `npm run verify`'s real subprocess tests and once through
+  `npm run test:conformance`'s public scripts: twelve official child invocations in the combined local gate,
+  but exactly six public-script invocations. Expected negative header-validation probes are silent on stderr;
+  every accepted report contains only `SUCCESS`/`INFO` and there is no expected-failure baseline.
 
-- [ ] **Step 1: Write the documentation contract test first**
+- [ ] **Step 1: Write the documentation, CI, and silent-conformance contracts first**
 
 Create `tests/foundation/documentation.test.ts`:
 
@@ -5194,43 +5234,156 @@ Create `tests/foundation/documentation.test.ts`:
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
+const NODE_22_PREFLIGHT = [
+  'if test -x /opt/homebrew/opt/node@22/bin/node; then',
+  'export PATH="/opt/homebrew/opt/node@22/bin:$PATH"',
+  'fi',
+  'node -e "const [major, minor] = process.versions.node.split(\'.\').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"'
+] as const;
+
+function bashBlocks(document: string): readonly string[] {
+  return [...document.matchAll(/```bash\n(?<body>[\s\S]*?)\n```/gu)].map(
+    (match) => match.groups?.body ?? ''
+  );
+}
+
+function commandLines(document: string): readonly string[] {
+  return bashBlocks(document).flatMap((block) =>
+    block
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '')
+  );
+}
+
 describe('foundation documentation', () => {
   it('states the implemented safety and protocol evidence boundaries', async () => {
     const readme = await readFile('README.md', 'utf8');
+    expect(readme).toContain('Foundation development snapshot');
+    expect(readme).toContain('does not connect to or administer OPNsense');
+    expect(readme).toContain('not the complete OPNsense MCP product');
     expect(readme).toContain('No firewall mutation capability is registered');
     expect(readme).toContain('2025-11-25');
     expect(readme).toContain('2026-07-28');
     expect(readme).toContain('http-header-validation');
     expect(readme).toContain('2.0.0-beta.4');
+    expect(readme).toContain('six public-script invocations');
+    expect(readme).toContain('twelve official child invocations');
+    expect(readme).toContain('stderr remains empty');
+    expect(readme).toContain('only `SUCCESS` or `INFO`');
     expect(readme).toContain('repinned to one stable MCP v2 release');
     expect(readme).toContain('AGPL-3.0-or-later');
     expect(readme).toContain('exact serialized origin');
     expect(readme).toContain('Deprecated SSE compatibility is disabled by default');
   });
 
-  it('publishes copyable contributor gates', async () => {
-    const contributing = await readFile('CONTRIBUTING.md', 'utf8');
-    for (const command of [
-      'npm ci',
+  it('publishes exact guarded contributor commands', async () => {
+    const [readme, contributing] = await Promise.all([
+      readFile('README.md', 'utf8'),
+      readFile('CONTRIBUTING.md', 'utf8')
+    ]);
+    const readmeLines = commandLines(readme);
+    const contributingLines = commandLines(contributing);
+    const installLines = [...readmeLines, ...contributingLines].filter((line) =>
+      /^npm (?:ci|i|install)(?:\s|$)/u.test(line)
+    );
+    expect(installLines).toEqual([
+      'npm ci --ignore-scripts',
+      'npm ci --ignore-scripts'
+    ]);
+    for (const exactCommand of [
+      'npm ci --ignore-scripts',
       'npm run verify',
-      'npm run test:conformance',
+      'npm run test:conformance:2025',
+      'npm run test:conformance:2026',
       'git diff --check'
     ]) {
-      expect(contributing).toContain(command);
+      expect(contributingLines).toContain(exactCommand);
+    }
+    for (const block of [...bashBlocks(readme), ...bashBlocks(contributing)]) {
+      if (!/(?:^|\n)(?:node|npm|npx)\b/mu.test(block)) continue;
+      const lines = block.split('\n').map((line) => line.trim());
+      for (const preflightLine of NODE_22_PREFLIGHT) {
+        expect(lines).toContain(preflightLine);
+      }
     }
   });
 });
 ```
 
-- [ ] **Step 2: Run the contract and verify the red state**
+Create `tests/foundation/ci-workflow.test.ts`:
+
+```ts
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { readFile } from 'node:fs/promises';
+import { describe, expect, it } from 'vitest';
+
+describe('foundation CI workflow', () => {
+  it('pins supported runtimes, immutable actions, guarded installs, and residue checks', async () => {
+    const workflow = await readFile('.github/workflows/ci.yml', 'utf8');
+    const lines = workflow.split('\n').map((line) => line.trim());
+    const count = (line: string): number => lines.filter((candidate) => candidate === line).length;
+
+    expect(count('- uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0')).toBe(3);
+    expect(count('- uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0')).toBe(3);
+    expect(count('persist-credentials: false')).toBe(3);
+    expect(count('node-version: 22.19.0 # compatibility floor')).toBe(1);
+    expect(count('node-version: 22.23.1 # current patched Node 22')).toBe(2);
+    expect(count('- run: npm ci --ignore-scripts')).toBe(3);
+    expect(count('- run: npm ci')).toBe(0);
+    const installInvocations = [
+      ...workflow.matchAll(
+        /(?:^|[^A-Za-z0-9_-])(?<command>npm[ \t]+(?:ci|i|install)\b[^\r\n]*)/gmu
+      )
+    ].map((match) => match.groups?.command.trim());
+    expect(installInvocations).toEqual([
+      'npm ci --ignore-scripts',
+      'npm ci --ignore-scripts',
+      'npm ci --ignore-scripts'
+    ]);
+    expect(count('- run: npm run build')).toBe(1);
+    expect(count('- run: npm run typecheck')).toBe(1);
+    expect(count('- run: npm run verify')).toBe(1);
+    expect(count('- run: npm run test:conformance')).toBe(1);
+    expect(count('needs: [compatibility-floor, verify]')).toBe(1);
+    expect(lines).toContain('timeout-minutes: 10');
+    expect(lines).toContain('timeout-minutes: 20');
+    expect(lines).toContain('timeout-minutes: 15');
+    expect(count('test ! -e results')).toBe(3);
+    expect(count('test -z "$(git status --porcelain=v1 --untracked-files=all)"')).toBe(3);
+    expect(workflow).toContain('permissions:\n  contents: read');
+    expect(workflow).not.toContain('pull_request_target');
+  });
+});
+```
+
+Task 8 already owns the executable empty-stderr assertion for both `2025-11-25` and `2026-07-28` without
+changing the six selected scenarios. Keep that contract green here. The five negative
+`http-header-validation` requests remain required protocol evidence, but their expected validation
+responses are handled without diagnostic logging; acceptance still comes from exit `0` plus strictly
+validated `checks.json` records containing only `SUCCESS`/`INFO`.
+
+This foundation documentation contract is intentionally temporary. Do not carry the literal no-mutation
+claim into a product phase that has registered mutations.
+
+- [ ] **Step 2: Run the contracts and verify the red state**
 
 Run:
 
 ```bash
-npx vitest run tests/foundation/documentation.test.ts
+if test -x /opt/homebrew/opt/node@22/bin/node; then
+  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+fi
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
+npx --no-install vitest run \
+  tests/foundation/documentation.test.ts \
+  tests/foundation/ci-workflow.test.ts \
+  tests/conformance/run-conformance.test.mjs
 ```
 
-Expected: FAIL because README and CONTRIBUTING do not exist.
+Expected: FAIL because README, CONTRIBUTING, and the CI workflow do not exist. Test discovery and the
+supported-Node assertion both succeed; the conformance assertion also exposes any 2025 or 2026 stderr
+diagnostic. No package is downloaded by `npx`.
 
 - [ ] **Step 3: Write an evidence-bounded README**
 
@@ -5239,11 +5392,14 @@ Create `README.md`:
 ````markdown
 # OPNsense MCP
 
-A safety-first Model Context Protocol server foundation for guided OPNsense administration.
+> **Foundation development snapshot:** This is not the complete OPNsense MCP product, is not
+> release-ready, and does not connect to or administer OPNsense.
+
+A safety-first Model Context Protocol and policy foundation for future guided OPNsense administration.
 
 ## Current scope
 
-This foundation provides one read-only `server_status` tool, pedagogical prompts, a closed capability catalog, centralized policy checks, dual-era stdio, primary opt-in Streamable HTTP, and isolated deprecated-SSE compatibility. No firewall mutation capability is registered. Firewall reads and writes are added only after their independent adapters, backup rules, audit rules, VM tests, and recovery checks exist.
+This temporary foundation provides one local read-only `server_status` tool, pedagogical prompts, a closed capability catalog, centralized policy checks, dual-era stdio, primary opt-in Streamable HTTP, and isolated deprecated-SSE compatibility. It has no OPNsense API or SSH adapter, so it performs no firewall reads and no firewall writes. No firewall mutation capability is registered. Firewall access is added only after its independent adapters, backup rules, audit rules, VM tests, and recovery checks exist.
 
 The default is `READ_ONLY=true`. A caller cannot enable a capability by inventing its name or by passing a confirmation boolean: exposure comes from the catalog, and confirmation state is signed and checked by the server.
 
@@ -5256,7 +5412,7 @@ if test -x /opt/homebrew/opt/node@22/bin/node; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
 node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
-npm ci
+npm ci --ignore-scripts
 npm run build
 npm start
 ```
@@ -5266,6 +5422,10 @@ npm start
 HTTP is an explicit local-development option:
 
 ```bash
+if test -x /opt/homebrew/opt/node@22/bin/node; then
+  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+fi
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
 MCP_HTTP_ENABLED=true \
 MCP_HTTP_TOKEN=0123456789abcdef0123456789abcdef \
 npm run start:http
@@ -5286,15 +5446,32 @@ Prompts guide an MCP client; they are not authorization and they do not bypass p
 ## Tested evidence
 
 ```bash
+if test -x /opt/homebrew/opt/node@22/bin/node; then
+  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+fi
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
 npm run verify
 npm run test:conformance
 ```
 
-`npm run verify` runs formatting, lint, strict TypeScript, the JavaScript/TypeScript AGPL header gate, build, and deterministic Vitest tests. `npm run test:conformance` runs six targeted official invocations: `server-initialize`, `ping`, and `tools-list` at `2025-11-25`, then `tools-list`, `input-required-result-unsupported-methods`, and `http-header-validation` at draft `2026-07-28`. There is no expected-failure baseline. This is targeted interoperability evidence, not full-suite conformance.
+`npm run verify` runs formatting, lint, strict TypeScript, the JavaScript/TypeScript AGPL header gate,
+build, and deterministic Vitest tests. Its real subprocess test makes six official child invocations,
+captured inside Vitest. The public `npm run test:conformance` command runs the same six scenario/version
+tuples again: `server-initialize`, `ping`, and `tools-list` at `2025-11-25`, then `tools-list`,
+`input-required-result-unsupported-methods`, and `http-header-validation` at draft `2026-07-28`.
+Consequently the combined gate makes six public-script invocations and twelve official child invocations.
+For both protocol versions stderr remains empty, including the five expected negative header probes, and
+accepted `checks.json` records contain only `SUCCESS` or `INFO`. There is no expected-failure baseline.
+This is targeted interoperability evidence, not full-suite conformance.
 
-The MCP packages are deliberately pinned to `2.0.0-beta.4` for this foundation. Before public package publication, all MCP packages must be repinned to one stable MCP v2 release and every deterministic and conformance gate must pass again.
+The four MCP v2 packages `@modelcontextprotocol/server`, `@modelcontextprotocol/client`,
+`@modelcontextprotocol/node`, and `@modelcontextprotocol/express` are each deliberately pinned to
+`2.0.0-beta.4` for this foundation. Before public package publication, all four must be repinned to one
+stable MCP v2 release together and every deterministic and conformance gate must pass again.
 
-The isolated deprecated-SSE adapter pins `@modelcontextprotocol/sdk@1.29.0` exactly. Before release run `npm run release:check:legacy-sse` and `npm audit --omit=dev`, then decide explicitly whether compatibility can be removed.
+Separately, the isolated deprecated-SSE adapter pins the legacy `@modelcontextprotocol/sdk@1.29.0`
+exactly. Before release run `npm run release:check:legacy-sse` and `npm audit --omit=dev`, then decide
+explicitly whether compatibility can be removed.
 
 ## License
 
@@ -5320,7 +5497,7 @@ if test -x /opt/homebrew/opt/node@22/bin/node; then
 fi
 node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
 node --version
-npm ci
+npm ci --ignore-scripts
 npm run verify
 git diff --check
 ```
@@ -5330,11 +5507,21 @@ The Node version must satisfy `>=22.19 <23` and every command must exit `0`.
 ## Protocol verification
 
 ```bash
+if test -x /opt/homebrew/opt/node@22/bin/node; then
+  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+fi
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
 npm run test:conformance:2025
 npm run test:conformance:2026
 ```
 
-The first command runs targeted `server-initialize`, `ping`, and `tools-list` scenarios at `2025-11-25`. The second runs targeted `tools-list`, `input-required-result-unsupported-methods`, and `http-header-validation` at draft `2026-07-28`. Do not introduce an expected-failure baseline or describe these six invocations as a full suite.
+The first command runs targeted `server-initialize`, `ping`, and `tools-list` scenarios at `2025-11-25`.
+The second runs targeted `tools-list`, `input-required-result-unsupported-methods`, and
+`http-header-validation` at draft `2026-07-28`. These are six public-script invocations. If they follow
+`npm run verify`, the combined gate has twelve official child invocations because Vitest already ran the
+same six tuples. Both versions keep stderr empty, including expected negative header probes, and accepted
+reports contain only `SUCCESS` or `INFO`. Do not introduce an expected-failure baseline or describe these
+six public invocations as a full suite.
 
 ## Change discipline
 
@@ -5349,17 +5536,25 @@ Every JavaScript and TypeScript source begins with `// SPDX-License-Identifier: 
 `npm run license:check` enforces those source headers. The later provenance workflow owns the broader release-tree and history scan; do not treat the source-header check as provenance evidence.
 ````
 
-- [ ] **Step 5: Run the documentation contract**
+- [ ] **Step 5: Run the documentation and silent-conformance contracts**
 
 Run:
 
 ```bash
-npx vitest run tests/foundation/documentation.test.ts
+if test -x /opt/homebrew/opt/node@22/bin/node; then
+  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+fi
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
+npx --no-install vitest run \
+  tests/foundation/documentation.test.ts \
+  tests/conformance/run-conformance.test.mjs
 ```
 
-Expected: two documentation tests pass.
+Expected: the documentation contract passes, both real subprocess cases pass (three official child
+invocations per version), stderr is exactly empty for both versions, and accepted reports contain only
+`SUCCESS`/`INFO`.
 
-- [ ] **Step 6: Add pinned Node 22.19.0 CI with separate deterministic and protocol jobs**
+- [ ] **Step 6: Add immutable, current-patch-primary CI with a Node 22.19 compatibility floor**
 
 Create `.github/workflows/ci.yml`:
 
@@ -5375,55 +5570,119 @@ permissions:
   contents: read
 
 jobs:
-  deterministic:
+  compatibility-floor:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          node-version: 22.19.0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0 # compatibility floor
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm run typecheck
+      - name: Assert no generated or repository residue
+        run: |
+          git diff --check
+          test ! -e results
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1 # current patched Node 22
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm run verify
-      - run: git diff --check
+      - name: Assert no generated or repository residue
+        run: |
+          git diff --check
+          test ! -e results
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
   protocol:
-    needs: deterministic
+    needs: [compatibility-floor, verify]
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          node-version: 22.19.0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1 # current patched Node 22
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm run test:conformance
+      - name: Assert no generated or repository residue
+        run: |
+          git diff --check
+          test ! -e results
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
 ```
+
+Run the exact CI contract:
+
+```bash
+if test -x /opt/homebrew/opt/node@22/bin/node; then
+  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+fi
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
+npx --no-install vitest run tests/foundation/ci-workflow.test.ts
+```
+
+Expected: PASS. The workflow test verifies the exact action pins and version comments, disabled checkout
+credential persistence, three guarded installs, the compatibility/current runtime split, timeouts, and
+clean/residue assertions. The primary `verify` and `protocol` jobs use the current patched Node 22; the
+22.19.0 lane is an additional compatibility floor.
 
 - [ ] **Step 7: Run the complete local release gate**
 
 Run exactly:
 
 ```bash
+if test -x /opt/homebrew/opt/node@22/bin/node; then
+  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+fi
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
 npm ci --ignore-scripts
 npm run verify
 npm run test:conformance
 git diff --check
-git status --short
+test ! -e results
+task9_expected_status="$(printf '%s\n' \
+  '?? .github/workflows/ci.yml' \
+  '?? CONTRIBUTING.md' \
+  '?? README.md' \
+  '?? tests/foundation/ci-workflow.test.ts' \
+  '?? tests/foundation/documentation.test.ts')"
+test "$(git status --short --untracked-files=all)" = "$task9_expected_status"
 ```
 
 Expected:
-- dependency installation exits `0` under Node 22.19.0;
+- dependency installation exits `0` under supported Node 22 without running lifecycle scripts;
 - formatting, lint, typecheck, build, and all Vitest tests pass;
-- the six targeted official invocations report zero failures and warnings;
-- whitespace validation exits `0`;
-- `git status --short` lists only the four files created by this task before commit.
+- `npm run verify` makes six captured official child invocations and the public conformance script makes
+  the same six again, for twelve official child invocations in the combined gate but six public-script
+  invocations;
+- both versions keep stderr exactly empty and all accepted report records contain only `SUCCESS`/`INFO`;
+- whitespace and residue validation exit `0`; and
+- the exact five-path pre-commit status matches, with no additional tracked or untracked file.
 
 - [ ] **Step 8: Commit docs and CI atomically**
 
 ```bash
 git add README.md CONTRIBUTING.md tests/foundation/documentation.test.ts \
-  .github/workflows/ci.yml
+  tests/foundation/ci-workflow.test.ts .github/workflows/ci.yml
 git commit -m "docs: define MCP foundation evidence"
 ```
 
@@ -5432,13 +5691,29 @@ git commit -m "docs: define MCP foundation evidence"
 Run:
 
 ```bash
+if test -x /opt/homebrew/opt/node@22/bin/node; then
+  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+fi
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
 npm ci --ignore-scripts
 npm run verify
 npm run test:conformance
 git diff --check
-git status --short
+test ! -e results
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
 ```
 
-Expected: every command exits `0`, all six targeted protocol invocations remain clean, and `git status --short` prints nothing.
+Expected: every command exits `0`, the combined gate makes twelve official child invocations (six through
+the public script), stderr remains empty for both protocol versions, accepted reports contain only
+`SUCCESS`/`INFO`, no `results` directory exists, and the final clean-worktree assertion fails on any tracked
+or untracked residue.
 
-The implementation is ready for a separate firewall-adapter plan only after this final state is reproduced. Public package publication remains blocked until the four MCP v2 beta pins are changed together to one stable release, the isolated legacy `@modelcontextprotocol/sdk@1.29.0` pin is removed or explicitly re-approved after its drift/audit gate, Guided Task 8 finalizes the independently authored public docs, and the same final state is reproduced again.
+The foundation is ready only for a separately reviewed next implementation phase after this final state is
+reproduced; it is neither the complete product nor release-ready. The first task that registers a mutation
+must update the phase-scoped documentation contract in the same commit. Guided Task 8 later modifies or
+removes the remaining foundation-only assertions as it finalizes the independently authored public docs.
+Public package publication remains blocked until `@modelcontextprotocol/server`,
+`@modelcontextprotocol/client`, `@modelcontextprotocol/node`, and `@modelcontextprotocol/express` move
+together from `2.0.0-beta.4` to one stable MCP v2 release, the separate legacy
+`@modelcontextprotocol/sdk@1.29.0` pin is removed or explicitly re-approved after its drift/audit gate, and
+the final state is reproduced again.

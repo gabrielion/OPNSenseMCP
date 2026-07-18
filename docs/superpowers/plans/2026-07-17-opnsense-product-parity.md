@@ -1358,6 +1358,8 @@ is forbidden unless both the new Vitest contracts and migrated Node tests are gr
 - Modify: `src/opnsense/generic/schemas.ts`
 - Create: `src/opnsense/generic/capabilities.ts`
 - Modify: `src/app/product-context.ts`
+- Modify: `README.md`
+- Modify: `tests/foundation/documentation.test.ts`
 - Create: `tests/contract/generic-write.test.ts`
 - Create: `tests/integration/generic-write-policy.test.ts`
 
@@ -1425,11 +1427,18 @@ it('reports an idempotent no-change without applying', async () => {
 });
 ```
 
+In the same RED step, replace only the temporary Foundation documentation assertion that expects the README
+to claim no firewall mutation capability is registered. Require the truthful transitional statement instead:
+generic mutation capabilities now exist, but `READ_ONLY=true` remains the default and hides and refuses them
+at both listing and dispatch. Deliberately leave README unchanged for this RED run, so the new documentation
+assertion fails alongside the missing mutation implementation.
+
 - [ ] **Step 2: Verify the red state**
 
-Run: `npm test -- tests/contract/generic-write.test.ts tests/integration/generic-write-policy.test.ts`
+Run: `npm test -- tests/contract/generic-write.test.ts tests/integration/generic-write-policy.test.ts tests/foundation/documentation.test.ts`
 
-Expected: FAIL because mutation methods and integration mappings do not exist.
+Expected: FAIL because mutation methods and integration mappings do not exist and the temporary Foundation
+documentation still claims that no mutation capability is registered.
 
 - [ ] **Step 3: Implement one mutation primitive and derive all verbs from it**
 
@@ -1474,16 +1483,24 @@ never branch from a Foundation `effect: 'read'` definition into a restart/reload
 test asserts `audit-intent`, `backup`, first outbound mutation, optional apply, and final audit order. Backup
 is performed only by the kernel; the generic service neither accepts nor constructs backup metadata.
 
+Now replace the obsolete README sentence with the transitional statement required by the RED documentation
+test. Keep the explicit not-product-complete and not-release-ready notice. This handoff is mandatory in Task
+6 itself; Guided Task 8 later rewrites the high-level public documents but must not be the first task to
+remove a claim that Task 6 has made false.
+
 - [ ] **Step 4: Run mutation, policy, and backup tests**
 
-Run: `npm test -- tests/contract/generic-write.test.ts tests/integration/generic-write-policy.test.ts tests/contract/backup-policy.test.ts && npm run typecheck`
+Run: `npm test -- tests/contract/generic-write.test.ts tests/integration/generic-write-policy.test.ts tests/contract/backup-policy.test.ts tests/foundation/documentation.test.ts && npm run typecheck`
 
 Expected: PASS; event assertions prove backup precedes the first outbound mutation.
 
 - [ ] **Step 5: Commit generic mutations**
 
 ```bash
-git add src/opnsense/generic src/capabilities tests/contract/generic-write.test.ts tests/integration/generic-write-policy.test.ts
+git add src/opnsense/generic/service.ts src/opnsense/generic/schemas.ts \
+  src/opnsense/generic/capabilities.ts src/app/product-context.ts \
+  README.md tests/foundation/documentation.test.ts \
+  tests/contract/generic-write.test.ts tests/integration/generic-write-policy.test.ts
 git commit -m "feat: route generic mutations through strict safety policy"
 ```
 
