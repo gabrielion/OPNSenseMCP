@@ -1004,6 +1004,10 @@ describe('CapabilityCatalog', () => {
       })
     ).toEqual([read]);
     expect(Object.isFrozen(catalog.all)).toBe(true);
+    expect(Object.isFrozen(read)).toBe(true);
+    expect(Object.isFrozen(read.annotations)).toBe(true);
+    expect(Object.isFrozen(read.policy)).toBe(true);
+    expect(Object.isFrozen(read.policy.resourceScopes)).toBe(true);
   });
 
   it('ships only the read-only server status capability', () => {
@@ -1034,11 +1038,7 @@ Create `src/capabilities/types.ts`:
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { ToolAnnotations } from '@modelcontextprotocol/server';
 import type * as z from 'zod/v4';
-import type { CapabilityCatalog } from './catalog.js';
 import type { FeatureFlag } from '../config/feature-flags.js';
-import type { RuntimeConfig } from '../config/runtime-config.js';
-import type { DispatchOutcome, PolicyEnvelope } from '../security/policy-envelope.js';
-import type { VerifiedConfirmation } from '../security/verified-confirmation.js';
 
 export type TransportKind = 'stdio' | 'http';
 export type CapabilityEffect = 'read' | 'local-write' | 'firewall-write';
@@ -1113,7 +1113,7 @@ export function defineCapability<
     description: definition.description,
     inputSchema: definition.inputSchema,
     outputSchema: definition.outputSchema,
-    annotations: definition.annotations,
+    annotations: Object.freeze({ ...definition.annotations }),
     transports: Object.freeze([...definition.transports]),
     policy: Object.freeze({
       ...definition.policy,
@@ -1145,23 +1145,6 @@ export interface ExposureContext {
   readonly transport: TransportKind;
   readonly enabledFeatureFlags: ReadonlySet<FeatureFlag>;
   readonly allowedResourceScopes: ReadonlySet<string> | null;
-}
-
-export interface CapabilityRequest {
-  readonly name: string;
-  readonly arguments: unknown;
-}
-
-export type CapabilityResult = DispatchOutcome;
-
-export interface ServerContext {
-  readonly config: RuntimeConfig;
-  readonly catalog: CapabilityCatalog;
-  readonly policy: PolicyEnvelope;
-  readonly transport: TransportKind;
-  readonly signal?: AbortSignal;
-  readonly principalId?: string;
-  readonly confirmation?: VerifiedConfirmation;
 }
 ```
 
@@ -1292,9 +1275,6 @@ export type {
   CapabilityDefinition,
   CapabilityExecutionContext,
   CapabilityPolicy,
-  CapabilityRequest,
-  CapabilityResult,
-  ServerContext,
   TransportKind
 } from './capabilities/types.js';
 export { loadRuntimeConfig } from './config/runtime-config.js';
@@ -1311,7 +1291,7 @@ npm run typecheck
 npm run lint
 ```
 
-Expected: nine focused tests pass; typecheck and lint exit `0`.
+Expected: eleven focused tests pass; typecheck and lint exit `0`.
 
 - [ ] **Step 7: Commit the catalog atomically**
 
@@ -1329,11 +1309,15 @@ git commit -m "feat: add closed capability catalog"
 - Create: `src/security/policy-envelope.ts`
 - Create: `tests/security/policy-envelope.test.ts`
 - Create: `tests/capabilities/dispatch.test.ts`
+- Modify: `src/capabilities/types.ts`
 - Modify: `src/index.ts`
 
 **Interfaces:**
 - Consumes: `CapabilityCatalog`, `CapabilityDefinition`, `RuntimeConfig`, and `TransportKind`.
-- Produces: `PolicyEnvelope`, `DispatchRequest`, `DispatchOutcome`, `VerifiedConfirmation`, `verifiedConfirmationFromAdapter()`, `sha256Json()`, and the sole public execution facade `dispatchCapability(request, context)` for every adapter.
+- Produces: `PolicyEnvelope`, `DispatchRequest`, `DispatchOutcome`, `CapabilityRequest`,
+  `CapabilityResult`, `ServerContext`, `VerifiedConfirmation`,
+  `verifiedConfirmationFromAdapter()`, `sha256Json()`, and the sole public execution facade
+  `dispatchCapability(request, context)` for every adapter.
 
 - [ ] **Step 1: Write adversarial policy tests before implementation**
 
@@ -1750,6 +1734,37 @@ export class PolicyEnvelope {
 
 - [ ] **Step 6: Add and test the sole public dispatch facade**
 
+Now that the policy and confirmation modules exist, add these type-only imports to
+`src/capabilities/types.ts`:
+
+```ts
+import type { CapabilityCatalog } from './catalog.js';
+import type { RuntimeConfig } from '../config/runtime-config.js';
+import type { DispatchOutcome, PolicyEnvelope } from '../security/policy-envelope.js';
+import type { VerifiedConfirmation } from '../security/verified-confirmation.js';
+```
+
+Append the adapter request/context contracts to that file:
+
+```ts
+export interface CapabilityRequest {
+  readonly name: string;
+  readonly arguments: unknown;
+}
+
+export type CapabilityResult = DispatchOutcome;
+
+export interface ServerContext {
+  readonly config: RuntimeConfig;
+  readonly catalog: CapabilityCatalog;
+  readonly policy: PolicyEnvelope;
+  readonly transport: TransportKind;
+  readonly signal?: AbortSignal;
+  readonly principalId?: string;
+  readonly confirmation?: VerifiedConfirmation;
+}
+```
+
 Create `src/capabilities/dispatch.ts`:
 
 ```ts
@@ -1820,6 +1835,11 @@ Append to `src/index.ts`:
 export { PolicyEnvelope } from './security/policy-envelope.js';
 export { dispatchCapability } from './capabilities/dispatch.js';
 export type {
+  CapabilityRequest,
+  CapabilityResult,
+  ServerContext
+} from './capabilities/types.js';
+export type {
   DispatchOutcome,
   DispatchRequest,
   PolicyEnvelopeOptions,
@@ -1843,7 +1863,7 @@ Expected: five policy tests and one facade test pass, the full test suite passes
 - [ ] **Step 9: Commit the envelope atomically**
 
 ```bash
-git add src/security src/capabilities/dispatch.ts src/index.ts \
+git add src/security src/capabilities/dispatch.ts src/capabilities/types.ts src/index.ts \
   tests/security/policy-envelope.test.ts tests/capabilities/dispatch.test.ts
 git commit -m "feat: enforce minimal capability policy envelope"
 ```
