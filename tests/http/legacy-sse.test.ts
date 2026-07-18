@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 /* eslint-disable @typescript-eslint/no-deprecated */
 import { request as httpRequest } from 'node:http';
+import { setTimeout as delay } from 'node:timers/promises';
 import { Client as LegacyClient } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { Server as LegacyServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import * as z from 'zod/v4';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -26,6 +28,14 @@ interface OpenSse {
   readonly closed: Promise<void>;
 }
 
+interface BlockingCapabilityFixture {
+  readonly catalog: CapabilityCatalog;
+  readonly signals: AbortSignal[];
+  readonly secondStarted: Promise<void>;
+  readonly finalized: () => number;
+  release(): void;
+}
+
 function application(enabled: boolean, catalog?: CapabilityCatalog) {
   return createApplicationContext(
     loadRuntimeConfig({
@@ -37,6 +47,68 @@ function application(enabled: boolean, catalog?: CapabilityCatalog) {
     }),
     catalog
   );
+}
+
+function createBlockingCapabilityFixture(
+  effect: 'read' | 'local-write',
+  options: { readonly rejectAfterRelease?: boolean } = {}
+): BlockingCapabilityFixture {
+  const signals: AbortSignal[] = [];
+  let finalized = 0;
+  let releaseGate: (() => void) | undefined;
+  let resolveSecondStarted: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const secondStarted = new Promise<void>((resolve) => {
+    resolveSecondStarted = resolve;
+  });
+  const capability = defineCapability({
+    id: `test.blocking-${effect}`,
+    mcpName: 'blocking_call',
+    title: 'Blocking call',
+    description: 'Hold one test capability execution until explicitly released.',
+    inputSchema: z.object({ value: z.string() }).strict(),
+    outputSchema: z.object({ echoed: z.string() }).strict(),
+    annotations: {
+      readOnlyHint: effect === 'read',
+      destructiveHint: effect !== 'read',
+      idempotentHint: true,
+      openWorldHint: false
+    },
+    transports: ['http'],
+    policy: {
+      effect,
+      resourceScopes: [],
+      requiredFeatureFlags: [],
+      backup: 'none',
+      audit: 'none',
+      confirmation: 'none',
+      timeoutMs: 1_000,
+      redactFields: []
+    },
+    handler: async ({ value }, context) => {
+      signals.push(context.signal);
+      if (signals.length === 2) resolveSecondStarted?.();
+      try {
+        await gate;
+        if (options.rejectAfterRelease === true) throw new Error('fixture-rejection');
+        return { echoed: value };
+      } finally {
+        finalized += 1;
+      }
+    }
+  });
+  return {
+    catalog: new CapabilityCatalog([capability]),
+    signals,
+    secondStarted,
+    finalized: () => finalized,
+    release() {
+      releaseGate?.();
+      releaseGate = undefined;
+    }
+  };
 }
 
 afterEach(async () => {
@@ -159,6 +231,40 @@ function openSse(runtime: HttpRuntime): Promise<OpenSse> {
     );
     request.once('error', reject);
     request.end();
+  });
+}
+
+async function openLegacyClient(runtime: HttpRuntime, name: string) {
+  const transport = new SSEClientTransport(new URL('/sse', runtime.url), {
+    requestInit: { headers: headers() }
+  });
+  const client = new LegacyClient({ name, version: '0.1.0' }, { capabilities: {} });
+  let resolveClosed: (() => void) | undefined;
+  const closed = new Promise<void>((resolve) => {
+    resolveClosed = resolve;
+  });
+  client.onclose = () => resolveClosed?.();
+  const close = () => Promise.allSettled([client.close(), transport.close()]);
+  connections.add(close);
+  await client.connect(transport);
+  const endpoint = (transport as unknown as { readonly _endpoint?: URL })._endpoint;
+  const sessionId = endpoint?.searchParams.get('sessionId');
+  if (sessionId === null || sessionId === undefined) {
+    await close();
+    throw new Error('Legacy test client did not receive a session identifier');
+  }
+  return { client, transport, closed, close, sessionId };
+}
+
+function betaToolsList(runtime: HttpRuntime): Promise<Response> {
+  return fetch(runtime.url, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${TOKEN}`,
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} })
   });
 }
 
@@ -354,6 +460,244 @@ describe('isolated legacy SSE compatibility', () => {
     });
     expect(recovered.status).toBe(200);
     second.close();
+  });
+
+  it('admits only one capability dispatch per legacy session and refuses the whole competing flood', async () => {
+    const fixture = createBlockingCapabilityFixture('read');
+    const runtime = await startHttp(application(true, fixture.catalog), {
+      port: 0,
+      limits: { maxConcurrentRequests: 32 }
+    });
+    runtimes.add(runtime);
+    const opened = await openLegacyClient(runtime, 'single-dispatch');
+    const first = opened.client.callTool({ name: 'blocking_call', arguments: { value: 'first' } });
+    await expect.poll(() => fixture.signals.length).toBe(1);
+    const competing = Array.from({ length: 12 }, (_, index) =>
+      opened.client.callTool({
+        name: 'blocking_call',
+        arguments: { value: `competing-${String(index)}` }
+      })
+    );
+    const allCallsSettlement = Promise.allSettled([first, ...competing]);
+    const competingSettlement = Promise.all(competing);
+    try {
+      await Promise.race([competingSettlement.then(() => undefined), fixture.secondStarted]);
+      expect(fixture.signals).toHaveLength(1);
+      expect(await competingSettlement).toEqual(
+        Array.from({ length: 12 }, () => ({
+          isError: true,
+          content: [
+            { type: 'text', text: 'Legacy SSE session already has an active capability call.' }
+          ],
+          structuredContent: { code: 'LEGACY_SESSION_BUSY' }
+        }))
+      );
+      fixture.release();
+      await expect(first).resolves.toMatchObject({ structuredContent: { echoed: 'first' } });
+      await expect(
+        opened.client.callTool({ name: 'blocking_call', arguments: { value: 'after' } })
+      ).resolves.toMatchObject({ structuredContent: { echoed: 'after' } });
+      expect(fixture.signals).toHaveLength(2);
+      expect(fixture.finalized()).toBe(2);
+    } finally {
+      fixture.release();
+      await opened.close();
+      await allCallsSettlement;
+    }
+  });
+
+  it('keeps a disconnected write dispatch in the shared admission slot until real settlement', async () => {
+    const fixture = createBlockingCapabilityFixture('local-write');
+    const runtime = await startHttp(application(true, fixture.catalog), {
+      port: 0,
+      limits: { maxConcurrentRequests: 2 }
+    });
+    runtimes.add(runtime);
+    const opened = await openLegacyClient(runtime, 'retained-admission');
+    const call = opened.client.callTool({
+      name: 'blocking_call',
+      arguments: { value: 'held-write' }
+    });
+    const callSettlement = Promise.allSettled([call]);
+    let replacement: OpenSse | undefined;
+    try {
+      await expect.poll(() => fixture.signals.length).toBe(1);
+      await opened.transport.close();
+      await opened.closed;
+      replacement = await openSse(runtime);
+
+      const saturated = await betaToolsList(runtime);
+      expect(saturated.status).toBe(503);
+      expect(await saturated.json()).toEqual({ error: 'request_limit_reached' });
+
+      fixture.release();
+      await expect.poll(() => fixture.finalized()).toBe(1);
+      await delay(0);
+      expect((await betaToolsList(runtime)).status).toBe(200);
+    } finally {
+      fixture.release();
+      replacement?.close();
+      await opened.close();
+      await callSettlement;
+    }
+  });
+
+  it('keeps runtime close pending on an abort-ignoring write and shares the same close promise', async () => {
+    const fixture = createBlockingCapabilityFixture('local-write');
+    const runtime = await startHttp(application(true, fixture.catalog), {
+      port: 0,
+      limits: { headersTimeoutMs: 25, keepAliveTimeoutMs: 25 }
+    });
+    runtimes.add(runtime);
+    const opened = await openLegacyClient(runtime, 'owned-write');
+    const call = opened.client.callTool({
+      name: 'blocking_call',
+      arguments: { value: 'shutdown-write' }
+    });
+    const callSettlement = Promise.allSettled([call]);
+    let close: Promise<void> | undefined;
+    try {
+      await expect.poll(() => fixture.signals.length).toBe(1);
+      close = runtime.close();
+      expect(runtime.close()).toBe(close);
+      let closeSettled = false;
+      void close.then(
+        () => {
+          closeSettled = true;
+        },
+        () => {
+          closeSettled = true;
+        }
+      );
+      await expect.poll(() => fixture.signals[0]?.aborted).toBe(true);
+      await delay(10);
+      expect(closeSettled).toBe(false);
+      expect(fixture.finalized()).toBe(0);
+
+      await opened.close();
+      fixture.release();
+      await close;
+      expect(fixture.finalized()).toBe(1);
+      expect(runtime.close()).toBe(close);
+    } finally {
+      fixture.release();
+      await opened.close();
+      await Promise.allSettled(close === undefined ? [] : [close]);
+      await callSettlement;
+    }
+  });
+
+  it('suspends idle expiry during a call and rearms it only after dispatch settlement', async () => {
+    const fixture = createBlockingCapabilityFixture('read');
+    const runtime = await startHttp(application(true, fixture.catalog), {
+      port: 0,
+      limits: { legacySessionIdleTimeoutMs: 25, streamLifetimeMs: 1_000 }
+    });
+    runtimes.add(runtime);
+    const opened = await openLegacyClient(runtime, 'idle-suspension');
+    const call = opened.client.callTool({
+      name: 'blocking_call',
+      arguments: { value: 'longer-than-idle' }
+    });
+    const callSettlement = Promise.allSettled([call]);
+    try {
+      await expect.poll(() => fixture.signals.length).toBe(1);
+      await delay(75);
+      expect(fixture.signals[0]?.aborted).toBe(false);
+      expect(fixture.finalized()).toBe(0);
+
+      fixture.release();
+      await expect(call).resolves.toMatchObject({
+        structuredContent: { echoed: 'longer-than-idle' }
+      });
+      await delay(75);
+      const afterIdle = await rawRequest(
+        runtime,
+        `/messages?sessionId=${opened.sessionId}`,
+        'POST',
+        { ...headers(), 'content-type': 'application/json' },
+        JSON.stringify({ jsonrpc: '2.0', id: 99, method: 'tools/list', params: {} })
+      );
+      expect(afterIdle.status).toBe(404);
+      expect(fixture.finalized()).toBe(1);
+    } finally {
+      fixture.release();
+      await opened.close();
+      await callSettlement;
+    }
+  });
+
+  it('never reflects a non-object legacy envelope marker', async () => {
+    const runtime = await startHttp(application(true), { port: 0 });
+    runtimes.add(runtime);
+    const session = await openSse(runtime);
+    const marker = 'LEGACY_ARRAY_MARKER_MUST_NOT_BE_REFLECTED_93f62d';
+    const response = await rawRequest(
+      runtime,
+      `/messages?sessionId=${session.sessionId}`,
+      'POST',
+      { ...headers(), 'content-type': 'application/json' },
+      JSON.stringify([marker])
+    );
+    expect(response).toEqual({
+      status: 400,
+      body: JSON.stringify({ error: 'invalid_legacy_message' })
+    });
+    expect(response.body).not.toContain(marker);
+    session.close();
+  });
+
+  it('releases session ownership exactly once after a rejected capability dispatch', async () => {
+    const fixture = createBlockingCapabilityFixture('read', { rejectAfterRelease: true });
+    const runtime = await startHttp(application(true, fixture.catalog), { port: 0 });
+    runtimes.add(runtime);
+    const opened = await openLegacyClient(runtime, 'rejected-dispatch');
+    const first = opened.client.callTool({
+      name: 'blocking_call',
+      arguments: { value: 'first-rejection' }
+    });
+    await expect.poll(() => fixture.signals.length).toBe(1);
+    fixture.release();
+    await expect(first).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { code: 'EXECUTION_FAILED' }
+    });
+    await expect(
+      opened.client.callTool({ name: 'blocking_call', arguments: { value: 'second-rejection' } })
+    ).resolves.toMatchObject({
+      isError: true,
+      structuredContent: { code: 'EXECUTION_FAILED' }
+    });
+    expect(fixture.signals).toHaveLength(2);
+    expect(fixture.finalized()).toBe(2);
+  });
+
+  it('retains one failed idle session close for concurrent runtime shutdown', async () => {
+    const closeFailure = new Error('legacy-session-close-failure');
+    const closeServer = vi.spyOn(LegacyServer.prototype, 'close').mockRejectedValue(closeFailure);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const runtime = await startHttp(application(true), {
+      port: 0,
+      limits: {
+        legacySessionIdleTimeoutMs: 25,
+        streamLifetimeMs: 1_000,
+        keepAliveTimeoutMs: 25
+      }
+    });
+    runtimes.add(runtime);
+    const opened = await openSse(runtime);
+    await expect.poll(() => closeServer.mock.calls.length).toBe(1);
+    opened.close();
+    await opened.closed;
+    await delay(25);
+
+    const first = runtime.close();
+    expect(runtime.close()).toBe(first);
+    const error = await first.catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toEqual([closeFailure]);
+    expect(closeServer).toHaveBeenCalledTimes(1);
   });
 
   it.each([

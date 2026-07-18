@@ -48,6 +48,10 @@ interface LegacySseHandle {
   close(): Promise<void>;
 }
 
+type ReleaseRequestLease = () => void;
+type RetainRequestLease = () => ReleaseRequestLease | undefined;
+type RequestLeaseLookup = (response: object) => RetainRequestLease | undefined;
+
 interface LegacySseModule {
   readonly mountLegacySseCompatibility: (
     router: Express,
@@ -55,6 +59,7 @@ interface LegacySseModule {
       readonly application: ApplicationContext;
       readonly authenticate: RequestHandler;
       readonly limits: Pick<HttpLimits, 'maxLegacySseSessions' | 'legacySessionIdleTimeoutMs'>;
+      readonly lookupRequestLease: RequestLeaseLookup;
       readonly onerror: (error: Error) => void;
     }
   ) => LegacySseHandle;
@@ -151,24 +156,51 @@ function rejectUnreadRequest(
   });
 }
 
-function concurrentRequestLimit(maximum: number): RequestHandler {
+interface ConcurrentRequestAdmission {
+  readonly middleware: RequestHandler;
+  readonly lookupRequestLease: RequestLeaseLookup;
+}
+
+function concurrentRequestAdmission(maximum: number): ConcurrentRequestAdmission {
   let active = 0;
-  return (request, response, next) => {
+  const retainers = new WeakMap<object, RetainRequestLease>();
+  const middleware: RequestHandler = (request, response, next) => {
     if (active >= maximum) {
       rejectUnreadRequest(request, response, 503, 'request_limit_reached');
       return;
     }
     active += 1;
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      active -= 1;
+    let references = 1;
+    let baseOpen = true;
+    const releaseReference = () => {
+      references -= 1;
+      if (references === 0) active -= 1;
     };
-    response.once('finish', release);
-    response.once('close', release);
+    const releaseBase = () => {
+      if (!baseOpen) return;
+      baseOpen = false;
+      retainers.delete(response);
+      releaseReference();
+    };
+    const retain: RetainRequestLease = () => {
+      if (!baseOpen) return undefined;
+      references += 1;
+      let retained = true;
+      return () => {
+        if (!retained) return;
+        retained = false;
+        releaseReference();
+      };
+    };
+    retainers.set(response, retain);
+    response.once('finish', releaseBase);
+    response.once('close', releaseBase);
     next();
   };
+  return Object.freeze({
+    middleware,
+    lookupRequestLease: (response: object) => retainers.get(response)
+  });
 }
 
 function bodyReceiptDeadline(milliseconds: number): RequestHandler {
@@ -338,19 +370,20 @@ export function buildHttpExpressApplication(
   limits: HttpLimits,
   handler: NodeMcpRequestHandler,
   clock: DeadlineClock = SYSTEM_CLOCK,
-  mountCompatibility?: (application: Express) => void
+  mountCompatibility?: (application: Express, lookupRequestLease: RequestLeaseLookup) => void
 ): Express {
   const application = express();
+  const admission = concurrentRequestAdmission(limits.maxConcurrentRequests);
   application.use(exactHostValidation(security.allowedHosts));
   application.use(exactOriginValidation(security.allowedOrigins));
-  application.use(concurrentRequestLimit(limits.maxConcurrentRequests));
+  application.use(admission.middleware);
   application.use(bodyReceiptDeadline(limits.bodyReceiptTimeoutMs));
   application.use(bodyTypeAndDeclaredSize(limits.bodyBytes));
   application.use(express.json({ limit: limits.bodyBytes }));
   application.use(bodyErrorHandler);
   application.use(stopAfterAnswered);
   application.use(responseDeadline(limits, clock));
-  mountCompatibility?.(application);
+  mountCompatibility?.(application, admission.lookupRequestLease);
   application.all('/mcp', security.authenticate, invokeNodeHandler(handler));
   application.use(terminalErrorHandler);
   return application;
@@ -403,14 +436,17 @@ export async function startHttpWithDependencies(
       onerror: diagnose
     });
     const nodeHandler = dependencies.adaptHandler(handler, { onerror: diagnose });
-    let mountCompatibility: ((expressApplication: Express) => void) | undefined;
+    let mountCompatibility:
+      | ((expressApplication: Express, lookupRequestLease: RequestLeaseLookup) => void)
+      | undefined;
     if (security.legacySseEnabled) {
       const legacyModule = await dependencies.loadLegacySse();
-      mountCompatibility = (expressApplication) => {
+      mountCompatibility = (expressApplication, lookupRequestLease) => {
         legacy = legacyModule.mountLegacySseCompatibility(expressApplication, {
           application,
           authenticate: security.authenticate,
           limits,
+          lookupRequestLease,
           onerror: diagnose
         });
       };

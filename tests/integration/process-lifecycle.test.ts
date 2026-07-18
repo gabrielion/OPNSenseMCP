@@ -251,6 +251,32 @@ describe('owned lifecycle aggregation', () => {
     expect(handlerClose).toHaveBeenCalledTimes(1);
   });
 
+  it('closes mounted legacy and beta owners when Node construction throws before listen', async () => {
+    const startupFailure = new Error('node-construction-after-legacy-mount');
+    const legacyClose = vi.fn(() => Promise.resolve());
+    const handlerClose = vi.fn(() => Promise.resolve());
+    const listen = vi.fn(() => Promise.reject(new Error('unexpected-listen')));
+    const dependencies = {
+      createHandler: () => ({ close: handlerClose }),
+      adaptHandler: () => (() => Promise.resolve()) as never,
+      createNodeServer: () => {
+        throw startupFailure;
+      },
+      listen,
+      loadLegacySse: () =>
+        Promise.resolve({
+          mountLegacySseCompatibility: () => ({ close: legacyClose })
+        })
+    } as unknown as HttpRuntimeDependencies;
+
+    await expect(
+      startHttpWithDependencies(createApplicationContext(config(true)), { port: 0 }, dependencies)
+    ).rejects.toThrow(startupFailure);
+    expect(legacyClose).toHaveBeenCalledTimes(1);
+    expect(handlerClose).toHaveBeenCalledTimes(1);
+    expect(listen).not.toHaveBeenCalled();
+  });
+
   it('settles legacy, beta, and Node cleanup in deterministic order after legacy mounting', async () => {
     const legacyFailure = new Error('legacy-close');
     const handlerFailure = new Error('handler-close');

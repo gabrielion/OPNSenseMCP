@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
+import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { createApplicationContext } from '../../src/app/application-context.js';
 import type { RuntimeConfig } from '../../src/config/runtime-config.js';
@@ -14,6 +15,58 @@ async function sourceFiles(directory: string): Promise<string[]> {
     else if (entry.isFile() && entry.name.endsWith('.ts')) files.push(path);
   }
   return files;
+}
+
+interface SourceDocument {
+  readonly path: string;
+  readonly source: string;
+}
+
+function versionOneMcpImports(sources: readonly SourceDocument[]): readonly (readonly string[])[] {
+  const imports: (readonly [string, string])[] = [];
+  const record = (path: string, literal: ts.Expression | undefined) => {
+    if (literal === undefined || !ts.isStringLiteralLike(literal)) return;
+    const specifier = literal.text;
+    if (
+      specifier === '@modelcontextprotocol/sdk' ||
+      specifier.startsWith('@modelcontextprotocol/sdk/')
+    ) {
+      imports.push([path, specifier]);
+    }
+  };
+  for (const { path, source } of sources) {
+    const sourceFile = ts.createSourceFile(
+      path,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS
+    );
+    const visit = (node: ts.Node): void => {
+      if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+        record(path, node.moduleSpecifier);
+      } else if (
+        ts.isCallExpression(node) &&
+        (node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(node.expression) && node.expression.text === 'require'))
+      ) {
+        record(path, node.arguments[0]);
+      } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) {
+        record(path, node.argument.literal);
+      } else if (
+        ts.isImportEqualsDeclaration(node) &&
+        ts.isExternalModuleReference(node.moduleReference)
+      ) {
+        record(path, node.moduleReference.expression);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  return imports.sort(
+    ([pathA, specifierA], [pathB, specifierB]) =>
+      pathA.localeCompare(pathB) || specifierA.localeCompare(specifierB)
+  );
 }
 
 describe('closed capability execution boundary', () => {
@@ -142,29 +195,15 @@ describe('closed capability execution boundary', () => {
           source: await readFile(path, 'utf8')
         }))
       );
-    const imports = (sources: readonly { path: string; source: string }[]) =>
-      sources
-        .flatMap(({ path, source }) =>
-          [...source.matchAll(/from\s+['"](?<specifier>[^'"]+)['"]/gu)].flatMap((match) => {
-            const specifier = match.groups?.specifier;
-            return specifier === '@modelcontextprotocol/sdk' ||
-              specifier?.startsWith('@modelcontextprotocol/sdk/')
-              ? [[path, specifier] as const]
-              : [];
-          })
-        )
-        .sort(
-          ([pathA, specifierA], [pathB, specifierB]) =>
-            pathA.localeCompare(pathB) || specifierA.localeCompare(specifierB)
-        );
-    expect(imports(await collect('src'))).toEqual([
+    expect(versionOneMcpImports(await collect('src'))).toEqual([
       ['src/http/legacy-sse.ts', '@modelcontextprotocol/sdk/server/index.js'],
       ['src/http/legacy-sse.ts', '@modelcontextprotocol/sdk/server/sse.js'],
       ['src/http/legacy-sse.ts', '@modelcontextprotocol/sdk/types.js']
     ]);
-    expect(imports(await collect('tests'))).toEqual([
+    expect(versionOneMcpImports(await collect('tests'))).toEqual([
       ['tests/http/legacy-sse.test.ts', '@modelcontextprotocol/sdk/client/index.js'],
-      ['tests/http/legacy-sse.test.ts', '@modelcontextprotocol/sdk/client/sse.js']
+      ['tests/http/legacy-sse.test.ts', '@modelcontextprotocol/sdk/client/sse.js'],
+      ['tests/http/legacy-sse.test.ts', '@modelcontextprotocol/sdk/server/index.js']
     ]);
     const source = await readFile('src/http/legacy-sse.ts', 'utf8');
     for (const forbidden of [
@@ -177,6 +216,33 @@ describe('closed capability execution boundary', () => {
       expect(source).not.toContain(forbidden);
     }
     expect(source).not.toMatch(/SSEServerTransport\s+as\s+.*(?:beta|Mcp)/u);
+  });
+
+  it('discovers every TypeScript import/export syntax that can reference the v1 package', () => {
+    const source = `
+      import { Server } from '@modelcontextprotocol/sdk/static.js';
+      import '@modelcontextprotocol/sdk/side-effect.js';
+      import type { Tool } from '@modelcontextprotocol/sdk/type-import.js';
+      export { Client } from '@modelcontextprotocol/sdk/export.js';
+      export type { Result } from '@modelcontextprotocol/sdk/type-export.js';
+      const dynamic = import('@modelcontextprotocol/sdk/dynamic.js');
+      type Imported = import('@modelcontextprotocol/sdk/import-type.js').Imported;
+      import Alias = require('@modelcontextprotocol/sdk/import-equals.js');
+      const commonJs = require('@modelcontextprotocol/sdk/commonjs.js');
+      void dynamic;
+      void commonJs;
+    `;
+    expect(versionOneMcpImports([{ path: 'fixture.ts', source }])).toEqual([
+      ['fixture.ts', '@modelcontextprotocol/sdk/commonjs.js'],
+      ['fixture.ts', '@modelcontextprotocol/sdk/dynamic.js'],
+      ['fixture.ts', '@modelcontextprotocol/sdk/export.js'],
+      ['fixture.ts', '@modelcontextprotocol/sdk/import-equals.js'],
+      ['fixture.ts', '@modelcontextprotocol/sdk/import-type.js'],
+      ['fixture.ts', '@modelcontextprotocol/sdk/side-effect.js'],
+      ['fixture.ts', '@modelcontextprotocol/sdk/static.js'],
+      ['fixture.ts', '@modelcontextprotocol/sdk/type-export.js'],
+      ['fixture.ts', '@modelcontextprotocol/sdk/type-import.js']
+    ]);
   });
 
   it('does not duplicate kernel policy branches in MCP adapters', async () => {

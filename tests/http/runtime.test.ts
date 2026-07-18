@@ -500,6 +500,11 @@ it('passes stateless legacy and 16 subscriptions to beta.4 and configures exact 
   let capturedOptions: Parameters<typeof createMcpHandler>[1];
   let capturedServer: Server | undefined;
   let capturedNodeOptions: ServerOptions | undefined;
+  const createNodeServer = vi.fn((options: ServerOptions, listener: RequestListener) => {
+    capturedNodeOptions = options;
+    capturedServer = createServer(options, listener);
+    return capturedServer;
+  });
   const dependencies = {
     createHandler: (
       factory: Parameters<typeof createMcpHandler>[0],
@@ -509,11 +514,7 @@ it('passes stateless legacy and 16 subscriptions to beta.4 and configures exact 
       return createMcpHandler(factory, options);
     },
     adaptHandler: toNodeHandler,
-    createNodeServer: (options: ServerOptions, listener: RequestListener) => {
-      capturedNodeOptions = options;
-      capturedServer = createServer(options, listener);
-      return capturedServer;
-    },
+    createNodeServer,
     listen: (server: Server, port: number, host: string) =>
       new Promise((resolve, reject) => {
         server.once('error', reject);
@@ -532,7 +533,14 @@ it('passes stateless legacy and 16 subscriptions to beta.4 and configures exact 
   try {
     expect(capturedOptions).toMatchObject({ legacy: 'stateless', maxSubscriptions: 16 });
     expect(Object.keys(capturedOptions ?? {})).not.toContain('sessionStore');
-    expect(capturedNodeOptions?.connectionsCheckingInterval).toBeLessThanOrEqual(5_000);
+    expect(createNodeServer).toHaveBeenCalledTimes(1);
+    expect(capturedNodeOptions).toEqual({
+      connectionsCheckingInterval: 1_000,
+      headersTimeout: 5_000,
+      keepAliveTimeout: 5_000,
+      requestTimeout: 10_000
+    });
+    expect(typeof createNodeServer.mock.calls[0]?.[1]).toBe('function');
     expect(capturedServer?.headersTimeout).toBe(5_000);
     expect(capturedServer?.keepAliveTimeout).toBe(5_000);
     expect(capturedServer?.maxRequestsPerSocket).toBe(100);
@@ -639,6 +647,8 @@ it('starts an ordinary deadline once and upgrades an SSE response once to an abs
   expect(scheduled[0]?.milliseconds).toBe(30_000);
   scheduled[0]?.callback();
   expect(ordinaryResponse.destroyed).toBe(1);
+  ordinaryResponse.writeHead(200, { 'content-type': 'text/event-stream' } as never);
+  expect(scheduled).toHaveLength(1);
 
   const streamResponse = new FakeResponse();
   responseDeadline({ executionTimeoutMs: 30_000, streamLifetimeMs: 300_000 }, clock as never)(
@@ -653,6 +663,44 @@ it('starts an ordinary deadline once and upgrades an SSE response once to an abs
   scheduled[2]?.callback();
   expect(streamResponse.destroyed).toBe(1);
 });
+
+it.each(['finish', 'close'] as const)(
+  'clears the active response deadline exactly once on %s',
+  (terminalEvent) => {
+    const scheduled: { callback: () => void; milliseconds: number }[] = [];
+    const clear = vi.fn();
+    const clock = {
+      set: (callback: () => void, milliseconds: number) => {
+        const timer = { callback, milliseconds };
+        scheduled.push(timer);
+        return timer as never;
+      },
+      clear
+    };
+    class FakeResponse extends EventEmitter {
+      destroyed = 0;
+      writeHead(..._arguments: unknown[]): this {
+        void _arguments;
+        return this;
+      }
+      destroy(): void {
+        this.destroyed += 1;
+      }
+    }
+    const response = new FakeResponse();
+    responseDeadline({ executionTimeoutMs: 30_000, streamLifetimeMs: 300_000 }, clock as never)(
+      {} as never,
+      response as never,
+      vi.fn()
+    );
+    response.emit(terminalEvent);
+    response.emit(terminalEvent === 'finish' ? 'close' : 'finish');
+    expect(clear).toHaveBeenCalledTimes(1);
+    expect(clear).toHaveBeenCalledWith(scheduled[0]);
+    scheduled[0]?.callback();
+    expect(response.destroyed).toBe(0);
+  }
+);
 
 it('adapts an Express request to the beta Node handler exactly once', async () => {
   const handler = vi.fn(() => Promise.resolve());
