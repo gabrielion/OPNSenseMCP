@@ -248,6 +248,46 @@ it.each(['SIGINT', 'SIGTERM'] as const)(
   }
 );
 
+it('closes owned stdio on stdin EOF and exits with protocol-clean output', async () => {
+  const child = spawnMain();
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk: Buffer) => {
+    stdout += chunk.toString('utf8');
+  });
+  child.stderr.on('data', (chunk: Buffer) => {
+    stderr += chunk.toString('utf8');
+  });
+  await new Promise<void>((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    child.once('exit', (code, signal) => {
+      resolve({ code, signal });
+    });
+  });
+  let deadline: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    deadline = setTimeout(() => {
+      reject(new Error('stdin EOF shutdown timed out'));
+    }, 2_000);
+    deadline.unref();
+  });
+  child.stdin.end();
+  let exit: { code: number | null; signal: NodeJS.Signals | null };
+  try {
+    exit = await Promise.race([exited, timedOut]);
+  } finally {
+    if (deadline !== undefined) clearTimeout(deadline);
+  }
+  rawChildren.delete(child);
+
+  expect(exit).toEqual({ code: 0, signal: null });
+  expect(stdout).toBe('');
+  expect(stderr).not.toContain(SENTINEL);
+});
+
 it('aggregates recorded probe/server failures with runtime failure and closes each owner once', async () => {
   const probeFailure = new Error('probe-close');
   const serverFailure = new Error('server-close');

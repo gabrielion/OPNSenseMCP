@@ -263,3 +263,95 @@ The repository conformance gate was attempted again and remains unavailable beca
 These security fixes, tests, and report update are one atomic
 `fix: close rejected HTTP requests safely` commit. The exact SHA is reported in the handoff because
 a Git commit cannot contain its own object ID.
+
+## Stdio EOF lifecycle follow-up (2026-07-18)
+
+Status: DONE_WITH_CONCERNS
+
+Base: `5438f21d3aee613118bd4af76a341626764ef088`.
+
+### RED
+
+```text
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm run build
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npx vitest run \
+  tests/integration/process-lifecycle.test.ts \
+  tests/mcp/stdio.test.ts
+
+build: exit 0
+2 files: 1 failed, 1 passed; 3 tests failed, 20 tests passed
+```
+
+The owner-level regressions proved that stdin EOF did not close the owned runtime, did not share the
+signal handlers' settlement, and was missed when EOF occurred before lifecycle installation. The
+child-process EOF check already exited cleanly on the unpatched code, so it was retained as an
+end-to-end stdout protocol-safety regression rather than treated as the failing reproduction.
+
+### GREEN
+
+```text
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm run build
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npx vitest run \
+  tests/integration/process-lifecycle.test.ts \
+  tests/mcp/stdio.test.ts
+
+build: exit 0
+2 files passed; 23 tests passed
+```
+
+```text
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm run build
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npx vitest run \
+  tests/mcp/stdio.test.ts \
+  tests/integration/process-lifecycle.test.ts \
+  tests/app/default-application.test.ts \
+  tests/architecture/execution-boundary.test.ts \
+  tests/http/runtime.test.ts \
+  tests/http/task-7-review-fixes.test.ts
+
+build: exit 0
+6 files passed; 68 tests passed
+```
+
+### Fix
+
+- Stdin EOF, SIGINT, and SIGTERM now enter one idempotent shutdown settlement that calls the owned
+  runtime's `close()` exactly once, emits one detail-free diagnostic on failure, and sets exit code 1.
+- The stdin `end` listener is installed before checking `readableEnded`; the shared settlement makes
+  both the already-ended case and an EOF/check race safe.
+- The stdin dependency remains a private structural type in `src/main.ts`; no package-root export was
+  added. The child-process regression attaches its exit listener before ending stdin and clears its
+  bounded deadline timer.
+
+### Full gates
+
+```text
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm run license:check
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm run verify
+
+exit 0
+16 files passed; 263 tests passed
+format, lint, typecheck, license check, build, and full test suite passed
+```
+
+```text
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm audit --omit=dev
+
+exit 0
+found 0 vulnerabilities
+```
+
+```text
+git diff --check
+
+exit 0
+```
+
+The repository conformance gate was attempted again and remains unavailable because
+`scripts/run-conformance.mjs` does not exist. Adding the later-task runner remains out of scope.
+
+### Commit
+
+The stdio EOF lifecycle fix, regressions, and this report update are one atomic
+`fix: close stdio lifecycle on EOF` commit. The exact SHA is reported in the handoff because a Git
+commit cannot contain its own object ID.

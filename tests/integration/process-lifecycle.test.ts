@@ -34,7 +34,94 @@ function config(): RuntimeConfig {
   };
 }
 
+function controlledStdin(initiallyEnded = false) {
+  let ended = initiallyEnded;
+  let endListener: (() => void | Promise<void>) | undefined;
+  return {
+    input: {
+      get readableEnded() {
+        return ended;
+      },
+      once: (_event: 'end', listener: () => void | Promise<void>) => {
+        endListener = listener;
+      }
+    },
+    end: () => {
+      ended = true;
+      return endListener?.();
+    }
+  };
+}
+
 describe('owned lifecycle aggregation', () => {
+  it('closes the owned stdio handle exactly once on stdin EOF', async () => {
+    const stdin = controlledStdin();
+    const close = vi.fn(() => Promise.resolve());
+    const listeners = new Map<string, () => void | Promise<void>>();
+    installStdioSignalHandlers(
+      { close },
+      {
+        exitCode: undefined,
+        once: (signal, listener) => {
+          listeners.set(signal, listener);
+        }
+      },
+      stdin.input
+    );
+
+    const first = stdin.end();
+    const second = stdin.end();
+    await Promise.all([first, second]);
+
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares one failed stdio shutdown across EOF, SIGINT, and SIGTERM', async () => {
+    const failure = new Error('STDIO_EOF_FAILURE_MUST_NOT_LEAK');
+    let rejectClose: ((error: Error) => void) | undefined;
+    const close = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectClose = reject;
+        })
+    );
+    const stdin = controlledStdin();
+    const listeners = new Map<string, () => void | Promise<void>>();
+    const target = {
+      exitCode: undefined as number | undefined,
+      once: (signal: 'SIGINT' | 'SIGTERM', listener: () => void | Promise<void>) => {
+        listeners.set(signal, listener);
+      }
+    };
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    installStdioSignalHandlers({ close }, target, stdin.input);
+
+    const eof = stdin.end();
+    const sigint = listeners.get('SIGINT')?.();
+    const sigterm = listeners.get('SIGTERM')?.();
+    expect(eof).toBe(sigint);
+    expect(sigint).toBe(sigterm);
+    expect(close).toHaveBeenCalledTimes(1);
+    rejectClose?.(failure);
+    await Promise.allSettled([eof, sigint, sigterm]);
+
+    expect(write.mock.calls.flat().join('')).toBe('Error\n');
+    expect(write.mock.calls.flat().join('')).not.toContain(failure.message);
+    expect(target.exitCode).toBe(1);
+  });
+
+  it('closes stdio when EOF happened before lifecycle installation', async () => {
+    const stdin = controlledStdin(true);
+    const close = vi.fn(() => Promise.resolve());
+    installStdioSignalHandlers(
+      { close },
+      { once: () => undefined, exitCode: undefined },
+      stdin.input
+    );
+
+    await expect.poll(() => close.mock.calls.length).toBe(1);
+  });
+
   it('makes concurrent stdio close callers settle the same cleanup once', async () => {
     const transport = new StdioServerTransport(new PassThrough(), new PassThrough());
     const handle = await startStdioWithOptions(createApplicationContext(config()), { transport });

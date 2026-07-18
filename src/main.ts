@@ -8,24 +8,38 @@ interface SignalProcess {
   once(signal: 'SIGINT' | 'SIGTERM', listener: () => void | Promise<void>): unknown;
 }
 
+interface StdioInput {
+  readonly readableEnded: boolean;
+  once(event: 'end', listener: () => void | Promise<void>): unknown;
+}
+
 export function installStdioSignalHandlers(
   handle: StdioRuntime,
-  target: SignalProcess = process
+  target: SignalProcess = process,
+  input: StdioInput = process.stdin
 ): void {
-  const shutdown = async () => {
-    const hold = setInterval(() => undefined, 2_147_483_647);
-    try {
-      await handle.close();
-    } catch (error: unknown) {
-      const diagnostic = error instanceof Error ? error.name : 'Error';
-      process.stderr.write(`${diagnostic}\n`);
-      target.exitCode = 1;
-    } finally {
-      clearInterval(hold);
-    }
+  let settlement: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    settlement ??= (async () => {
+      const hold = setInterval(() => undefined, 2_147_483_647);
+      try {
+        await handle.close();
+      } catch (error: unknown) {
+        const diagnostic = error instanceof Error ? error.name : 'Error';
+        process.stderr.write(`${diagnostic}\n`);
+        target.exitCode = 1;
+      } finally {
+        clearInterval(hold);
+      }
+    })();
+    return settlement;
   };
   target.once('SIGINT', shutdown);
   target.once('SIGTERM', shutdown);
+  input.once('end', shutdown);
+  if (input.readableEnded) {
+    void shutdown();
+  }
 }
 
 export async function runStdioEntrypoint(): Promise<StdioRuntime> {
