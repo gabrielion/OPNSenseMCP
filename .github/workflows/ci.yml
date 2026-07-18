@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility-floor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0 # compatibility floor
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm test -- tests/mcp/stdio.test.ts
+      - name: Assert no generated or repository residue
+        run: |
+          git diff --check
+          test ! -e results
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1 # current patched Node 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run verify
+      - name: Assert no generated or repository residue
+        run: |
+          git diff --check
+          test ! -e results
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+  protocol:
+    needs: [compatibility-floor, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1 # current patched Node 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run test:conformance
+      - name: Assert no generated or repository residue
+        run: |
+          git diff --check
+          test ! -e results
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
