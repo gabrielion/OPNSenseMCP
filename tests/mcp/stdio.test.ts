@@ -293,9 +293,13 @@ it('aggregates recorded probe/server failures with runtime failure and closes ea
   const serverFailure = new Error('server-close');
   const runtimeFailure = new Error('runtime-close');
   const synchronousServerFailure = new Error('synchronous-server-close');
-  const serverClose = vi.fn(() => {
-    throw synchronousServerFailure;
-  });
+  let rejectServer: ((error: Error) => void) | undefined;
+  const serverClose = vi.fn(
+    () =>
+      new Promise<void>((_resolve, reject) => {
+        rejectServer = reject;
+      })
+  );
   const runtimeClose = vi.fn(() => Promise.reject(runtimeFailure));
   const close = createStdioAggregateClose(serverClose, runtimeClose, () => [
     probeFailure,
@@ -304,6 +308,9 @@ it('aggregates recorded probe/server failures with runtime failure and closes ea
   const first = close();
   const second = close();
   expect(first).toBe(second);
+  await expect.poll(() => serverClose.mock.calls.length).toBe(1);
+  expect(runtimeClose).not.toHaveBeenCalled();
+  rejectServer?.(synchronousServerFailure);
   const error = await first.catch((reason: unknown) => reason);
   expect(error).toBeInstanceOf(AggregateError);
   expect((error as AggregateError).errors).toEqual([

@@ -2,6 +2,7 @@
 import { serveStdio, type StdioServerHandle } from '@modelcontextprotocol/server/stdio';
 import type { Transport } from '@modelcontextprotocol/server';
 import type { ApplicationContext } from '../app/application-context.js';
+import { createPhasedClose } from '../app/shutdown.js';
 import {
   createDefaultApplicationRuntime,
   type OwnedApplicationRuntime
@@ -41,23 +42,11 @@ export function createStdioAggregateClose(
   runtimeClose: (() => Promise<void>) | undefined,
   recordedFailures: () => readonly Error[]
 ): () => Promise<void> {
-  let settlement: Promise<void> | undefined;
-  return () => {
-    settlement ??= (async () => {
-      const operations = [serverClose, ...(runtimeClose === undefined ? [] : [runtimeClose])];
-      const results = await Promise.allSettled(
-        operations.map((operation) => Promise.resolve().then(operation))
-      );
-      const failures = [
-        ...recordedFailures().flatMap(flattenFailure),
-        ...results.flatMap((result) =>
-          result.status === 'rejected' ? flattenFailure(result.reason) : []
-        )
-      ];
-      if (failures.length > 0) throw new AggregateError(failures, 'Stdio cleanup failed');
-    })();
-    return settlement;
-  };
+  return createPhasedClose(
+    [[serverClose], ...(runtimeClose === undefined ? [] : [[runtimeClose]])],
+    recordedFailures,
+    'Stdio cleanup failed'
+  );
 }
 
 function diagnose(error: Error): void {

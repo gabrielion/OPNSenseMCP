@@ -1153,26 +1153,18 @@ export async function runConformance(version, overrides = {}) {
   let stateResult = fulfilled();
   let environmentResult = fulfilled();
   try {
-    ownedResults = await Promise.allSettled([
-      settleWithin(
-        'proxy',
-        () => proxyRuntime?.close(),
-        OWNER_CLEANUP_TIMEOUT_MS,
-        dependencies.clock
-      ),
-      settleWithin(
-        'http',
-        () => httpRuntime?.close(),
-        OWNER_CLEANUP_TIMEOUT_MS,
-        dependencies.clock
-      ),
-      settleWithin(
-        'application',
-        () => applicationRuntime?.close(),
-        OWNER_CLEANUP_TIMEOUT_MS,
-        dependencies.clock
-      )
-    ]);
+    const ownerOperations = [
+      ['proxy', () => proxyRuntime?.close()],
+      ['http', () => httpRuntime?.close()],
+      ['application', () => applicationRuntime?.close()]
+    ];
+    ownedResults = [];
+    for (const [label, close] of ownerOperations) {
+      const [result] = await Promise.allSettled([
+        settleWithin(label, close, OWNER_CLEANUP_TIMEOUT_MS, dependencies.clock)
+      ]);
+      ownedResults.push(result);
+    }
     const [lateDrainResult] = await Promise.allSettled([lateTracker.drain()]);
     lateResult = lateDrainResult.status === 'fulfilled' ? lateDrainResult.value : lateDrainResult;
     if (stateDirectory !== undefined) {

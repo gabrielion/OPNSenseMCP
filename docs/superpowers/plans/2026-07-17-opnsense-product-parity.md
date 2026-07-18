@@ -1312,11 +1312,15 @@ exactly one validated RuntimeConfig, OPNsenseClient, BackupService, AuditLog, an
 source-internal `{ config, dependencies, close }` ownership record. Only product-runtime.ts itself and the
 later guided `src/app/workflow-runtime.ts` may import that service factory; it is not a package-root export or
 ApplicationContext property. The second passes those same instances to
-`createProductApplicationContext()` and returns the Foundation `OwnedApplicationRuntime` shape. The optional
-factories object is source-internal and exists only for sentinel tests. Initialization is transactional: if
-any later constructor fails, independently close every already-created closeable. `close()` is idempotent and
-independently closes the OPNsense dispatcher and any future closeable audit/backup resource; one failure never
-skips another and all are aggregated.
+`createProductApplicationContext()` and returns the Foundation `OwnedApplicationRuntime` shape by calling
+`createOwnedApplicationRuntime(application, serviceClosers)`. The optional factories object is
+source-internal and exists only for sentinel tests. Initialization is transactional: if any later constructor
+fails, independently close every already-created closeable. `close()` is idempotent and independently closes
+the OPNsense dispatcher and any future closeable audit/backup resource within the product-service phase; one
+failure never skips another and all are aggregated. It must not close those services directly before the
+Foundation lifecycle barrier: once runtime close begins, no new initial dispatch or confirmation completion
+is admitted, admitted handlers are drained, and only then may OPNsense, audit, backup, lock, and limiter
+services close.
 
 Replace the body of `src/app/default-application.ts::createDefaultApplicationRuntime()` with
 `createProductRuntimeFromEnvironment(process.env)`. This is a required product gate, not a release follow-up.

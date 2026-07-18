@@ -2023,10 +2023,10 @@ describe('orchestration startup, report, and cleanup ordering', () => {
     await rejection;
   });
 
-  it('starts owner cleanup concurrently, flattens stable slots, removes state, and restores last', async () => {
+  it('drains proxy, then HTTP, then application while retaining every stable failure slot', async () => {
     const events = [];
     const stateDirectory = await temporaryDirectory();
-    const releases = [];
+    const releases = new Map();
     const overrides = successfulOverrides(events, stateDirectory);
     const heldOwner = (label) => ({
       application: label === 'application' ? {} : undefined,
@@ -2035,7 +2035,9 @@ describe('orchestration startup, report, and cleanup ordering', () => {
       close: () =>
         new Promise((resolveClose, rejectClose) => {
           events.push(`close-start:${label}`);
-          releases.push(() => rejectClose(new AggregateError([new Error(`POISON_${label}`)])));
+          releases.set(label, () =>
+            rejectClose(new AggregateError([new Error(`POISON_${label}`)]))
+          );
         })
     });
     overrides.createApplicationRuntime = async () => heldOwner('application');
@@ -2048,9 +2050,24 @@ describe('orchestration startup, report, and cleanup ordering', () => {
       throw new Error('POISON_PRIMARY');
     };
     const promise = runner.runConformance('2025-11-25', overrides);
-    await vi.waitFor(() => expect(releases).toHaveLength(3));
-    expect(events.filter((entry) => entry.startsWith('close-start:'))).toHaveLength(3);
-    for (const release of releases) release();
+    await vi.waitFor(() => expect(releases.has('proxy')).toBe(true));
+    expect(events.filter((entry) => entry.startsWith('close-start:'))).toEqual([
+      'close-start:proxy'
+    ]);
+    releases.get('proxy')();
+    await vi.waitFor(() => expect(releases.has('http')).toBe(true));
+    expect(events.filter((entry) => entry.startsWith('close-start:'))).toEqual([
+      'close-start:proxy',
+      'close-start:http'
+    ]);
+    releases.get('http')();
+    await vi.waitFor(() => expect(releases.has('application')).toBe(true));
+    expect(events.filter((entry) => entry.startsWith('close-start:'))).toEqual([
+      'close-start:proxy',
+      'close-start:http',
+      'close-start:application'
+    ]);
+    releases.get('application')();
     const error = await promise.catch((reason) => reason);
     expect(error).toBeInstanceOf(AggregateError);
     expect(error.errors.map((entry) => [entry.name, entry.message])).toEqual([

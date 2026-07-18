@@ -51,6 +51,12 @@ interface ApplicationInternals {
   readonly snapshot: RuntimeSnapshot;
   readonly dispatcher: ReturnType<typeof createCapabilityDispatcher>;
   readonly completion: ConfirmationCompletion;
+  readonly lifecycle: ApplicationLifecycle;
+}
+
+interface ApplicationLifecycle {
+  admit<T>(operation: () => Promise<T>): Promise<T>;
+  close(): Promise<void>;
 }
 
 const applicationInternals = new WeakMap<ApplicationContext, ApplicationInternals>();
@@ -95,6 +101,44 @@ function internalsFor(application: ApplicationContext): ApplicationInternals {
   return internals;
 }
 
+function createApplicationLifecycle(): ApplicationLifecycle {
+  let active = 0;
+  let closing = false;
+  let closeSettlement: Promise<void> | undefined;
+  let releaseDrain: (() => void) | undefined;
+  const release = () => {
+    active -= 1;
+    if (closing && active === 0) releaseDrain?.();
+  };
+  return Object.freeze({
+    admit<T>(operation: () => Promise<T>): Promise<T> {
+      if (closing) return Promise.reject(new Error('Application is closing'));
+      active += 1;
+      let settlement: Promise<T>;
+      try {
+        settlement = Promise.resolve(operation());
+      } catch (error) {
+        settlement = Promise.reject(
+          error instanceof Error ? error : new Error('Application execution failed')
+        );
+      }
+      void settlement.then(release, release);
+      return settlement;
+    },
+    close(): Promise<void> {
+      closeSettlement ??= (() => {
+        closing = true;
+        return active === 0
+          ? Promise.resolve()
+          : new Promise<void>((resolveDrain) => {
+              releaseDrain = resolveDrain;
+            });
+      })();
+      return closeSettlement;
+    }
+  });
+}
+
 function isCanonicalBase64Url(value: string | undefined): value is string {
   if (value === undefined || !BASE64URL_SEGMENT.test(value)) return false;
   try {
@@ -137,7 +181,10 @@ export function createApplicationContext(
   if (completion === undefined) throw new Error(INVALID_APPLICATION_MESSAGE);
 
   const application: ApplicationContext = Object.freeze({ catalog });
-  applicationInternals.set(application, Object.freeze({ snapshot, dispatcher, completion }));
+  applicationInternals.set(
+    application,
+    Object.freeze({ snapshot, dispatcher, completion, lifecycle: createApplicationLifecycle() })
+  );
   return application;
 }
 
@@ -153,7 +200,8 @@ export function dispatchApplicationCapability(
   request: CapabilityRequest,
   invocation: CapabilityInvocationContext
 ): Promise<CapabilityResult> {
-  return internalsFor(application).dispatcher.dispatch(request, invocation);
+  const internals = internalsFor(application);
+  return internals.lifecycle.admit(() => internals.dispatcher.dispatch(request, invocation));
 }
 
 export function settleApplicationConfirmation(
@@ -163,7 +211,14 @@ export function settleApplicationConfirmation(
   request: CapabilityRequest,
   invocation: CapabilityInvocationContext
 ): Promise<CapabilityResult> {
-  return internalsFor(application).completion(decision, claims, request, invocation);
+  const internals = internalsFor(application);
+  return internals.lifecycle.admit(() =>
+    internals.completion(decision, claims, request, invocation)
+  );
+}
+
+export function closeApplicationContext(application: ApplicationContext): Promise<void> {
+  return internalsFor(application).lifecycle.close();
 }
 
 export function createApplicationRequestStateCodec<T>(

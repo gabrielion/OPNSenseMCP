@@ -8,11 +8,12 @@ import { startStdioWithOptions } from '../../src/entrypoints/stdio.js';
 import { createApplicationContext } from '../../src/app/application-context.js';
 import type { RuntimeConfig } from '../../src/config/runtime-config.js';
 import {
-  createAggregateClose,
+  DEFAULT_HTTP_LIMITS,
   startHttp,
   startHttpWithDependencies,
   type HttpRuntimeDependencies
 } from '../../src/http/runtime.js';
+import { createPhasedClose } from '../../src/app/shutdown.js';
 import { installStdioSignalHandlers, isDirectInvocation } from '../../src/main.js';
 import { installHttpSignalHandlers, startOwnedHttpEntrypoint } from '../../src/entrypoints/http.js';
 
@@ -160,7 +161,7 @@ describe('owned lifecycle aggregation', () => {
     });
     const serverClose = vi.fn(() => Promise.reject(serverFailure));
     const applicationClose = vi.fn(() => Promise.resolve());
-    const close = createAggregateClose([handlerClose, serverClose, applicationClose]);
+    const close = createPhasedClose([[handlerClose, serverClose, applicationClose]]);
     const first = close();
     const second = close();
     expect(first).toBe(second);
@@ -170,6 +171,59 @@ describe('owned lifecycle aggregation', () => {
     expect(handlerClose).toHaveBeenCalledTimes(1);
     expect(serverClose).toHaveBeenCalledTimes(1);
     expect(applicationClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('executes cleanup phases in order and still runs later phases after failures', async () => {
+    const firstFailure = new Error('first-close');
+    const secondFailure = new AggregateError([new Error('second-close')]);
+    const thirdFailure = new Error('third-close');
+    let rejectFirst: ((error: Error) => void) | undefined;
+    let rejectSecond: ((error: AggregateError) => void) | undefined;
+    const events: string[] = [];
+    const close = createPhasedClose([
+      [
+        () => {
+          events.push('first');
+          return new Promise<void>((_resolve, reject) => {
+            rejectFirst = reject;
+          });
+        }
+      ],
+      [
+        () => {
+          events.push('second-a');
+          return Promise.resolve();
+        },
+        () => {
+          events.push('second-b');
+          return new Promise<void>((_resolve, reject) => {
+            rejectSecond = reject;
+          });
+        }
+      ],
+      [
+        () => {
+          events.push('third');
+          throw thirdFailure;
+        }
+      ]
+    ]);
+
+    const first = close();
+    expect(close()).toBe(first);
+    await expect.poll(() => events).toEqual(['first']);
+    rejectFirst?.(firstFailure);
+    await expect.poll(() => events).toEqual(['first', 'second-a', 'second-b']);
+    rejectSecond?.(secondFailure);
+    const error = await first.catch((reason: unknown) => reason);
+
+    expect(events).toEqual(['first', 'second-a', 'second-b', 'third']);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toEqual([
+      firstFailure,
+      secondFailure.errors[0],
+      thirdFailure
+    ]);
   });
 
   it.each(['createHandler', 'adaptHandler', 'createNodeServer'] as const)(
@@ -295,12 +349,20 @@ describe('owned lifecycle aggregation', () => {
     const legacyClose = vi.fn(() => {
       throw legacyFailure;
     });
-    const handlerClose = vi.fn(() => Promise.reject(handlerFailure));
+    let rejectHandler: ((error: Error) => void) | undefined;
+    const handlerClose = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectHandler = reject;
+        })
+    );
+    let finishServer: ((error?: Error) => void) | undefined;
     const server = {
       maxRequestsPerSocket: 0,
       close: vi.fn((callback: (error?: Error) => void) => {
-        callback(serverFailure);
-      })
+        finishServer = callback;
+      }),
+      closeAllConnections: vi.fn(() => finishServer?.(serverFailure))
     };
     const dependencies = {
       createHandler: () => ({ close: handlerClose }),
@@ -320,16 +382,57 @@ describe('owned lifecycle aggregation', () => {
     const first = runtime.close();
     const second = runtime.close();
     expect(first).toBe(second);
+    await expect.poll(() => server.close.mock.calls.length).toBe(1);
+    await expect.poll(() => handlerClose.mock.calls.length).toBe(1);
+    expect(legacyClose).toHaveBeenCalledTimes(1);
+    expect(server.closeAllConnections).not.toHaveBeenCalled();
+    rejectHandler?.(handlerFailure);
     const error = await first.catch((reason: unknown) => reason);
     expect(error).toBeInstanceOf(AggregateError);
     expect((error as AggregateError).errors).toEqual([
-      legacyFailure,
       handlerFailure,
+      legacyFailure,
       serverFailure
     ]);
     expect(legacyClose).toHaveBeenCalledTimes(1);
     expect(handlerClose).toHaveBeenCalledTimes(1);
     expect(server.close).toHaveBeenCalledTimes(1);
+    expect(server.closeAllConnections).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes owned HTTP before the application and continues after an HTTP failure', async () => {
+    const httpFailure = new Error('http-close');
+    let rejectHttp: ((error: Error) => void) | undefined;
+    const httpClose = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectHttp = reject;
+        })
+    );
+    const applicationClose = vi.fn(() => Promise.resolve());
+    const runtime = await startOwnedHttpEntrypoint({
+      createDefaultRuntime: () => ({
+        application: createApplicationContext(config()),
+        close: applicationClose
+      }),
+      start: () =>
+        Promise.resolve({
+          url: 'http://127.0.0.1:3000/mcp',
+          limits: DEFAULT_HTTP_LIMITS,
+          close: httpClose
+        })
+    });
+
+    const first = runtime.close();
+    expect(runtime.close()).toBe(first);
+    await expect.poll(() => httpClose.mock.calls.length).toBe(1);
+    expect(applicationClose).not.toHaveBeenCalled();
+    rejectHttp?.(httpFailure);
+    const error = await first.catch((reason: unknown) => reason);
+
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toEqual([httpFailure]);
+    expect(applicationClose).toHaveBeenCalledTimes(1);
   });
 
   it('cleans legacy, beta, and Node owners after a post-mount listen failure', async () => {
@@ -365,8 +468,8 @@ describe('owned lifecycle aggregation', () => {
     expect(error).toBeInstanceOf(AggregateError);
     expect((error as AggregateError).errors).toEqual([
       startupFailure,
-      legacyFailure,
       handlerFailure,
+      legacyFailure,
       serverFailure
     ]);
     expect(legacyClose).toHaveBeenCalledTimes(1);
@@ -437,7 +540,7 @@ describe('owned lifecycle aggregation', () => {
             release = resolve;
           })
       );
-      const close = createAggregateClose([operation]);
+      const close = createPhasedClose([[operation]]);
       const listeners = new Map<string, () => void | Promise<void>>();
       const target = {
         exitCode: undefined,
@@ -449,7 +552,7 @@ describe('owned lifecycle aggregation', () => {
       const first = listeners.get('SIGINT')?.();
       const second = listeners.get('SIGTERM')?.();
       expect(first).toBeInstanceOf(Promise);
-      expect(second).toBeInstanceOf(Promise);
+      expect(second).toBe(first);
       await Promise.resolve();
       expect(operation).toHaveBeenCalledTimes(1);
       let settled = false;

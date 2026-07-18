@@ -9,6 +9,7 @@ import {
   type ApplicationContext,
   type ApplicationHttpSecurity
 } from '../app/application-context.js';
+import { createPhasedClose, settleClosePhases } from '../app/shutdown.js';
 import { createServerFactory } from '../mcp/server-factory.js';
 import { resolveHttpLimits, type HttpLimits } from './limits.js';
 import { exactHostValidation, exactOriginValidation, isExactHostname } from './origin.js';
@@ -104,39 +105,51 @@ function flattenFailure(value: unknown): Error[] {
   return [toError(value)];
 }
 
-function failuresFrom(results: readonly PromiseSettledResult<void>[]): Error[] {
-  return results.flatMap((result) =>
-    result.status === 'rejected' ? flattenFailure(result.reason) : []
-  );
+interface NodeServerDrain {
+  stopAdmission(): void;
+  forceAndWait(): Promise<void>;
 }
 
-async function settleOperations(operations: readonly (() => Promise<void>)[]): Promise<Error[]> {
-  return failuresFrom(
-    await Promise.allSettled(operations.map((operation) => Promise.resolve().then(operation)))
-  );
-}
-
-export function createAggregateClose(
-  operations: readonly (() => Promise<void>)[],
-  recordedFailures: () => readonly Error[] = () => []
-): () => Promise<void> {
+function createNodeServerDrain(server: Server): NodeServerDrain {
+  let drained = false;
   let settlement: Promise<void> | undefined;
-  return () => {
-    settlement ??= (async () => {
-      const operationFailures = await settleOperations(operations);
-      const failures = [...recordedFailures().flatMap(flattenFailure), ...operationFailures];
-      if (failures.length > 0) throw new AggregateError(failures, 'Owned cleanup failed');
-    })();
+  const begin = (): Promise<void> => {
+    settlement ??= new Promise<void>((resolve, reject) => {
+      try {
+        server.close((error) => {
+          drained = true;
+          if (error === undefined) resolve();
+          else reject(error);
+        });
+      } catch (error) {
+        drained = true;
+        reject(error instanceof Error ? error : new Error('Node server close failed'));
+      }
+    });
+    void settlement.catch(() => undefined);
     return settlement;
   };
-}
-
-function closeNodeServer(server: Server): Promise<void> {
-  return new Promise((resolve, reject) => {
-    server.close((error) => {
-      if (error === undefined) resolve();
-      else reject(error);
-    });
+  return Object.freeze({
+    stopAdmission(): void {
+      void begin();
+    },
+    async forceAndWait(): Promise<void> {
+      const nodeSettlement = begin();
+      const failures = await settleClosePhases([
+        [
+          () => {
+            const closeAllConnections: unknown = Reflect.get(server, 'closeAllConnections');
+            if (!drained && typeof closeAllConnections === 'function') {
+              Reflect.apply(closeAllConnections, server, []);
+            }
+          },
+          () => nodeSettlement
+        ]
+      ]);
+      if (failures.length > 0) {
+        throw new AggregateError(failures, 'Node server drain failed');
+      }
+    }
   });
 }
 
@@ -491,10 +504,18 @@ export async function startHttpWithDependencies(
     const ownedLegacy = legacy;
     const ownedHandler = handler;
     const ownedServer = server;
-    const close = createAggregateClose([
-      ...(ownedLegacy === undefined ? [] : [() => ownedLegacy.close()]),
-      () => ownedHandler.close(),
-      () => closeNodeServer(ownedServer)
+    const serverDrain = createNodeServerDrain(ownedServer);
+    const close = createPhasedClose([
+      [
+        () => {
+          serverDrain.stopAdmission();
+        }
+      ],
+      [
+        () => ownedHandler.close(),
+        ...(ownedLegacy === undefined ? [] : [() => ownedLegacy.close()])
+      ],
+      [() => serverDrain.forceAndWait()]
     ]);
     return Object.freeze({
       url: `http://${security.host}:${String(address.port)}/mcp`,
@@ -502,20 +523,26 @@ export async function startHttpWithDependencies(
       close
     });
   } catch (startupFailure) {
-    const operations: (() => Promise<void>)[] = [];
-    if (legacy !== undefined) {
-      const initializedLegacy = legacy;
-      operations.push(() => initializedLegacy.close());
-    }
-    if (handler !== undefined) {
-      const initializedHandler = handler;
-      operations.push(() => initializedHandler.close());
-    }
-    if (server !== undefined) {
-      const initializedServer = server;
-      operations.push(() => closeNodeServer(initializedServer));
-    }
-    const cleanupFailures = await settleOperations(operations);
+    const initializedServer = server;
+    const initializedHandler = handler;
+    const initializedLegacy = legacy;
+    const serverDrain =
+      initializedServer === undefined ? undefined : createNodeServerDrain(initializedServer);
+    const ownerPhase = [
+      ...(initializedHandler === undefined ? [] : [() => initializedHandler.close()]),
+      ...(initializedLegacy === undefined ? [] : [() => initializedLegacy.close()])
+    ];
+    const cleanupFailures = await settleClosePhases([
+      serverDrain === undefined
+        ? []
+        : [
+            () => {
+              serverDrain.stopAdmission();
+            }
+          ],
+      ownerPhase,
+      serverDrain === undefined ? [] : [() => serverDrain.forceAndWait()]
+    ]);
     if (cleanupFailures.length > 0) {
       throw new AggregateError(
         [...flattenFailure(startupFailure), ...cleanupFailures],

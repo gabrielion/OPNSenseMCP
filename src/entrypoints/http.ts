@@ -5,7 +5,8 @@ import {
   createDefaultApplicationRuntime,
   type OwnedApplicationRuntime
 } from '../app/default-application.js';
-import { createAggregateClose, startHttp, type HttpRuntime } from '../http/runtime.js';
+import { createPhasedClose } from '../app/shutdown.js';
+import { startHttp, type HttpRuntime } from '../http/runtime.js';
 
 interface SignalProcess {
   exitCode?: string | number | null | undefined;
@@ -28,17 +29,21 @@ export function installHttpSignalHandlers(
   handle: OwnedHttpRuntime,
   target: SignalProcess = process
 ): void {
-  const shutdown = async () => {
-    const hold = setInterval(() => undefined, 2_147_483_647);
-    try {
-      await handle.close();
-    } catch (error: unknown) {
-      const diagnostic = error instanceof Error ? error.name : 'Error';
-      process.stderr.write(`${diagnostic}\n`);
-      target.exitCode = 1;
-    } finally {
-      clearInterval(hold);
-    }
+  let settlement: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    settlement ??= (async () => {
+      const hold = setInterval(() => undefined, 2_147_483_647);
+      try {
+        await handle.close();
+      } catch (error: unknown) {
+        const diagnostic = error instanceof Error ? error.name : 'Error';
+        process.stderr.write(`${diagnostic}\n`);
+        target.exitCode = 1;
+      } finally {
+        clearInterval(hold);
+      }
+    })();
+    return settlement;
   };
   target.once('SIGINT', shutdown);
   target.once('SIGTERM', shutdown);
@@ -72,7 +77,7 @@ export async function startOwnedHttpEntrypoint(
   return Object.freeze({
     url: http.url,
     limits: http.limits,
-    close: createAggregateClose([() => http.close(), () => owned.close()])
+    close: createPhasedClose([[() => http.close()], [() => owned.close()]])
   });
 }
 

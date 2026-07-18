@@ -2318,16 +2318,20 @@ git commit -m "feat: assemble opaque dual-era MCP v2 application"
 
 **Interfaces:**
 - createDefaultApplicationRuntime() is the only executable composition seam and returns
-  { application, close }. Foundation owns no external service, so close is an idempotent no-op; Product Task 5
-  replaces the body with the real product composition and owned cleanup, and Guided Task 5 later adds
-  workflows.
+  { application, close }. Its idempotent private lifecycle barrier refuses new dispatch/confirmation
+  execution after close begins and drains every admitted execution before the next close phase. Foundation
+  owns no external service; Product Task 5 replaces the body with the real product composition, passes all
+  OPNsense/audit/backup/lock/limiter service closers to that shared barrier-backed runtime, and Guided Task 5
+  later adds workflows.
 - startStdio(application?) serves both eras. When no application is injected it owns the default runtime and
   its returned close() settles both server and runtime exactly once. An injected application remains owned by
   the caller.
 - buildApplicationHttpSecurity(application) is source-internal and returns public HTTP settings plus a bearer
   middleware closure; it never returns the token or internal config.
 - startHttp(application, options?) returns { url, limits, close }. The caller owns application; runtime close
-  independently settles handler and Node server.
+  first initiates `server.close()` to stop admission, then independently settles the modern handler and
+  optional legacy owner, and finally bounds any remaining connections and awaits Node drainage. Every later
+  phase runs even if an earlier phase fails.
 - HTTP is loopback-only, uses an exact hostname allow-list plus an exact serialized-Origin allow-list,
   is authenticated, bounded, and disabled by default. Host ports are intentionally ignored after strict
   hostname parsing; Origin entries retain scheme, host, and port.
@@ -2412,21 +2416,29 @@ export interface OwnedApplicationRuntime {
   close(): Promise<void>;
 }
 
-export function createDefaultApplicationRuntime(): OwnedApplicationRuntime {
-  const application = createApplicationContext(loadRuntimeConfig());
-  let closed = false;
+export function createOwnedApplicationRuntime(
+  application: ApplicationContext,
+  serviceClosers: readonly CloseOperation[] = []
+): OwnedApplicationRuntime {
   return Object.freeze({
     application,
-    close: async () => {
-      if (closed) return;
-      closed = true;
-    }
+    close: createPhasedClose([
+      [() => closeApplicationContext(application)],
+      Object.freeze([...serviceClosers])
+    ])
   });
+}
+
+export function createDefaultApplicationRuntime(): OwnedApplicationRuntime {
+  const application = createApplicationContext(loadRuntimeConfig());
+  return createOwnedApplicationRuntime(application);
 }
 ~~~
 
 No other production file calls createApplicationContext(loadRuntimeConfig()). Product Task 5 must replace
-this function body rather than adding another default composition root.
+this function body rather than adding another default composition root. It must retain
+`createOwnedApplicationRuntime()` and pass product-owned service closers to it so OPNsense, audit, backup,
+lock, and limiter resources close only after admitted initial dispatch and confirmation completion settle.
 
 Create startStdio(application?). Wrap serveStdio(createServerFactory(...), { legacy: 'serve', ... }). When no
 application is supplied, create one owned runtime. Because beta.4 `serveStdio().close()` reports individual
@@ -2456,9 +2468,11 @@ response on expiry. Detect an established SSE response through a narrow response
 replace that timer with one absolute 5-minute lifetime; keepalive traffic must never extend it. Socket
 inactivity and Node `requestTimeout` are not substitutes for these execution deadlines.
 
-Construction/listen is wrapped in try/finally: if any stage fails, independently close every resource already
-created. Returned close() is idempotent and independently settles handler.close() and server.close(); one
-failure never skips another and an AggregateError retains all failures.
+Construction/listen is wrapped in try/finally: if any stage fails, close every resource already created in
+explicit phases. Returned close() is idempotent: `server.close()` first stops admission, the runtime then
+closes the modern handler and optional legacy owner so SSE/dispatch can settle, then uses
+`closeAllConnections()` only as a bounded fallback before awaiting the original Node close callback. One
+phase failure never skips a later phase and an AggregateError retains all failures in phase/operation order.
 
 src/entrypoints/http.ts creates the owned default runtime, starts HTTP, and installs the same once-only
 SIGINT/SIGTERM aggregate shutdown over HTTP plus application runtime. If startHttp fails, it still closes the
@@ -2912,13 +2926,13 @@ Extend `tests/integration/process-lifecycle.test.ts` with injectable-loader test
   once each. A later listen failure closes the legacy handle, beta handler, and Node server once each.
 - On normal shutdown, make legacy close **throw synchronously** with `legacy-close`, beta handler
   close reject `handler-close`, and Node close reject `server-close`. Assert one `AggregateError` with
-  `.errors` exactly `[legacyFailure, handlerFailure, serverFailure]`, even for concurrent close
+  `.errors` exactly `[handlerFailure, legacyFailure, serverFailure]`, even for concurrent close
   callers, and assert every cleanup was attempted once. This must use the real aggregate settler,
   not a mock that turns the synchronous throw into a rejected promise first.
 - On failed startup, repeat the synchronous legacy close throw while later beta-handler and Node
   close operations reject. Assert all later cleanup functions were still invoked once and the
-  primary startup error precedes the independently collected
-  `[legacyFailure, handlerFailure, serverFailure]` errors.
+  primary startup error precedes the phased
+  `[handlerFailure, legacyFailure, serverFailure]` errors.
 
 - [ ] **Step 3: Run the new tests and record the expected red state**
 
@@ -3512,10 +3526,14 @@ try {
   const ownedLegacy = legacy;
   const ownedHandler = handler;
   const ownedServer = server;
-  const close = createAggregateClose([
-    ...(ownedLegacy === undefined ? [] : [() => ownedLegacy.close()]),
-    () => ownedHandler.close(),
-    () => closeNodeServer(ownedServer)
+  const serverDrain = createNodeServerDrain(ownedServer);
+  const close = createPhasedClose([
+    [() => serverDrain.stopAdmission()],
+    [
+      () => ownedHandler.close(),
+      ...(ownedLegacy === undefined ? [] : [() => ownedLegacy.close()])
+    ],
+    [() => serverDrain.forceAndWait()]
   ]);
   return Object.freeze({
     url: `http://${security.host}:${String(address.port)}/mcp`,
@@ -3523,20 +3541,15 @@ try {
     close
   });
 } catch (startupFailure) {
-  const operations: (() => Promise<void>)[] = [];
-  if (legacy !== undefined) {
-    const initializedLegacy = legacy;
-    operations.push(() => initializedLegacy.close());
-  }
-  if (handler !== undefined) {
-    const initializedHandler = handler;
-    operations.push(() => initializedHandler.close());
-  }
-  if (server !== undefined) {
-    const initializedServer = server;
-    operations.push(() => closeNodeServer(initializedServer));
-  }
-  const cleanupFailures = await settleOperations(operations);
+  const serverDrain = server === undefined ? undefined : createNodeServerDrain(server);
+  const cleanupFailures = await settleClosePhases([
+    serverDrain === undefined ? [] : [() => serverDrain.stopAdmission()],
+    [
+      ...(handler === undefined ? [] : [() => handler.close()]),
+      ...(legacy === undefined ? [] : [() => legacy.close()])
+    ],
+    serverDrain === undefined ? [] : [() => serverDrain.forceAndWait()]
+  ]);
   if (cleanupFailures.length > 0) {
     throw new AggregateError(
       [...flattenFailure(startupFailure), ...cleanupFailures],
