@@ -153,8 +153,9 @@ function createNodeServerDrain(server: Server): NodeServerDrain {
   });
 }
 
-function diagnose(error: Error): void {
-  process.stderr.write(`${error.name}\n`);
+function diagnose(_error: Error): void {
+  void _error;
+  process.stderr.write('Error\n');
 }
 
 const EXPECTED_STANDARD_HEADER_REJECTION_PREFIXES = Object.freeze(

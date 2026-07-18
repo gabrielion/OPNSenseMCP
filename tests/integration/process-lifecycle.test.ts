@@ -91,6 +91,7 @@ describe('owned lifecycle aggregation', () => {
 
   it('shares one failed stdio shutdown across EOF, SIGINT, and SIGTERM', async () => {
     const failure = new Error('STDIO_EOF_FAILURE_MUST_NOT_LEAK');
+    failure.name = 'STDIO_NAME_MUST_NOT_LEAK';
     let rejectClose: ((error: Error) => void) | undefined;
     const close = vi.fn(
       () =>
@@ -119,7 +120,29 @@ describe('owned lifecycle aggregation', () => {
     await Promise.allSettled([eof, sigint, sigterm]);
 
     expect(write.mock.calls.flat().join('')).toBe('Error\n');
+    expect(write.mock.calls.flat().join('')).not.toContain(failure.name);
     expect(write.mock.calls.flat().join('')).not.toContain(failure.message);
+    expect(target.exitCode).toBe(1);
+  });
+
+  it('uses a fixed diagnostic for failed HTTP signal shutdown', async () => {
+    const failure = new Error('HTTP_SIGNAL_MESSAGE_MUST_NOT_LEAK');
+    failure.name = 'HTTP_SIGNAL_NAME_MUST_NOT_LEAK';
+    const close = vi.fn(() => Promise.reject(failure));
+    const listeners = new Map<string, () => void | Promise<void>>();
+    const target = {
+      exitCode: undefined as number | undefined,
+      once: (signal: 'SIGINT' | 'SIGTERM', listener: () => void | Promise<void>) => {
+        listeners.set(signal, listener);
+      }
+    };
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    installHttpSignalHandlers({ close } as never, target);
+
+    await listeners.get('SIGINT')?.();
+
+    expect(write.mock.calls.flat().join('')).toBe('Error\n');
+    expect(write.mock.calls.flat().join('')).not.toContain('HTTP_SIGNAL');
     expect(target.exitCode).toBe(1);
   });
 

@@ -21,6 +21,21 @@ const PACKAGE_INPUTS = [
   'tsconfig.json',
   'tsconfig.build.json'
 ] as const;
+const PACK_TIMEOUT_MS = 30_000;
+const INSTALL_TIMEOUT_MS = 30_000;
+const MCP_COMMAND_TIMEOUT_MS = 3_000;
+const COMMAND_CLEANUP_TIMEOUT_MS = 2_000;
+const PACKAGE_TEST_TIMEOUT_MS = 90_000;
+// 30+2 seconds for pack, 30+2 for install, and 2*(3+2) for MCP commands = 74s < 90s.
+const WORST_CASE_PACKAGE_TEST_MS =
+  PACK_TIMEOUT_MS +
+  COMMAND_CLEANUP_TIMEOUT_MS +
+  INSTALL_TIMEOUT_MS +
+  COMMAND_CLEANUP_TIMEOUT_MS +
+  2 * (MCP_COMMAND_TIMEOUT_MS + COMMAND_CLEANUP_TIMEOUT_MS);
+if (WORST_CASE_PACKAGE_TEST_MS >= PACKAGE_TEST_TIMEOUT_MS) {
+  throw new Error('Installed-package outer timeout does not own every child budget');
+}
 
 interface InstalledPackage {
   readonly command: CommandInvocation;
@@ -77,8 +92,8 @@ async function withInstalledPackage(
         cwd: packageCopy,
         environment: process.env,
         input: '',
-        timeoutMs: 60_000,
-        timeoutLabel: 'npm pack'
+        timeoutMs: PACK_TIMEOUT_MS,
+        cleanupTimeoutMs: COMMAND_CLEANUP_TIMEOUT_MS
       }
     );
     requireSuccessfulCommand(packed, 'npm pack');
@@ -102,8 +117,8 @@ async function withInstalledPackage(
         cwd: consumer,
         environment: process.env,
         input: '',
-        timeoutMs: 60_000,
-        timeoutLabel: 'npm install'
+        timeoutMs: INSTALL_TIMEOUT_MS,
+        cleanupTimeoutMs: COMMAND_CLEANUP_TIMEOUT_MS
       }
     );
     requireSuccessfulCommand(installed, 'npm install');
@@ -130,8 +145,8 @@ function runInstalledCommand(
       MCP_REQUEST_STATE_SECRET: 'INSTALLED_PACKAGE_SENTINEL_0123456789'
     },
     input,
-    timeoutMs: 3_000,
-    timeoutLabel: 'installed package command'
+    timeoutMs: MCP_COMMAND_TIMEOUT_MS,
+    cleanupTimeoutMs: COMMAND_CLEANUP_TIMEOUT_MS
   });
 }
 
@@ -148,11 +163,14 @@ describe('installed npm executable', () => {
     'builds a clean package copy before packing and installs a shebang-bearing bin target',
     () =>
       withInstalledPackage(async ({ target }) => {
-        expect(await readFile(target, 'utf8')).toMatch(
-          /^#!\/usr\/bin\/env node\n\/\/ SPDX-License-Identifier: AGPL-3\.0-or-later\n/u
+        const emitted = await readFile(target);
+        const prefix = Buffer.from(
+          '#!/usr/bin/env node\n// SPDX-License-Identifier: AGPL-3.0-or-later\n',
+          'utf8'
         );
+        expect(emitted.subarray(0, prefix.length)).toEqual(prefix);
       }),
-    90_000
+    PACKAGE_TEST_TIMEOUT_MS
   );
 
   it(
@@ -202,6 +220,6 @@ describe('installed npm executable', () => {
         expect(responses.find((response) => response.id === 3)).toHaveProperty('result');
         expect(positive.stdout).not.toContain('INSTALLED_PACKAGE_SENTINEL_0123456789');
       }),
-    90_000
+    PACKAGE_TEST_TIMEOUT_MS
   );
 });

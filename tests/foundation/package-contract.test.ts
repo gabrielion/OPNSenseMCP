@@ -27,6 +27,31 @@ interface LockDocument {
 }
 
 describe('package contract', () => {
+  it('forces LF TypeScript emission and an exact executable byte prefix', async () => {
+    const buildConfig = JSON.parse(await readFile('tsconfig.build.json', 'utf8')) as {
+      readonly compilerOptions?: { readonly newLine?: unknown };
+    };
+    expect(buildConfig.compilerOptions?.newLine).toBe('lf');
+
+    const emitted = await readFile('dist/main.js');
+    const prefix = Buffer.from(
+      '#!/usr/bin/env node\n// SPDX-License-Identifier: AGPL-3.0-or-later\n',
+      'utf8'
+    );
+    expect(emitted.subarray(0, prefix.length)).toEqual(prefix);
+  });
+
+  it('contains no Error.name-derived runtime diagnostic', async () => {
+    for (const file of [
+      'src/main.ts',
+      'src/entrypoints/stdio.ts',
+      'src/entrypoints/http.ts',
+      'src/http/runtime.ts'
+    ]) {
+      expect(await readFile(file, 'utf8'), file).not.toContain('error.name');
+    }
+  });
+
   it('pins the MCP v2 beta and AGPL foundation exactly', async () => {
     const document = JSON.parse(await readFile('package.json', 'utf8')) as PackageDocument;
 

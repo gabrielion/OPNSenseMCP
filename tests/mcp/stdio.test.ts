@@ -363,6 +363,7 @@ it('awaits and aggregates owned runtime cleanup when stdio construction throws',
 
 it('records failures reported through the configured serve onerror path', async () => {
   const probeFailure = new Error('discovery-probe-close');
+  probeFailure.name = 'STDIO_ONERROR_NAME_MUST_NOT_LEAK';
   const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   const serverClose = vi.fn(() => Promise.resolve());
   const dependencies: StdioRuntimeDependencies = {
@@ -397,14 +398,17 @@ it('records failures reported through the configured serve onerror path', async 
   expect(write.mock.calls.flat().join('')).toBe('Error\n');
 });
 
-it('writes only diagnostic error names to stderr', async () => {
+it('writes only a fixed error diagnostic to stderr', async () => {
   const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   const input = new PassThrough();
   const output = new PassThrough();
   const transport = new StdioServerTransport(input, output);
   const handle = await startStdioWithOptions(undefined, { transport });
-  transport.onerror?.(new Error(SENTINEL));
+  const failure = new Error(SENTINEL);
+  failure.name = 'STDIO_TRANSPORT_NAME_MUST_NOT_LEAK';
+  transport.onerror?.(failure);
   await expect(handle.close()).rejects.toBeInstanceOf(AggregateError);
-  expect(write.mock.calls.flat().join('')).toContain('Error');
+  expect(write.mock.calls.flat().join('')).toBe('Error\n');
+  expect(write.mock.calls.flat().join('')).not.toContain(failure.name);
   expect(write.mock.calls.flat().join('')).not.toContain(SENTINEL);
 });

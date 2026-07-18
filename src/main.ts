@@ -26,9 +26,8 @@ export function installStdioSignalHandlers(
       const hold = setInterval(() => undefined, 2_147_483_647);
       try {
         await handle.close();
-      } catch (error: unknown) {
-        const diagnostic = error instanceof Error ? error.name : 'Error';
-        process.stderr.write(`${diagnostic}\n`);
+      } catch {
+        process.stderr.write('Error\n');
         target.exitCode = 1;
       } finally {
         clearInterval(hold);
@@ -70,9 +69,8 @@ export async function isDirectInvocation(
 }
 
 if (await isDirectInvocation(import.meta.url, process.argv[1])) {
-  void runStdioEntrypoint().catch((error: unknown) => {
-    const diagnostic = error instanceof Error ? error.name : 'Error';
-    process.stderr.write(`${diagnostic}\n`);
+  void runStdioEntrypoint().catch(() => {
+    process.stderr.write('Error\n');
     process.exitCode = 1;
   });
 }

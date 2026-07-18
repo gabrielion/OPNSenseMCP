@@ -49,8 +49,8 @@ export function createStdioAggregateClose(
   );
 }
 
-function diagnose(error: Error): void {
-  process.stderr.write(`${error.name}\n`);
+function diagnose(): void {
+  process.stderr.write('Error\n');
 }
 
 export async function startStdioWithDependencies(
@@ -64,7 +64,7 @@ export async function startStdioWithDependencies(
   const failures: Error[] = [];
   const record = (error: Error) => {
     failures.push(error);
-    diagnose(error);
+    diagnose();
   };
   let handle: StdioServerHandle;
   try {

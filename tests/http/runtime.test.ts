@@ -394,6 +394,7 @@ describe('HTTP guard order and secret handling', () => {
     const original = buildApplicationHttpSecurity(createApplicationContext(config()));
     const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const adapterFailure = new Error(TOKEN);
+    adapterFailure.name = 'HTTP_ADAPTER_NAME_MUST_NOT_LEAK';
     const running = await listen(
       buildHttpExpressApplication(original, DEFAULT_HTTP_LIMITS, (() =>
         Promise.reject(adapterFailure)) as never)
@@ -413,6 +414,7 @@ describe('HTTP guard order and secret handling', () => {
       expect(response.body).toBe(JSON.stringify({ error: 'internal_server_error' }));
       expect(JSON.stringify(response.headers)).not.toContain(TOKEN);
       expect(write.mock.calls.flat().join('')).toBe('Error\n');
+      expect(write.mock.calls.flat().join('')).not.toContain(adapterFailure.name);
     } finally {
       await new Promise<void>((resolve, reject) => {
         running.server.close((error) => {
@@ -738,14 +740,22 @@ it('silences only the four intentional MCP standard-header probe diagnostics', a
     new Error(`Rejected inbound request (notification-method-header-mismatch): ${sentinel}`),
     new Error(`Internal MCP handler failure: ${sentinel}`)
   ];
+  for (const error of diagnosticCreateHandlerErrors) {
+    error.name = 'HTTP_HANDLER_NAME_MUST_NOT_LEAK';
+  }
   for (const error of diagnosticCreateHandlerErrors) reportCreateHandlerError(error);
   (reportCreateHandlerError as unknown as (error: unknown) => void)(sentinel);
-  reportNodeHandlerError(new Error(`Node adapter failure: ${sentinel}`));
-  reportLegacyError(new Error(`Legacy SSE failure: ${sentinel}`));
+  const nodeFailure = new Error(`Node adapter failure: ${sentinel}`);
+  nodeFailure.name = 'HTTP_NODE_NAME_MUST_NOT_LEAK';
+  reportNodeHandlerError(nodeFailure);
+  const legacyFailure = new Error(`Legacy SSE failure: ${sentinel}`);
+  legacyFailure.name = 'HTTP_LEGACY_NAME_MUST_NOT_LEAK';
+  reportLegacyError(legacyFailure);
 
   const diagnostics = write.mock.calls.flat().join('');
   expect(diagnostics).toBe('Error\n'.repeat(diagnosticCreateHandlerErrors.length + 3));
   expect(diagnostics).not.toContain(sentinel);
+  expect(diagnostics).not.toContain('MUST_NOT_LEAK');
 });
 
 it('projects frozen defensive HTTP settings without exposing the bearer', () => {

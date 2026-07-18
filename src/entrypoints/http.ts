@@ -35,9 +35,8 @@ export function installHttpSignalHandlers(
       const hold = setInterval(() => undefined, 2_147_483_647);
       try {
         await handle.close();
-      } catch (error: unknown) {
-        const diagnostic = error instanceof Error ? error.name : 'Error';
-        process.stderr.write(`${diagnostic}\n`);
+      } catch {
+        process.stderr.write('Error\n');
         target.exitCode = 1;
       } finally {
         clearInterval(hold);
@@ -90,9 +89,8 @@ export async function runHttpEntrypoint(): Promise<OwnedHttpRuntime> {
 
 const invokedPath = process.argv[1];
 if (invokedPath !== undefined && fileURLToPath(import.meta.url) === resolve(invokedPath)) {
-  void runHttpEntrypoint().catch((error: unknown) => {
-    const diagnostic = error instanceof Error ? error.name : 'Error';
-    process.stderr.write(`${diagnostic}\n`);
+  void runHttpEntrypoint().catch(() => {
+    process.stderr.write('Error\n');
     process.exitCode = 1;
   });
 }
