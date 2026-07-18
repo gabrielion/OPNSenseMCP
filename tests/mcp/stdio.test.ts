@@ -314,7 +314,7 @@ it('awaits and aggregates owned runtime cleanup when stdio construction throws',
   expect(runtimeClose).toHaveBeenCalledTimes(1);
 });
 
-it('records a discovery-probe close failure through the configured serve onerror path', async () => {
+it('records failures reported through the configured serve onerror path', async () => {
   const probeFailure = new Error('discovery-probe-close');
   const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   const serverClose = vi.fn(() => Promise.resolve());

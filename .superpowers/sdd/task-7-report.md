@@ -131,7 +131,9 @@ build: exit 0
 - Authentication requires one raw Authorization line, always performs fixed-size SHA-256 digest comparison, rejects duplicate/comma ambiguity, removes normalized/raw/distinct wire header views, and forwards only exact local AuthInfo.
 - HTTP, stdio, startup, and owned-entrypoint cleanup operations are independently scheduled before `Promise.allSettled`; synchronous and asynchronous failures remain ordered in one `AggregateError`.
 - Real beta.4 HTTP tests prove 16 subscription streams, pre-ack rejection of stream 17, replacement admission, ordinary abort, one-time SSE absolute promotion, keepalive non-extension, and completed JSON deadline clearing through `toNodeHandler` and local sockets.
-- The configured stdio serve/onerror seam now provides narrow discovery-probe failure evidence without a new product API.
+- The configured stdio `serve`/`onerror` seam proves that SDK-reported failures are recorded,
+  diagnosed without details, and included in aggregate close results. This unit test injects the
+  callback directly; it does not behaviorally execute the SDK's internal discovery-probe close path.
 
 ### Full verification
 
@@ -171,4 +173,10 @@ exit 1
 Error: Cannot find module 'scripts/run-conformance.mjs'
 ```
 
-The runner is absent on this branch. Adding it belongs to the explicitly excluded later conformance task, so neither protocol era was run here. No other review-fix concern remains.
+The runner is absent on this branch. Adding it belongs to the explicitly excluded later conformance
+task, so neither protocol era was run here.
+
+One Minor evidence limitation remains for the final whole-branch review: the stdio test drives the
+configured `serve`/`onerror` callback seam, but does not force a real SDK discovery probe to fail
+during its close cycle. Production error capture and aggregation are covered; that particular SDK
+internal path is not.
