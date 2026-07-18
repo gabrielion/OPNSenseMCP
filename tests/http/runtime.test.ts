@@ -21,6 +21,7 @@ import type { RuntimeConfig } from '../../src/config/runtime-config.js';
 import { DEFAULT_HTTP_LIMITS, resolveHttpLimits } from '../../src/http/limits.js';
 import {
   buildHttpExpressApplication,
+  createHttpRequestAdmissionGate,
   startHttp,
   startHttpWithDependencies,
   invokeNodeHandler,
@@ -207,6 +208,75 @@ describe('hardened HTTP construction', () => {
 });
 
 describe('HTTP guard order and secret handling', () => {
+  it('keeps Host and Origin ahead of shutdown while rejecting before body receipt and auth', async () => {
+    const original = buildApplicationHttpSecurity(createApplicationContext(config()));
+    const authenticate = vi.fn(original.authenticate);
+    const security = { ...original, authenticate };
+    const adapter = vi.fn(() => Promise.resolve());
+    const admission = createHttpRequestAdmissionGate();
+    admission.close();
+    const running = await listen(
+      buildHttpExpressApplication(
+        security,
+        DEFAULT_HTTP_LIMITS,
+        adapter as never,
+        undefined,
+        undefined,
+        admission
+      )
+    );
+    try {
+      const foreignHost = await rawPost(
+        running.url,
+        {
+          host: 'foreign.example',
+          authorization: 'Bearer wrong',
+          'content-type': 'application/json',
+          'content-length': '2'
+        },
+        '{}'
+      );
+      expect(foreignHost.status).toBe(403);
+
+      const foreignOrigin = await rawPost(
+        running.url,
+        {
+          host: running.url.host,
+          origin: 'https://foreign.example',
+          authorization: 'Bearer wrong',
+          'content-type': 'application/json',
+          'content-length': '2'
+        },
+        '{}'
+      );
+      expect(foreignOrigin.status).toBe(403);
+
+      const shuttingDown = await rawPost(
+        running.url,
+        {
+          host: running.url.host,
+          authorization: 'Bearer wrong',
+          'content-type': 'application/json',
+          'content-length': String(DEFAULT_HTTP_LIMITS.bodyBytes + 1)
+        },
+        '{}'
+      );
+      expect(shuttingDown.status).toBe(503);
+      expect(shuttingDown.headers.get('connection')).toBe('close');
+      expect(shuttingDown.body).toBe('{"error":"server_shutting_down"}');
+      expect(shuttingDown.body).not.toContain(TOKEN);
+      expect(authenticate).not.toHaveBeenCalled();
+      expect(adapter).not.toHaveBeenCalled();
+    } finally {
+      await new Promise<void>((resolveClose, rejectClose) => {
+        running.server.close((error) => {
+          if (error === undefined) resolveClose();
+          else rejectClose(error);
+        });
+      });
+    }
+  });
+
   it('rejects missing and wrong bearer credentials with 401 before MCP dispatch', async () => {
     const runtime = await start();
     for (const token of ['', 'wrong-token']) {

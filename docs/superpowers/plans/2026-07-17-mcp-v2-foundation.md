@@ -24,7 +24,7 @@
   `createMcpHandler` plus `toNodeHandler` on a plain Express application so project Host, exact-Origin,
   body, and authentication middleware run in the required order. The optional Express helper package is
   intentionally not installed because its preinstalled middleware does not preserve the stricter exact
-  Host -> exact serialized Origin -> bounded body -> authentication order.
+  Host -> exact serialized Origin -> shutdown admission gate -> bounded body -> authentication order.
 - The capability catalog is closed: undeclared, hidden, disabled, transport-incompatible, and read-only-forbidden calls fail before a handler runs.
 - The foundation registers no local-write or firewall-write product capability. Mutation execution remains unavailable until strict backup and audit gates are implemented in a separately reviewed plan.
 - MCP instructions and prompts guide behavior but never authorize a change. Form elicitation is used only when the client advertises it, and missing support fails closed.
@@ -2328,9 +2328,9 @@ git commit -m "feat: assemble opaque dual-era MCP v2 application"
 - buildApplicationHttpSecurity(application) is source-internal and returns public HTTP settings plus a bearer
   middleware closure; it never returns the token or internal config.
 - startHttp(application, options?) returns { url, limits, close }. The caller owns application; runtime close
-  first initiates `server.close()` to stop admission, then independently settles the modern handler and
-  optional legacy owner, and finally bounds any remaining connections and awaits Node drainage. Every later
-  phase runs even if an earlier phase fails.
+  first closes its synchronous shutdown admission gate and initiates `server.close()` for listener/socket
+  drainage, then independently settles the modern handler and optional legacy owner, and finally bounds any
+  remaining connections and awaits Node drainage. Every later phase runs even if an earlier phase fails.
 - HTTP is loopback-only, uses an exact hostname allow-list plus an exact serialized-Origin allow-list,
   is authenticated, bounded, and disabled by default. Host ports are intentionally ignored after strict
   hostname parsing; Origin entries retain scheme, host, and port.
@@ -2457,9 +2457,9 @@ bounds. Reject invalid option overrides at construction.
 startHttp(application, options?) obtains buildApplicationHttpSecurity(application), refuses disabled or
 unsafe configuration, then creates the beta.4 handler and Node adapter on plain `express()`. The optional
 Express helper package is intentionally not installed because its preinstalled JSON and hostname-only
-Origin middleware would precede project guards. Middleware order is exact: exact Host -> exact serialized
-Origin -> bounded body receipt/time/size and concurrency -> bearer authentication -> `/mcp`. Keep 2025
-traffic stateless. An injected options port of `0` is allowed only for ephemeral test
+  Origin middleware would precede project guards. Middleware order is exact: exact Host -> exact serialized
+  Origin -> shutdown admission gate -> bounded body receipt/time/size and concurrency -> bearer
+  authentication -> `/mcp`. Keep 2025 traffic stateless. An injected options port of `0` is allowed only for ephemeral test
 listeners; environment-derived configuration remains constrained to 1024..65535.
 
 The SDK has no ordinary-execution or absolute-stream deadline option. Add a project-owned per-response
@@ -2469,8 +2469,9 @@ replace that timer with one absolute 5-minute lifetime; keepalive traffic must n
 inactivity and Node `requestTimeout` are not substitutes for these execution deadlines.
 
 Construction/listen is wrapped in try/finally: if any stage fails, close every resource already created in
-explicit phases. Returned close() is idempotent: `server.close()` first stops admission, the runtime then
-closes the modern handler and optional legacy owner so SSE/dispatch can settle, then uses
+explicit phases. Returned close() is idempotent: a synchronous request gate first stops admission and
+`server.close()` begins listener/socket drainage; the runtime then closes the modern handler and optional
+legacy owner so SSE/dispatch can settle, then uses
 `closeAllConnections()` only as a bounded fallback before awaiting the original Node close callback. One
 phase failure never skips a later phase and an AggregateError retains all failures in phase/operation order.
 
@@ -5566,7 +5567,8 @@ The three MCP v2 packages `@modelcontextprotocol/server`, `@modelcontextprotocol
 package publication, all three must be repinned to one stable MCP v2 release together and every
 deterministic and conformance gate must pass again. The optional `@modelcontextprotocol/express` helper
 package is intentionally not installed: direct Express integration preserves the project-owned guard
-order of exact Host -> exact serialized Origin -> bounded body receipt -> authentication.
+order of exact Host -> exact serialized Origin -> shutdown admission gate -> bounded body receipt ->
+authentication.
 
 Separately, the isolated deprecated-SSE adapter pins the legacy `@modelcontextprotocol/sdk@1.29.0`
 exactly. Before release run `npm run release:check:legacy-sse` and `npm audit --omit=dev`, then decide

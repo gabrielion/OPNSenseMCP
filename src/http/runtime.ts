@@ -188,6 +188,27 @@ function rejectUnreadRequest(
   });
 }
 
+export interface HttpRequestAdmissionGate {
+  readonly middleware: RequestHandler;
+  close(): void;
+}
+
+export function createHttpRequestAdmissionGate(): HttpRequestAdmissionGate {
+  let accepting = true;
+  return Object.freeze({
+    middleware: ((request, response, next) => {
+      if (!accepting) {
+        rejectUnreadRequest(request, response, 503, 'server_shutting_down');
+        return;
+      }
+      next();
+    }) satisfies RequestHandler,
+    close(): void {
+      accepting = false;
+    }
+  });
+}
+
 interface ConcurrentRequestAdmission {
   readonly middleware: RequestHandler;
   readonly lookupRequestLease: RequestLeaseLookup;
@@ -402,12 +423,14 @@ export function buildHttpExpressApplication(
   limits: HttpLimits,
   handler: NodeMcpRequestHandler,
   clock: DeadlineClock = SYSTEM_CLOCK,
-  mountCompatibility?: (application: Express, lookupRequestLease: RequestLeaseLookup) => void
+  mountCompatibility?: (application: Express, lookupRequestLease: RequestLeaseLookup) => void,
+  requestAdmission: HttpRequestAdmissionGate = createHttpRequestAdmissionGate()
 ): Express {
   const application = express();
   const admission = concurrentRequestAdmission(limits.maxConcurrentRequests);
   application.use(exactHostValidation(security.allowedHosts));
   application.use(exactOriginValidation(security.allowedOrigins));
+  application.use(requestAdmission.middleware);
   application.use(admission.middleware);
   application.use(bodyReceiptDeadline(limits.bodyReceiptTimeoutMs));
   application.use(bodyTypeAndDeclaredSize(limits.bodyBytes));
@@ -461,6 +484,7 @@ export async function startHttpWithDependencies(
   let handler: McpHttpHandler | undefined;
   let legacy: LegacySseHandle | undefined;
   let server: Server | undefined;
+  let requestAdmission: HttpRequestAdmissionGate | undefined;
   try {
     handler = dependencies.createHandler(createServerFactory(application, 'http'), {
       legacy: 'stateless',
@@ -483,12 +507,14 @@ export async function startHttpWithDependencies(
         });
       };
     }
+    requestAdmission = createHttpRequestAdmissionGate();
     const expressApplication = buildHttpExpressApplication(
       security,
       limits,
       nodeHandler,
       SYSTEM_CLOCK,
-      mountCompatibility
+      mountCompatibility,
+      requestAdmission
     );
     server = dependencies.createNodeServer(
       {
@@ -504,10 +530,12 @@ export async function startHttpWithDependencies(
     const ownedLegacy = legacy;
     const ownedHandler = handler;
     const ownedServer = server;
+    const ownedRequestAdmission = requestAdmission;
     const serverDrain = createNodeServerDrain(ownedServer);
     const close = createPhasedClose([
       [
         () => {
+          ownedRequestAdmission.close();
           serverDrain.stopAdmission();
         }
       ],
@@ -526,6 +554,7 @@ export async function startHttpWithDependencies(
     const initializedServer = server;
     const initializedHandler = handler;
     const initializedLegacy = legacy;
+    const initializedRequestAdmission = requestAdmission;
     const serverDrain =
       initializedServer === undefined ? undefined : createNodeServerDrain(initializedServer);
     const ownerPhase = [
@@ -537,6 +566,7 @@ export async function startHttpWithDependencies(
         ? []
         : [
             () => {
+              initializedRequestAdmission?.close();
               serverDrain.stopAdmission();
             }
           ],

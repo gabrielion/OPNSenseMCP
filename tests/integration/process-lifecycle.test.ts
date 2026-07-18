@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { PassThrough } from 'node:stream';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
+import { connect, type Socket } from 'node:net';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import type { McpHttpHandler } from '@modelcontextprotocol/server';
 import { describe, expect, it, vi } from 'vitest';
@@ -151,6 +152,106 @@ describe('owned lifecycle aggregation', () => {
     expect(first).toBe(second);
     await first;
     await runtime.close();
+  });
+
+  it('rejects a pipelined keep-alive request submitted after HTTP close begins', async () => {
+    let finishFirstRequest: (() => void) | undefined;
+    let finishHandlerClose: (() => void) | undefined;
+    let adapterCalls = 0;
+    const nodeHandler = vi.fn((_request: unknown, response: ServerResponse) => {
+      adapterCalls += 1;
+      if (adapterCalls > 1) {
+        response.writeHead(200, { 'content-length': '2', 'content-type': 'application/json' });
+        response.end('{}');
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => {
+        finishFirstRequest = () => {
+          if (response.headersSent) return;
+          response.writeHead(200, { 'content-length': '2', 'content-type': 'application/json' });
+          response.end('{}');
+          resolve();
+        };
+      });
+    });
+    const handlerClose = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishHandlerClose = resolve;
+        })
+    );
+    const dependencies = {
+      createHandler: () => ({ close: handlerClose }),
+      adaptHandler: () => nodeHandler,
+      createNodeServer: (options: Parameters<typeof createServer>[0], listener: never) =>
+        createServer(options, listener),
+      listen: (server: ReturnType<typeof createServer>, port: number, host: string) =>
+        new Promise<{ port: number }>((resolveAddress, rejectAddress) => {
+          server.once('error', rejectAddress);
+          server.listen(port, host, () => {
+            const address = server.address();
+            if (address === null || typeof address === 'string') {
+              rejectAddress(new Error('Expected an HTTP test address'));
+              return;
+            }
+            resolveAddress({ port: address.port });
+          });
+        })
+    } as unknown as HttpRuntimeDependencies;
+    const runtime = await startHttpWithDependencies(
+      createApplicationContext(config()),
+      { port: 0 },
+      dependencies
+    );
+    const target = new URL(runtime.url);
+    let socket: Socket | undefined;
+    let closeSettlement: Promise<void> | undefined;
+    let received = '';
+    const requestText = [
+      'POST /mcp HTTP/1.1',
+      `Host: ${target.host}`,
+      'Authorization: Bearer LIFECYCLE_SENTINEL_TOKEN_0123456789',
+      'Accept: application/json',
+      'Content-Type: application/json',
+      'Content-Length: 2',
+      'Connection: keep-alive',
+      '',
+      '{}'
+    ].join('\r\n');
+    try {
+      socket = connect({ host: target.hostname, port: Number(target.port) });
+      socket.setEncoding('utf8');
+      socket.on('data', (chunk: string) => {
+        received += chunk;
+      });
+      await new Promise<void>((resolveConnection, rejectConnection) => {
+        socket?.once('connect', resolveConnection);
+        socket?.once('error', rejectConnection);
+      });
+      socket.write(requestText);
+      await expect.poll(() => nodeHandler.mock.calls.length).toBe(1);
+
+      closeSettlement = runtime.close();
+      await expect.poll(() => handlerClose.mock.calls.length).toBe(1);
+      socket.write(requestText);
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+      finishFirstRequest?.();
+      await expect
+        .poll(() => received.match(/HTTP\/1\.1 [0-9]{3}/gu) ?? [], { timeout: 3_000 })
+        .toHaveLength(2);
+      finishHandlerClose?.();
+      await closeSettlement;
+
+      expect(received.match(/HTTP\/1\.1 [0-9]{3}/gu)).toEqual(['HTTP/1.1 200', 'HTTP/1.1 503']);
+      expect(received).toContain('{"error":"server_shutting_down"}');
+      expect(received).not.toContain('LIFECYCLE_SENTINEL_TOKEN_0123456789');
+      expect(nodeHandler).toHaveBeenCalledTimes(1);
+    } finally {
+      finishFirstRequest?.();
+      finishHandlerClose?.();
+      socket?.destroy();
+      await Promise.allSettled([closeSettlement ?? runtime.close()]);
+    }
   });
 
   it('retains every independent cleanup failure in one AggregateError', async () => {

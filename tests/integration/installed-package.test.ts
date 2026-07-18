@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { execFile, spawn } from 'node:child_process';
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
+import {
+  localArchiveInstallArguments,
+  packageHarnessPlatform,
+  runBoundedCommand,
+  type CommandInvocation,
+  type CommandResult
+} from '../support/installed-package-harness.js';
 
-const execFileAsync = promisify(execFile);
 const PACKAGE_INPUTS = [
   'package.json',
   'package-lock.json',
@@ -18,15 +22,17 @@ const PACKAGE_INPUTS = [
   'tsconfig.build.json'
 ] as const;
 
-interface CommandResult {
-  readonly code: number | null;
-  readonly signal: NodeJS.Signals | null;
-  readonly stdout: string;
-  readonly stderr: string;
+interface InstalledPackage {
+  readonly command: CommandInvocation;
+  readonly target: string;
+}
+
+function requireSuccessfulCommand(result: CommandResult, label: string): void {
+  if (result.code !== 0 || result.signal !== null) throw new Error(`${label} failed`);
 }
 
 async function withInstalledPackage(
-  assertion: (installedBin: string, packageCopy: string) => Promise<void>
+  assertion: (installed: InstalledPackage, packageCopy: string) => Promise<void>
 ): Promise<void> {
   const repository = resolve('.');
   const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-package-installation-'));
@@ -39,15 +45,43 @@ async function withInstalledPackage(
         cp(join(repository, input), join(packageCopy, input), { recursive: true })
       )
     );
-    await symlink(join(repository, 'node_modules'), join(packageCopy, 'node_modules'), 'dir');
+    const manifest = JSON.parse(await readFile(join(packageCopy, 'package.json'), 'utf8')) as {
+      readonly name?: unknown;
+    };
+    if (typeof manifest.name !== 'string') throw new Error('Package name is unavailable');
+    const npmCli = process.env.npm_execpath;
+    if (npmCli === undefined) throw new Error('npm CLI path is unavailable');
+    const harness = packageHarnessPlatform({
+      platform: process.platform,
+      consumer,
+      packageName: manifest.name,
+      nodeExecutable: process.execPath,
+      npmCli,
+      commandShell: process.env.ComSpec
+    });
+    await symlink(
+      join(repository, 'node_modules'),
+      join(packageCopy, 'node_modules'),
+      harness.dependencyLinkType
+    );
     await expect(readFile(join(packageCopy, 'dist/main.js'), 'utf8')).rejects.toMatchObject({
       code: 'ENOENT'
     });
 
-    await execFileAsync('npm', ['pack', '--json'], {
-      cwd: packageCopy,
-      env: process.env
-    });
+    const packed = await runBoundedCommand(
+      {
+        command: harness.npm.command,
+        arguments: [...harness.npm.arguments, 'pack', '--json']
+      },
+      {
+        cwd: packageCopy,
+        environment: process.env,
+        input: '',
+        timeoutMs: 60_000,
+        timeoutLabel: 'npm pack'
+      }
+    );
+    requireSuccessfulCommand(packed, 'npm pack');
     const archives = (await readdir(packageCopy)).filter((entry) => entry.endsWith('.tgz'));
     expect(archives).toHaveLength(1);
     const archiveName = archives[0];
@@ -59,64 +93,45 @@ async function withInstalledPackage(
       `${JSON.stringify({ private: true }, null, 2)}\n`,
       'utf8'
     );
-    await execFileAsync(
-      'npm',
-      [
-        'install',
-        '--ignore-scripts',
-        '--no-audit',
-        '--no-fund',
-        '--no-package-lock',
-        '--no-save',
-        archive
-      ],
-      { cwd: consumer, env: process.env }
+    const installed = await runBoundedCommand(
+      {
+        command: harness.npm.command,
+        arguments: [...harness.npm.arguments, ...localArchiveInstallArguments(archive)]
+      },
+      {
+        cwd: consumer,
+        environment: process.env,
+        input: '',
+        timeoutMs: 60_000,
+        timeoutLabel: 'npm install'
+      }
     );
+    requireSuccessfulCommand(installed, 'npm install');
 
-    await assertion(join(consumer, 'node_modules/.bin/opnsense-mcp'), packageCopy);
+    await assertion(
+      { command: harness.installedCommand, target: harness.installedTarget },
+      packageCopy
+    );
   } finally {
     await rm(temporaryRoot, { force: true, recursive: true });
   }
 }
 
 function runInstalledCommand(
-  installedBin: string,
+  installedCommand: CommandInvocation,
   readOnly: string,
   input: string
 ): Promise<CommandResult> {
-  return new Promise((resolveCommand, rejectCommand) => {
-    const child = spawn(installedBin, [], {
-      cwd: resolve('.'),
-      env: {
-        PATH: process.env.PATH ?? '',
-        READ_ONLY: readOnly,
-        MCP_REQUEST_STATE_SECRET: 'INSTALLED_PACKAGE_SENTINEL_0123456789'
-      },
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-    let stdout = '';
-    let stderr = '';
-    const deadline = setTimeout(() => {
-      child.kill('SIGKILL');
-      rejectCommand(new Error('Installed package command did not exit promptly'));
-    }, 3_000);
-    deadline.unref();
-    child.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
-    });
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf8');
-    });
-    child.stdin.on('error', () => undefined);
-    child.once('error', (error) => {
-      clearTimeout(deadline);
-      rejectCommand(error);
-    });
-    child.once('close', (code, signal) => {
-      clearTimeout(deadline);
-      resolveCommand({ code, signal, stdout, stderr });
-    });
-    child.stdin.end(input);
+  return runBoundedCommand(installedCommand, {
+    cwd: resolve('.'),
+    environment: {
+      PATH: process.env.PATH ?? '',
+      READ_ONLY: readOnly,
+      MCP_REQUEST_STATE_SECRET: 'INSTALLED_PACKAGE_SENTINEL_0123456789'
+    },
+    input,
+    timeoutMs: 3_000,
+    timeoutLabel: 'installed package command'
   });
 }
 
@@ -132,17 +147,19 @@ describe('installed npm executable', () => {
   it(
     'builds a clean package copy before packing and installs a shebang-bearing bin target',
     () =>
-      withInstalledPackage(async (installedBin) => {
-        expect(await readFile(installedBin, 'utf8')).toMatch(/^#!\/usr\/bin\/env node\n/u);
+      withInstalledPackage(async ({ target }) => {
+        expect(await readFile(target, 'utf8')).toMatch(
+          /^#!\/usr\/bin\/env node\n\/\/ SPDX-License-Identifier: AGPL-3\.0-or-later\n/u
+        );
       }),
-    60_000
+    90_000
   );
 
   it(
     'rejects invalid configuration and completes the 2025 protocol through the installed bin',
     () =>
-      withInstalledPackage(async (installedBin) => {
-        const negative = await runInstalledCommand(installedBin, 'invalid', '');
+      withInstalledPackage(async ({ command }) => {
+        const negative = await runInstalledCommand(command, 'invalid', '');
         const requests = [
           {
             jsonrpc: '2.0',
@@ -164,7 +181,7 @@ describe('installed npm executable', () => {
           }
         ];
         const positive = await runInstalledCommand(
-          installedBin,
+          command,
           'true',
           `${requests.map((request) => JSON.stringify(request)).join('\n')}\n`
         );
@@ -185,6 +202,6 @@ describe('installed npm executable', () => {
         expect(responses.find((response) => response.id === 3)).toHaveProperty('result');
         expect(positive.stdout).not.toContain('INSTALLED_PACKAGE_SENTINEL_0123456789');
       }),
-    60_000
+    90_000
   );
 });

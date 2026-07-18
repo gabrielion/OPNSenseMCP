@@ -47,7 +47,11 @@ function logicalCommandsAfterPreflight(block: string): readonly string[] {
 
 describe('foundation documentation', () => {
   it('states the implemented safety and protocol evidence boundaries', async () => {
-    const readme = await readFile('README.md', 'utf8');
+    const [readme, design, foundationPlan] = await Promise.all([
+      readFile('README.md', 'utf8'),
+      readFile('docs/superpowers/specs/2026-07-17-independent-mcp-v2-rebuild-design.md', 'utf8'),
+      readFile('docs/superpowers/plans/2026-07-17-mcp-v2-foundation.md', 'utf8')
+    ]);
     expect(readme).toContain('Foundation development snapshot');
     expect(readme).toContain('does not connect to or administer OPNsense');
     expect(readme).toContain('not the complete OPNsense MCP product');
@@ -64,6 +68,10 @@ describe('foundation documentation', () => {
     expect(readme).toContain('AGPL-3.0-or-later');
     expect(readme).toContain('exact serialized origin');
     expect(readme).toContain('Deprecated SSE compatibility is disabled by default');
+    for (const publication of [readme, design, foundationPlan]) {
+      expect(publication).toContain('shutdown admission gate');
+    }
+    expect(foundationPlan).not.toContain('`server.close()` first stops admission');
   });
 
   it('publishes exact guarded contributor commands', async () => {
