@@ -32,7 +32,7 @@
 - Streamable HTTP remains the primary HTTP transport. Deprecated SSE compatibility is isolated behind `MCP_LEGACY_SSE_ENABLED=true`, is off by default, and shares the same bearer, Host, exact-Origin, policy, body, request, stream, session, concurrency, and time limits.
 - Source-header enforcement is available from Task 1 as `npm run license:check`. It is intentionally scoped to JavaScript and TypeScript source headers; the later provenance plan owns the release-tree/history-wide license, lineage, and forbidden-expression scan.
 - Use only real Vitest 4 matchers: catch an error and apply `toMatchObject` when structured error fields are needed. For a Zod IP union use `z.union([z.ipv4(), z.ipv6()])`. Build TypeScript and execute the emitted JavaScript with Node; do not add an on-the-fly TypeScript runner.
-- Conformance runs have no expected-failure baseline and must pass the five official targeted invocations named in Task 8 against the real product server; never describe that gate as full-suite conformance.
+- Conformance runs have no expected-failure baseline and must pass the six official targeted invocations named in Task 8 against the real product server; never describe that gate as full-suite conformance.
 - Use TDD for each behavior-bearing task: red test, focused implementation, green test, broader regression gate, atomic commit.
 
 ---
@@ -2503,6 +2503,7 @@ git commit -m "feat: add owned hardened MCP entrypoints"
 - Modify: `src/http/limits.ts`
 - Modify: `src/http/runtime.ts`
 - Modify: `tests/http/runtime.test.ts`
+- Modify: `tests/http/task-7-review-fixes.test.ts`
 - Modify: `tests/integration/process-lifecycle.test.ts`
 - Modify: `tests/architecture/execution-boundary.test.ts`
 - Modify: `tests/foundation/package-contract.test.ts`
@@ -2518,10 +2519,14 @@ git commit -m "feat: add owned hardened MCP entrypoints"
   `@modelcontextprotocol/sdk/server/index.js`, `SSEServerTransport` from
   `@modelcontextprotocol/sdk/server/sse.js`, and request schemas/result metadata types from
   `@modelcontextprotocol/sdk/types.js`. The focused test alone may additionally import
-  `Client` and `SSEClientTransport` from the v1 client subpaths. No v1 object or transport is
+  `Client` and `SSEClientTransport` from the v1 client subpaths plus the low-level v1 `Server` class
+  at its exact construction seam for rejected-close ownership testing. No v1 object or transport is
   passed to the beta.4 server. Architecture scanning treats both the package root and every
-  subpath as v1 imports, then requires exactly those three production specifiers and two test
-  specifiers; a root-package or unapproved-subpath import fails the gate.
+  subpath as v1 imports, then requires exactly those three production specifiers and these three test
+  specifiers: `@modelcontextprotocol/sdk/client/index.js`,
+  `@modelcontextprotocol/sdk/client/sse.js`, and
+  `@modelcontextprotocol/sdk/server/index.js`; a root-package or unapproved-subpath import fails the
+  gate.
 - Do not use v1 `McpServer.registerTool()`. It parses and transforms arguments before its callback
   and validates output again, which would make the sealed kernel parse a transformed value a second
   time. Install low-level `ListToolsRequestSchema` and `CallToolRequestSchema` handlers instead.
@@ -2567,6 +2572,63 @@ git commit -m "feat: add owned hardened MCP entrypoints"
   exact pin, unique lock node and approved integrity, then checks registry version metadata and the
   exact `latest` tag. Release review must also run `npm audit --omit=dev` and decide whether the
   compatibility adapter can be removed.
+
+**Post-review implementation addendum (`f4ec4a3`):** This addendum records the shipped defensive
+follow-up and is normative wherever an earlier baseline sketch below describes unowned dispatch,
+eager session removal, a plain admission counter, or only two v1 test imports. The atomic review
+commit changes exactly these six code/test files:
+
+- `src/http/legacy-sse.ts`
+- `src/http/runtime.ts`
+- `tests/architecture/execution-boundary.test.ts`
+- `tests/http/legacy-sse.test.ts`
+- `tests/http/runtime.test.ts`
+- `tests/integration/process-lifecycle.test.ts`
+
+The shared HTTP admission owner is a private `WeakMap` from the admitted `GET /sse` response to a
+reference-counted retain operation. Each legacy session permits one active capability dispatch. It
+retains the GET lease synchronously before the first asynchronous dispatch boundary and releases that
+retained reference exactly once in `finally`. If the SSE connection disconnects, only the GET's base
+reference is released; the retained dispatch reference continues to consume the same global slot
+until real settlement. The transient POST remains independently admitted and is never transferred or
+double-counted.
+
+Each session owns an `AbortController`; dispatch uses `AbortSignal.any([session signal, SDK signal])`.
+The idle timer is cleared/suspended while the session is busy and rearmed only after dispatch
+settlement when the adapter/session remains open. Dispatch Promises and session-close Promises live in
+distinct adapter-owned Sets. Atomic idempotent `close()` first marks the adapter closing, aborts and
+starts every session close, awaits the de-duplicated close owners, then awaits the captured active
+dispatches. A rejected idle close remains owned in the session map and close Set so concurrent runtime
+shutdown reports it rather than losing it.
+
+Before the v1 transport sees a POST body, a non-object or array envelope is rejected with exact fixed
+JSON `{"error":"invalid_legacy_message"}` and cannot reflect caller input. The import allow-list is
+AST-based and covers static, side-effect, dynamic, import-type, type import/export, value export,
+`import = require()`, and direct `require()` forms. Production remains exactly the three tuples in
+`src/http/legacy-sse.ts`; tests remain exactly these three tuples in
+`tests/http/legacy-sse.test.ts`:
+`@modelcontextprotocol/sdk/client/index.js`, `@modelcontextprotocol/sdk/client/sse.js`, and
+`@modelcontextprotocol/sdk/server/index.js`.
+
+The review proof also covers partial start after a successful legacy mount: a throwing
+`createNodeServer` closes the legacy and beta owners exactly once and never calls `listen`. The Node
+constructor receives exactly `{ connectionsCheckingInterval: 1000, headersTimeout: 5000,
+keepAliveTimeout: 5000, requestTimeout: 10000 }` plus the Express listener. Direct deadline tests prove
+both `finish` and `close` clear the active response timer exactly once and a later deadline callback
+cannot destroy or rearm the terminal response.
+
+TDD evidence was recorded against `e018ad4`: the first RED reproductions observed 13 dispatches
+instead of one, HTTP 200 instead of the bounded 503 after disconnect, and premature runtime close; a
+second RED run observed idle cancellation during an active dispatch and caller-body reflection. The
+added rejected-idle-close ownership test was also RED because shutdown lost the rejection. Fresh GREEN
+evidence for `f4ec4a3` is 4 focused files with 64/64 tests, then `npm run verify` with 17 files and
+292/292 tests, `npm audit --omit=dev` with 0 vulnerabilities, and
+`npm run release:check:legacy-sse` reporting the dependency contract current. That networked release
+gate plus the production audit must still be rerun before release.
+
+Two P3 observations are recorded only for final triage, not claimed fixed or delivered here: a UUID
+session-identifier collision is cryptographically negligible but could receive explicit collision
+hardening, and one internal `application` parameter is unused.
 
 - [ ] **Step 1: Write static package, limit, and architecture tests first**
 
@@ -2650,15 +2712,16 @@ expect(sdkNodes[0]?.[1].dev).toBeUndefined();
 Extend `tests/architecture/execution-boundary.test.ts` with all of these static assertions:
 
 1. Add `src/http/legacy-sse.ts` to the exact `listApplicationCapabilities` helper allow-list.
-2. Parse import specifiers in production TypeScript and classify a v1 import when the specifier is
+2. Parse the TypeScript AST in production and classify a v1 import when the specifier is
    exactly `@modelcontextprotocol/sdk` **or** starts with `@modelcontextprotocol/sdk/`. Sort and
    require the complete `(file, specifier)` set to equal exactly these three entries:
    `src/http/legacy-sse.ts` with `@modelcontextprotocol/sdk/server/index.js`,
    `@modelcontextprotocol/sdk/server/sse.js`, and `@modelcontextprotocol/sdk/types.js`.
 3. Apply the same root-equality-or-subpath classification to test TypeScript. Sort and require the
-   complete set to equal exactly two entries, both in `tests/http/legacy-sse.test.ts`:
+   complete set to equal exactly three entries, all in `tests/http/legacy-sse.test.ts`:
    `@modelcontextprotocol/sdk/client/index.js` and
-   `@modelcontextprotocol/sdk/client/sse.js`.
+   `@modelcontextprotocol/sdk/client/sse.js`, plus
+   `@modelcontextprotocol/sdk/server/index.js`.
 4. Assert the legacy source contains none of `@modelcontextprotocol/server`, `buildServer`,
    `createServerFactory`, `settleApplicationConfirmation`, or
    `handleConfirmationCall`.
@@ -2667,8 +2730,10 @@ Extend `tests/architecture/execution-boundary.test.ts` with all of these static 
    instructions, Express types, HTTP limits, Zod, and the v1 low-level server/transport/types paths.
 
 Use the existing recursive `sourceFiles()` helper, and compare exact normalized file/specifier tuples
-rather than substring counts. This must fail on a bare root-package import, any sixth v1 import, or an
-approved specifier imported from a second file.
+rather than substring counts. The AST fixture must cover static imports, side-effect imports, dynamic
+imports, import types, type imports/exports, value exports, `import = require()`, and direct CommonJS
+`require()`. This must fail on a bare root-package import, any seventh v1 import, or an approved
+specifier imported from a second file.
 
 - [ ] **Step 2: Write the full legacy behavior and lifecycle tests before implementation**
 
@@ -2681,6 +2746,7 @@ the recurring POST.
 import { request as httpRequest } from 'node:http';
 import { Client as LegacyClient } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { Server as LegacyServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { Client, StreamableHTTPClientTransport, type ElicitResult } from '@modelcontextprotocol/client';
 import * as z from 'zod/v4';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -2889,8 +2955,10 @@ second SDK version. Review every unrelated lock change before continuing.
 
 - [ ] **Step 5: Implement the low-level v1 adapter and bounded store**
 
-Create `src/http/legacy-sse.ts` with this low-level shape. Keep the result formatter structural so no
-beta MCP type enters this file.
+The code sketch below records the initial RED-to-GREEN baseline only. Its unowned dispatch/session
+lifecycle is superseded by the normative `f4ec4a3` addendum above; the shipped adapter must use the
+lease, abort, busy, idle, dispatch-Set, close-Set, and fixed-envelope invariants from that addendum.
+Keep the result formatter structural so no beta MCP type enters this file.
 
 ```ts
 // SPDX-License-Identifier: AGPL-3.0-or-later
@@ -2930,6 +2998,7 @@ export interface LegacySseMountOptions {
     HttpLimits,
     'maxLegacySseSessions' | 'legacySessionIdleTimeoutMs'
   >;
+  readonly lookupRequestLease: (response: object) => (() => (() => void) | undefined) | undefined;
   readonly onerror: (error: Error) => void;
 }
 
@@ -2941,7 +3010,13 @@ interface PreparedLegacyTool {
 interface LegacySession {
   readonly server: LegacyServer;
   readonly transport: SSEServerTransport;
+  readonly abortController: AbortController;
+  readonly retainRequestLease: () => (() => void) | undefined;
+  readonly dispatches: Set<Promise<LegacyCallToolResult>>;
   idleTimer: ReturnType<typeof setTimeout> | undefined;
+  busy: boolean;
+  closing: boolean;
+  closePromise: Promise<void> | undefined;
 }
 
 function toError(value: unknown): Error {
@@ -3243,14 +3318,18 @@ export function responseDeadline(
   return (_request, response, next) => {
     const projected = response as unknown as WritableResponseProjection;
     const originalWriteHead = projected.writeHead;
+    let terminal = false;
     let deadline = clock.set(() => {
+      if (terminal) return;
+      terminal = true;
       projected.destroy();
     }, limits.executionTimeoutMs);
     let cleared = false;
     let streaming = false;
     const clear = () => {
-      if (cleared) return;
+      if (cleared || terminal) return;
       cleared = true;
+      terminal = true;
       clock.clear(deadline);
     };
     projected.once('finish', clear);
@@ -3258,12 +3337,15 @@ export function responseDeadline(
     projected.writeHead = (...arguments_: unknown[]) => {
       const contentType = contentTypeFromWriteHead(arguments_);
       if (
+        !terminal &&
         !streaming &&
         contentType?.split(';', 1)[0]?.trim().toLowerCase() === 'text/event-stream'
       ) {
         streaming = true;
         clock.clear(deadline);
         deadline = clock.set(() => {
+          if (terminal) return;
+          terminal = true;
           projected.destroy();
         }, limits.streamLifetimeMs);
       }
@@ -3290,6 +3372,10 @@ interface LegacySseHandle {
   close(): Promise<void>;
 }
 
+type ReleaseRequestLease = () => void;
+type RetainRequestLease = () => ReleaseRequestLease | undefined;
+type RequestLeaseLookup = (response: object) => RetainRequestLease | undefined;
+
 interface LegacySseModule {
   readonly mountLegacySseCompatibility: (
     router: Express,
@@ -3300,6 +3386,7 @@ interface LegacySseModule {
         HttpLimits,
         'maxLegacySseSessions' | 'legacySessionIdleTimeoutMs'
       >;
+      readonly lookupRequestLease: RequestLeaseLookup;
       readonly onerror: (error: Error) => void;
     }
   ) => LegacySseHandle;
@@ -3353,19 +3440,20 @@ export function buildHttpExpressApplication(
   limits: HttpLimits,
   handler: NodeMcpRequestHandler,
   clock: DeadlineClock = SYSTEM_CLOCK,
-  mountCompatibility?: (application: Express) => void
+  mountCompatibility?: (application: Express, lookupRequestLease: RequestLeaseLookup) => void
 ): Express {
   const application = express();
+  const admission = concurrentRequestAdmission(limits.maxConcurrentRequests);
   application.use(exactHostValidation(security.allowedHosts));
   application.use(exactOriginValidation(security.allowedOrigins));
-  application.use(concurrentRequestLimit(limits.maxConcurrentRequests));
+  application.use(admission.middleware);
   application.use(bodyReceiptDeadline(limits.bodyReceiptTimeoutMs));
   application.use(bodyTypeAndDeclaredSize(limits.bodyBytes));
   application.use(express.json({ limit: limits.bodyBytes }));
   application.use(bodyErrorHandler);
   application.use(stopAfterAnswered);
   application.use(responseDeadline(limits, clock));
-  mountCompatibility?.(application);
+  mountCompatibility?.(application, admission.lookupRequestLease);
   application.all('/mcp', security.authenticate, invokeNodeHandler(handler));
   application.use(terminalErrorHandler);
   return application;
@@ -3387,14 +3475,17 @@ try {
     onerror: diagnose
   });
   const nodeHandler = dependencies.adaptHandler(handler, { onerror: diagnose });
-  let mountCompatibility: ((expressApplication: Express) => void) | undefined;
+  let mountCompatibility:
+    | ((expressApplication: Express, lookupRequestLease: RequestLeaseLookup) => void)
+    | undefined;
   if (security.legacySseEnabled) {
     const legacyModule = await dependencies.loadLegacySse();
-    mountCompatibility = (expressApplication) => {
+    mountCompatibility = (expressApplication, lookupRequestLease) => {
       legacy = legacyModule.mountLegacySseCompatibility(expressApplication, {
         application,
         authenticate: security.authenticate,
         limits,
+        lookupRequestLease,
         onerror: diagnose
       });
     };
@@ -3554,7 +3645,7 @@ git status --short
 ```
 
 Expected: every deterministic gate passes; the networked dependency gate still confirms the approved
-registry state; only the eleven Task 7b files named above are part of this slice. Do not run against a
+registry state; only the twelve Task 7b files named above are part of this slice. Do not run against a
 production firewall.
 
 ```bash
@@ -3564,6 +3655,7 @@ git add \
   src/http/runtime.ts \
   tests/http/legacy-sse.test.ts \
   tests/http/runtime.test.ts \
+  tests/http/task-7-review-fixes.test.ts \
   tests/integration/process-lifecycle.test.ts \
   tests/architecture/execution-boundary.test.ts \
   tests/foundation/package-contract.test.ts \
@@ -3577,203 +3669,1446 @@ git commit -m "feat: add isolated legacy SSE compatibility"
 
 **Files:**
 - Create: `scripts/run-conformance.mjs`
+- Create: `tests/conformance/run-conformance.test.mjs`
+- Modify: `tests/architecture/execution-boundary.test.ts`
+- Modify: `tests/foundation/package-contract.test.ts`
+- Modify: `vitest.config.ts`
 - Modify: `package.json`
 
-**Interfaces:**
-- `node scripts/run-conformance.mjs 2025-11-25` runs official `server-initialize`, `ping`, and `tools-list` scenarios against the real product server.
-- `node scripts/run-conformance.mjs 2026-07-28` runs official `tools-list` and `input-required-result-unsupported-methods` at the draft revision against the real product server.
-- The harness reaches the final executable composition seam, binds the real factory to an ephemeral loopback port, passes no expected-failure file, propagates every non-zero exit, and always independently closes the handler, listener, owned application runtime, and private temporary state directory.
-- The runner forcibly replaces ambient firewall credentials with inert sentinels and forces read-only mode. Listing and lifecycle scenarios must never contact an OPNsense target.
+**Interfaces and non-negotiable boundaries:**
+- `node scripts/run-conformance.mjs 2025-11-25` runs exactly three official scenarios in order:
+  `server-initialize`, `ping`, `tools-list`.
+- `node scripts/run-conformance.mjs 2026-07-28` runs exactly three official scenarios in order:
+  `tools-list`, `input-required-result-unsupported-methods`, `http-header-validation`.
+  Across both commands there are exactly six child invocations. The official package and lock remain
+  pinned exactly at `@modelcontextprotocol/conformance@0.2.0-alpha.9`.
+- The executable composition is the product composition: call `createDefaultApplicationRuntime()`,
+  then real `startHttp(applicationRuntime.application, { port: 0 })`. Do not import or call
+  `createMcpHandler`, `toNodeHandler`, `createMcpExpressApp`, `createServerFactory`, HTTP middleware,
+  or limit internals. Task 8 does not modify `src/http/runtime.ts`; Task 7b must retain Task 7's
+  terminal response-deadline state from `5438f21` and Task 8 consumes the resulting runtime only.
+- Before opening either listener, run an executable fail-closed product preflight against the real
+  application. The first capability exposed on HTTP must be object-identical to the foundation
+  `serverStatusCapability`, named exactly `server_status`, accept strict `{}`, and retain the exact
+  local read policy: `effect=read`, only `server.status`, no feature flag, backup/audit/confirmation
+  `none`, `readOnlyHint=true`, `destructiveHint=false`, and `openWorldHint=false`. Dispatch that real
+  capability through `dispatchApplicationCapability()` and require the exact read-only success shape.
+  Its source dependency contract allows only Zod plus the closed kernel and forbids OPNsense client,
+  network, filesystem, process, or transport imports. Identity, dependency reachability, and real
+  dispatch together prove the foundation handler used by alpha.9 does not contact OPNsense. Any order,
+  schema, metadata, identity, dependency, or output drift raises one stable
+  `ConformanceProductContractError` before `startHttp`, without a fixture capability or auth/policy
+  bypass.
+- The official server CLI has no custom-header flag. Put a narrowly owned, test-only HTTP proxy on
+  ephemeral `127.0.0.1`; it injects one static sentinel `Authorization: Bearer ...`, replaces only
+  upstream `Host` with the real runtime host, and forwards the request method/body and all relevant
+  MCP headers. It streams upstream status, headers, JSON, and SSE back without buffering. The real
+  `/mcp` endpoint still performs product bearer, Host, exact-Origin, body, concurrency, deadline,
+  protocol, and Task 7b default-off legacy-SSE enforcement. This private static bearer is neither
+  OAuth nor suitable for remote or production use, and no production auth bypass or API is added.
+- Both product and proxy URLs must match the raw canonical grammar
+  `http://127.0.0.1:<1..65535>/mcp` before constructing a `URL`; explicit ports `1`, `80`, and `65535`
+  are valid, while omission, zero, a leading zero, overflow, credentials, query, fragment (including
+  bare `?`/`#`), or any other protocol/hostname/path is invalid. Return an immutable parsed projection
+  containing the original href, numeric port, and exact `Host` authority so proxy code never depends
+  on `URL.port`, which normalizes explicit port `80` to empty. Reject non-TCP listener addresses. The
+  proxy accepts only `/mcp`, owns a finite maximum of 16 sockets, and sets
+  `server.maxRequestsPerSocket` to the separate exact constant
+  `MAX_PROXY_REQUESTS_PER_SOCKET=16`; it never inherits the product's larger limit. It uses finite
+  Node header/request/keepalive limits,
+  tracks every accepted socket, and force-destroys active sockets during close so `server.close()`
+  cannot hang cleanup. It also enforces the product `bodyBytes` limit itself: reject a declared
+  oversized `Content-Length` before opening upstream, count streamed/chunked bytes, and terminate
+  both legs with a generic `413` as soon as the running count crosses the limit.
+- Header forwarding is an ordered `rawHeaders` transform, not an object spread. On requests remove
+  every inbound `Host` and `Authorization`, all standard hop-by-hop fields, and every field nominated
+  by every `Connection` occurrence; append exactly one upstream `Host` and exactly one sentinel
+  `Authorization`. Apply the same standard-plus-`Connection`-nominated filtering to upstream response
+  `rawHeaders`. Preserve all remaining duplicates, casing, order, MCP semantic headers, response
+  status/status-message, and streaming chunk boundaries.
+- Every conformance child has a fixed 60-second wall deadline. On expiry send `SIGTERM`, wait a fixed
+  2 seconds, then send `SIGKILL` if the child has not closed. Allow a final fixed 2 seconds for the
+  `close` event, then call `child.unref()` and reject rather than hang if even SIGKILL is not observed. Clear all
+  timers and reject on timeout, signal termination, spawn error, null code, or any non-zero code.
+  Child deadline/grace/confirmation timers remain referenced until their single settlement; a pending
+  Promise is not a Node event-loop owner and an `unref()`'d deadline could otherwise let the runner exit
+  `0` before it fires. Only the direct-process watchdog installed after a reported failure is unreferenced.
+  Spawn exactly `process.execPath` with the output of `buildScenarioArgv(...)` and
+  `{ stdio: 'inherit', env: process.env }`; never duplicate or hand-build the argv in the child
+  runner. Never pass `--suite`, `--force`, or `--expected-failures`; there is no expected-failure
+  baseline.
+- A child exit code of `0` is necessary but insufficient because conformance alpha.9 exits `0` when a
+  scenario contains `WARNING` checks. Before starting the next scenario, validate exactly one
+  alpha.9 `checks.json` below that scenario's private output directory. The directory chain and report
+  must be real, non-symbolic-link entries whose resolved paths stay below the real state directory;
+  the report must be a non-empty regular file no larger than 1 MiB, valid JSON, a non-empty array of
+  check records, contain at least one `SUCCESS`, and contain only `SUCCESS` or `INFO` statuses. Missing,
+  duplicate, escaped, symbolic-link, oversized, malformed, empty, `WARNING`, `FAILURE`, `SKIPPED`, or
+  unknown-status evidence fails closed with a redacted `ConformanceReportError`. Put a referenced
+  1-second deadline around each report validation and keep observing the underlying Promise if it
+  settles late.
+- Put a separate referenced 1-second acquisition deadline around each of these seven sequential phases:
+  `makeStateDirectory`, `installEnvironment`, `createApplicationRuntime`, product preflight,
+  `startProductHttp`, `startProxy`, and `resolveExecutable`. A timeout is a stable
+  `ConformanceStartupTimeoutError`; the underlying Promise stays observed. If a timed-out acquisition
+  later fulfills, immediately remove its state directory, restore its environment owner, or close its
+  application/HTTP/proxy owner as applicable. Track those late cleanup Promises in original startup
+  order, give arriving cleanup operations their own referenced 1-second deadlines, and wait a final
+  referenced 1-second late-arrival grace before state removal and final environment restoration.
+  Rejection or fulfillment after the grace remains observed, but is reported honestly as closure not
+  confirmed; it must never become an unhandled rejection or a success claim.
+- Cleanup has fixed deterministic ownership order: proxy listener, product HTTP runtime, owned
+  application runtime. Start all three close operations concurrently and put an independent finite
+  1-second deadline around each owner. Every owner, report, state-removal, and environment-restoration
+  deadline remains referenced until settlement; tests must prove this with real timer handles.
+  Only after all three have fulfilled, rejected, or timed out, recursively remove the private
+  state/results directory under its own finite 1-second deadline. A timed-out owner is reported as
+  **not confirmed closed**; the deadline only guarantees that the runner settles. Aggregate errors as
+  primary, proxy, HTTP, application, late-startup, temp-state, environment, flattening nested
+  `AggregateError`s within each position. A proxy-start failure must independently force-close the listener/sockets it
+  created before rejecting because it has not yet returned an owner. The loop stops on its first
+  child failure: seven successful startup/preflight phases consume less than 7 seconds; two
+  just-under-60-second child successes, two 1-second report validations, and one 64-second timeout
+  consume less than 186; owner, temp, environment, and direct-exit phases consume at most 4 more. The
+  direct failure bound is therefore strictly below 197 seconds. That direct child-failure path has no
+  late-startup slot, so it does not wait the late-arrival grace. The all-success path is below 193
+  seconds. A startup timeout path is strictly below 13 seconds: less than 7 seconds of sequential
+  startup, then at most 1 second for concurrent normal owners, 2 seconds for late-arrival plus late
+  cleanup, 1 second each for state and environment, and the 1-second direct-exit watchdog.
+  The real subprocess test installs its own referenced watchdog immediately after spawn: `SIGTERM` at
+  198 seconds, `SIGKILL` 2 seconds later, final close confirmation 2 seconds later, all before its
+  210-second Vitest timeout. PID capture and a `finally` kill/residue check are mandatory; Vitest's
+  timeout alone is not process ownership.
+- Before constructing the default application, delete all ambient `OPNSENSE_*`, `MCP_*`, `ENABLE_*`,
+  and `IAC_*` values plus the exact guardrail names `READ_ONLY`, `ALLOWED_RESOURCES`,
+  `ENABLED_FEATURE_FLAGS`, `AUTO_BACKUP`, `AUTO_BACKUP_STRICT`, `AUDIT_LOG`, `AUDIT_LOG_STRICT`, and
+  `BACKUP_PATH`. Replace them with an explicit read-only, loopback-only environment: HTTP enabled,
+  legacy SSE disabled, empty origins/resources/features, inert OPNsense URL `https://127.0.0.1:9/api`,
+  sentinel credentials, every shell/SSH/restore/IaC switch false, and all backup/audit paths beneath
+  the private temp directory. No scenario may contact a firewall, and no sentinel may appear in child
+  argv, stdout, stderr, response bodies, thrown diagnostics, or retained files.
+- `installConformanceEnvironment(...)` returns an idempotent environment owner. Before its first
+  deletion it snapshots exact presence/value pairs for every owned prefix/exact/replacement name. Its
+  `restore()` deletes all currently owned names (including names added during the run) and restores
+  the snapshot, while leaving every non-owned name and any mutation to it untouched. Installation
+  rolls itself back if assignment fails part-way. The runner has exclusive ownership of those names
+  in its short-lived process; a concurrent writer to an owned name is intentionally overwritten by
+  restoration, while unrelated mutations survive. Restoration runs in the final cleanup phase after
+  every partial-start path, under its own 1-second deadline, and its failure is aggregated last.
+- The direct executable delegates to an exported `runConformanceCli(...)` process-boundary seam. On
+  failure it emits one fixed diagnostic with no caller-controlled error name or message, marks exit
+  status `1`, and installs the sole unreferenced timer in this runner: a 1-second `process.exit(1)`
+  watchdog. If no handle remains, normal event-loop exhaustion exits with status `1`; if a failed or
+  timed-out owner retains a referenced handle, the watchdog forces termination. A real subprocess test
+  must keep an interval referenced, inject a poison-named failure through the seam, and prove exact
+  redacted stderr, exit `1`, no signal, and bounded termination.
 
-- [ ] **Step 1: Prove the conformance entry is absent**
+**Official evidence fixed for this task:**
+- Use only the installed official package from
+  `https://github.com/modelcontextprotocol/conformance` and the official Streamable HTTP draft at
+  `https://modelcontextprotocol.io/specification/draft/basic/transports/streamable-http`.
+- The installed official CLI `server --help` has `--url`, `--scenario`, `--suite`,
+  `--expected-failures`, `--output-dir`, `--spec-version`, `--force`, and `--verbose`, but no custom
+  request-header or server-timeout option. Therefore auth injection belongs only in the private proxy,
+  while the parent owns the child deadline.
+- Official draft Streamable HTTP requires intermediaries to forward unrecognized MCP headers and
+  preserves JSON-or-SSE responses; it requires `MCP-Protocol-Version`, `Mcp-Method`, and applicable
+  `Mcp-Name` validation. The alpha.9 `http-header-validation` implementation sends raw positive and
+  negative header cases, so the proxy must not synthesize or normalize MCP semantic headers.
 
-Run:
+- [ ] **Step 1: Write the failing package and architecture contracts**
 
-```bash
-npm run build
-node scripts/run-conformance.mjs 2025-11-25
+Extend `tests/foundation/package-contract.test.ts` to assert the scripts and both manifest/lock pins:
+
+```ts
+expect(document.scripts['test:conformance:2025']).toBe(
+  'npm run build && node scripts/run-conformance.mjs 2025-11-25'
+);
+expect(document.scripts['test:conformance:2026']).toBe(
+  'npm run build && node scripts/run-conformance.mjs 2026-07-28'
+);
+expect(document.scripts['test:conformance']).toBe(
+  'npm run test:conformance:2025 && npm run test:conformance:2026'
+);
+expect(document.devDependencies['@modelcontextprotocol/conformance']).toBe('0.2.0-alpha.9');
+expect(lock.packages['']?.devDependencies?.['@modelcontextprotocol/conformance']).toBe(
+  '0.2.0-alpha.9'
+);
+expect(lock.packages['node_modules/@modelcontextprotocol/conformance']).toMatchObject({
+  version: '0.2.0-alpha.9',
+  resolved:
+    'https://registry.npmjs.org/@modelcontextprotocol/conformance/-/conformance-0.2.0-alpha.9.tgz',
+  integrity:
+    'sha512-Bi5P5TQlOQGPJxCT7UAHbpG7wsR7sNZskHGtCoZBo6vDu416D2FXPgM4wKbg91teIgj4HjGkhnzlvP7U2dszfQ==',
+  dev: true
+});
 ```
 
-Expected: FAIL with module-not-found because the runner is not created yet.
+Add `devDependencies?: Record<string, string>` to the existing lock root projection. Do not run
+`npm install`; package and lock already carry the required exact alpha.9 pin.
 
-- [ ] **Step 2: Create the exact official conformance runner**
+Also read `vitest.config.ts` in this contract and assert its exact discovery glob:
 
-Create `scripts/run-conformance.mjs`:
+```ts
+expect(vitestConfig).toContain("include: ['tests/**/*.test.{ts,mjs}']");
+```
+
+After creating the dynamically importing harness in Step 2, change only that line in
+`vitest.config.ts` before recording RED:
+
+```ts
+include: ['tests/**/*.test.{ts,mjs}'],
+```
+
+Do not defer the config change to the green implementation. The executable JavaScript harness must be
+listed before its runner module exists and be part of plain `vitest run`, `npm test`, and
+`npm run verify`; a focused positional filter does not override an excluding configured `include`.
+
+Extend `tests/architecture/execution-boundary.test.ts` with a source contract:
+
+```ts
+it('routes conformance only through the owned default product HTTP stack', async () => {
+  const source = await readFile('scripts/run-conformance.mjs', 'utf8');
+  expect(source).toContain("from '../dist/app/default-application.js'");
+  expect(source).toContain("from '../dist/app/application-context.js'");
+  expect(source).toContain(
+    "from '../dist/capabilities/foundation/server-status.js'"
+  );
+  expect(source).toContain("from '../dist/http/runtime.js'");
+  expect(source).toContain('createApplicationRuntime: () => createDefaultApplicationRuntime()');
+  expect(source).toContain('startProductHttp: startHttp');
+  expect(source).toContain(
+    'dependencies.startProductHttp(applicationRuntime.application, { port: 0 })'
+  );
+  expect(source).toMatch(
+    /buildScenarioArgv\(\s*executable,\s*proxyUrl,\s*version,\s*scenario,\s*stateDirectory\s*\)/u
+  );
+  expect(source).toContain('process.execPath');
+  expect(source).toContain("stdio: 'inherit'");
+  expect(source).toContain('request.rawHeaders');
+  expect(source).toContain('upstreamResponse.rawHeaders');
+  expect(source).toContain('limits.bodyBytes');
+  expect(source).toContain('MAX_PROXY_REQUESTS_PER_SOCKET = 16');
+  expect(source).toContain('server.maxRequestsPerSocket = MAX_PROXY_REQUESTS_PER_SOCKET');
+  expect(source).toContain('assertConformanceProductContract');
+  expect(source).toContain('dependencies.assertProductContract');
+  expect(source).toContain('validateScenarioReport');
+  expect(source).toContain('dependencies.validateReport');
+  expect(source).toContain('environmentOwner.restore()');
+  expect(source).toContain('export async function runConformanceCli');
+  expect(source).toContain('dependencies.exit(1)');
+  expect(source.match(/handle\.unref\(\)/gu)).toHaveLength(1);
+  for (const forbidden of [
+    'createMcpHandler',
+    'toNodeHandler',
+    'createMcpExpressApp',
+    'createServerFactory',
+    'configureNodeHttpLimits',
+    'enforceHttpLimits',
+    'jsonBodyLimit'
+  ]) {
+    expect(source).not.toContain(forbidden);
+  }
+  expect(source).not.toMatch(/MCP_HTTP_TOKEN\s*:\s*['"]false/u);
+});
+```
+
+Add a second architecture contract over
+`src/capabilities/foundation/server-status.ts`. Parse its import specifiers and require exactly
+`['zod/v4', '../kernel.js']`; reject any import containing `opnsense`, `client`, `http`, `net`, `fs`,
+`process`, or `transport`, plus direct `fetch`, socket, filesystem, process, or environment access.
+Assert the Task 8 runner references the exported `serverStatusCapability` by identity and dispatches
+only through `dispatchApplicationCapability`. Permit those two application-context exports only in
+the test-owned `scripts/run-conformance.mjs` preflight; this exception must not widen any permitted
+import edge in `src/` or the production architecture graph. The runtime tests, not these strings, prove exact
+ordering, metadata, strict empty input, dispatch output, and refusal before listener creation.
+
+Also assert that Task 8 does not edit or import the deprecated SSE module. The proxy may use
+`node:http`; it may not import Express or any MCP server package. These source checks establish the
+composition boundary only; the executable tests below—not string matching—prove raw duplicate
+headers, body bounds, exact spawn options, report validation, referenced deadlines, direct-process
+termination, and bounded ownership behavior.
+
+- [ ] **Step 2: Write the failing executable harness tests**
+
+Create `tests/conformance/run-conformance.test.mjs` with the AGPL header. Load the named test seams
+from `scripts/run-conformance.mjs` dynamically in `beforeAll` and implement all of these tests before
+the runner:
+
+```js
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { EventEmitter, once } from 'node:events';
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { createServer, request as httpRequest } from 'node:http';
+import { connect } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { spawn } from 'node:child_process';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+
+let runner;
+beforeAll(async () => {
+  runner = await import('../../scripts/run-conformance.mjs');
+});
+```
+
+Destructure the named seams inside each test (or a helper called only after `beforeAll`):
+`CONFORMANCE_SENTINELS`, `MAX_CONFORMANCE_REPORT_BYTES`,
+`MAX_PROXY_REQUESTS_PER_SOCKET`, `SCENARIOS_BY_VERSION`, `STARTUP_PHASE_TIMEOUT_MS`,
+`assertConformanceProductContract`, `buildScenarioArgv`, `installConformanceEnvironment`,
+`parseExactLoopbackMcpUrl`, `runConformance`, `runConformanceChild`, `runConformanceCli`,
+`startLoopbackProxy`, and `validateScenarioReport`. Do not use a top-level static import of the missing
+runner: `vitest list` must collect this file during RED, while `vitest run` fails in `beforeAll` because
+the module/seams do not yet exist.
+
+Use real local upstream/proxy listeners for forwarding tests and injectable fake children/owners for
+lifecycle tests. The file must cover these exact behaviors:
+
+1. **Raw streaming proxy, header boundaries, and auth injection.** Start a real upstream loopback
+   server that records method, URL, `rawHeaders`, and streamed body. Use `node:net` to send a raw POST
+   containing two `Host` lines, two wrong `Authorization` lines, two `Connection` lines nominating
+   `X-Hop-In-A` and `X-Hop-In-B`, both nominated fields, `Accept: application/json,
+   text/event-stream`, `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`, a duplicated
+   `Mcp-Param-Region`, and an exact-limit body. Compare the upstream `rawHeaders` array: all four
+   hostile Host/Auth occurrences, both Connection lines, and both nominated fields are absent;
+   exactly one upstream Host and one sentinel bearer are appended; all MCP fields retain their
+   original spelling, order, duplicates, and values; the body is byte-identical. Make upstream reply
+   with `207 Custom`, two `Connection` lines nominating `X-Hop-Out-A`/`X-Hop-Out-B`, both nominated
+   fields, duplicated `Mcp-Session-Id`, and two SSE chunks separated by a deferred promise. Assert the
+   raw client receives neither Connection-nominated field, receives the exact MCP duplicates plus
+   status/status-message, and observes chunk one before chunk two is released. This proves both
+   forwarding directions from raw arrays; object-level `request.headers` assertions are insufficient.
+2. **Body and connection bounds.** With `bodyBytes: 4`, send `Content-Length: 5` without completing
+   the body and assert a generic `413`, `Connection: close`, and zero upstream connections. Send a
+   chunked `2 + 3` byte body, assert the running counter returns the same generic `413`, destroys the
+   partially opened upstream leg, and leaves no retained socket; send exactly four streamed bytes and
+   assert success. Open held sockets beyond the limit, prove admission above 16 is destroyed, then
+   call `close()` twice and prove both calls return the same promise and every accepted socket closes.
+   Assert `MAX_PROXY_REQUESTS_PER_SOCKET === 16`; on one real raw keep-alive socket send 17 complete
+   requests and prove exactly the first 16 reach upstream. Depending on the current Node 22 close
+   timing, the seventeenth must either receive Node's local `503` plus `Connection: close` or find the
+   socket already closed; it must never be forwarded. Also assert the constructed server property is
+   exactly 16 even when `limits.maxRequestsPerSocket` is larger.
+   Separately abort inbound, upstream-request, upstream-response, and downstream legs and assert the
+   coupled peer is destroyed without an unhandled error or credential-bearing body.
+3. **Exact raw URL/path table.** Assert `parseExactLoopbackMcpUrl()` accepts canonical explicit ports
+   `1`, `80`, and `65535` and returns `{ href, hostname: '127.0.0.1', port: <number>,
+   host: '127.0.0.1:<digits>', pathname: '/mcp' }`; specifically prove explicit `:80` remains numeric
+   `80` with Host `127.0.0.1:80` even though `new URL(...).port` would be empty. Reject `:0`, omitted
+   port, `:01`, `:080`, `:00080`, `:65536`, uppercase/alternate protocol or host, `localhost`, IPv6,
+   credentials, whitespace/percent-encoded authority tricks, `/`, `/other`, `/mcp/`, query and
+   fragment variants including bare `/mcp?` and `/mcp#`.
+   Also reject every canonical-looking URL prefixed or suffixed by LF, CRLF, tab, space, or NUL.
+   Stub the global `URL` constructor for that invalid-input table and assert it is never called: raw
+   syntax and complete-input consumption must fail before normalization.
+
+   ```js
+   const canonical = 'http://127.0.0.1:80/mcp';
+   const urlConstructor = vi.fn();
+   vi.stubGlobal('URL', urlConstructor);
+   try {
+     for (const boundary of ['\n', '\r\n', '\t', ' ', '\0']) {
+       expect(() => parseExactLoopbackMcpUrl(`${boundary}${canonical}`)).toThrow(
+         'Invalid loopback MCP URL'
+       );
+       expect(() => parseExactLoopbackMcpUrl(`${canonical}${boundary}`)).toThrow(
+         'Invalid loopback MCP URL'
+       );
+     }
+     expect(urlConstructor).not.toHaveBeenCalled();
+   } finally {
+     vi.unstubAllGlobals();
+   }
+   ```
+
+   Through a real proxy, raw-request
+   `/`, `/other`, `/mcp/`, `/mcp?x=1`, and absolute-form URLs; each returns local `404` and creates no
+   upstream request. Assert the returned proxy URL and the accepted upstream URL both expose TCP
+   `127.0.0.1`, an ephemeral non-zero port, and exact `/mcp`. Inject a real occupied-port listen
+   failure and a non-TCP address result; prove the unreturned proxy server and all sockets are forced
+   closed before rejection.
+4. **Environment replacement, rollback, and restoration.** Seed an isolated environment with poison
+   values for every owned prefix/exact guardrail, absent replacement keys, and an unrelated key. Call
+   `installConformanceEnvironment(temp, env)` and assert the complete replacement object:
+   `READ_ONLY=true`, HTTP true on `127.0.0.1`, legacy SSE false, empty resource/origin/feature values,
+   inert port-9 OPNsense URL, false privileged switches, and backup/audit paths below `temp`. Mutate
+   the unrelated key and add a new `OPNSENSE_*` name after installation; call `restore()` twice and
+   assert the exact original presence/values return, the new owned name disappears, and the unrelated
+   mutation survives. Repeat with a Proxy environment whose setter throws half-way through assignment
+   and assert installation restores the pre-call snapshot before rejecting. Assert no poison survives
+   while installed and no sentinel credential is included in `buildScenarioArgv()`.
+5. **Real product preflight before listeners.** Test `assertConformanceProductContract()` with
+   injectable list/dispatch seams. Accept only an object-identical first `serverStatusCapability`,
+   exact title/description, exact `server_status` identity, exact HTTP/stdio transports,
+   annotations (including `idempotentHint=true`), policy, strict `{}` parsing, and exact dispatched
+   `{ status:'ok', readOnly:true, version:'0.1.0' }` success. Independently vary ordering, identity,
+   name, schema acceptance, each policy/annotation field, dispatch refusal/confirmation/malformed
+   output, synchronous throw, and rejection; every drift case is the same stable
+   `ConformanceProductContractError`. A never-settling dispatch is instead exercised through the
+   referenced product-preflight startup phase and yields the stable `ConformanceStartupTimeoutError`.
+   In orchestration record
+   `application -> product-preflight -> startHttp`; any preflight drift creates no HTTP/proxy listener
+   and no child. Run the default seam once against the real default application. Combined with the
+   architecture import contract, this proves the exercised handler is the network-free foundation
+   implementation, not a test fixture or direct handler bypass.
+6. **Exact scenarios, argv, and spawn call.** Assert `SCENARIOS_BY_VERSION` equals the two ordered
+   three-entry arrays above. Build all invocations and compare the six complete arrays, each exactly:
+
+   ```js
+   [
+     executable,
+     'server',
+     '--url',
+     proxyUrl,
+     '--scenario',
+     scenario,
+     '--spec-version',
+     version,
+     '--verbose',
+     '--output-dir',
+     `${stateDirectory}/results/${version}/${scenario}`
+   ]
+   ```
+
+   Assert the flattened argv contains none of `--suite`, `--force`, `--expected-failures`, any
+   `Authorization` string, or any sentinel. With a spawn spy that immediately emits `close(0, null)`,
+   call `runConformanceChild()` and assert its single call is exactly
+   `spawnProcess(process.execPath, buildScenarioArgv(...), { stdio: 'inherit', env: process.env })`.
+   This is the executable proof that the runner and argv builder cannot drift.
+7. **Strict machine-readable scenario reports.** Materialize the real alpha.9 layout
+   `<scenario-output>/server-<scenario>-<timestamp>/checks.json` and assert
+   `validateScenarioReport()` accepts a non-empty array containing `SUCCESS` and `INFO`. Assert
+   `MAX_CONFORMANCE_REPORT_BYTES` is exactly `1_048_576`. Then cover, independently: missing scenario
+   directory, missing report, two run directories/reports, unexpected sibling entries, symlinked
+   results/version/scenario/run/report entries, a realpath outside the state root, a directory instead of a regular
+   report, zero bytes, more than 1 MiB, malformed JSON, non-array JSON, empty array, non-record rows,
+   missing/non-string status, no `SUCCESS`, and each of `WARNING`, `FAILURE`, `SKIPPED`, or an unknown
+   status. Every rejection is the same message-free `ConformanceReportError` and contains no path,
+   report content, scenario-controlled text, poison, or sentinel. In orchestration, record
+   `child -> report -> child -> report`; prove a warning or malformed first report prevents the next
+   child, a never-settling validator is rejected by its referenced 1-second deadline, and late
+   fulfillment/rejection stays observed. A child `0` without accepted evidence is not success.
+8. **Child deadline, propagation, and real kill.** Under fake timers, return a fake EventEmitter child
+   whose `kill` records signals. Advance 60 seconds and assert one `SIGTERM`; advance 2 seconds without
+   `close` and assert one `SIGKILL`; emit `close` and assert a timeout rejection. Independently assert
+   close code `0` resolves, code `7`, null code, unexpected signal, and spawn `error` reject. In every
+   case assert deadline/grace/kill-confirmation timers remain referenced while active, are cleared on
+   settlement, and one child outcome settles once. A real child timeout handle must report
+   `hasRef() === true`; do not substitute a mere `unref()` spy.
+   Add a no-close-after-SIGKILL case and prove it rejects at the final fixed bound and calls
+   `child.unref()`. Then inject a real `spawnProcess` that first asserts the requested executable,
+   exact built argv, and options, but launches this inline fixture instead:
+
+   ```js
+   spawn(process.execPath, [
+     '-e',
+     "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"
+   ], { stdio: 'ignore' });
+   ```
+
+   Map the requested 60-second/2-second timers to 1,000 ms/500 ms real test timers so Node has time
+   to install its signal handler even on a loaded CI host. Capture its PID,
+   assert the runner reaches `SIGKILL`, rejects, and poll `process.kill(pid, 0)` until it throws
+   `ESRCH`. In `finally`, kill any still-live PID. A timeout test is invalid if it leaves a child.
+9. **Every partial-start, never-settling owner, and cleanup mode.** Use `it.each` over synchronous
+   throw and rejected promise for
+   `createDefaultApplicationRuntime`, `startHttp`, `startLoopbackProxy`, and each of the six scenario
+   children. For each of `makeStateDirectory`, `installEnvironment`, `createApplicationRuntime`,
+   product preflight, `startHttp`, `startLoopbackProxy`, and `resolveExecutable`, inject a
+   never-settling Promise and prove its exact referenced 1-second startup deadline terminates the run.
+   Then fulfill each timed-out acquisition during the late-arrival grace: late state is removed, late
+   environment is restored, and late application/HTTP/proxy owners are closed exactly once; late
+   executable fulfillment is observed and discarded. Reject after timeout and prove no unhandled
+   rejection. Hold fulfillment beyond the grace and require an honest not-confirmed-closed error,
+   while the attached late handler remains observed. Assert only owners successfully returned before the failure are closed, all returned
+   owners are attempted, temp removal starts only after the three bounded owner outcomes, environment
+   restoration is attempted in a final phase, and the primary error is first. For proxy, HTTP, and
+   application in turn, return a promise that never settles; advance the injectable 1-second timer
+   and prove `runConformance()` terminates with a named `ConformanceCleanupTimeoutError` in that
+   owner's stable slot, while explicitly recording that closure was not confirmed. Repeat with a
+   never-settling temp removal and environment restore. Give every owner/temp/restore failure in both
+   synchronous-throw and rejected-promise forms; assert the three owner operations begin before any
+   is released, temp removal waits for all owner outcomes, an installed environment owner restores
+   last after every later partial-start failure, a partially failed installation rolls itself back
+   immediately, every real owner/temp/environment timer reports `hasRef() === true` until it is
+   cleared, and final errors are exactly
+   the redacted stable slots
+   `[primary?, proxy, http, application, late-startup, temp-state, environment]`, with
+   `ConformanceCleanupTimeoutError` only in timed-out slots and no injected message retained. Include
+   nested aggregates and assert flattening remains within each owner slot.
+10. **Direct CLI failure and real forced exit.** Unit-test `runConformanceCli()` with injected success
+   and failure functions: success writes nothing and schedules nothing; failure with poison in both
+   `.name` and `.message` writes exactly `Conformance run failed\n`, marks status `1`, schedules exactly
+   one 1-second watchdog, and calls `unref()` only on that direct-watchdog handle. Then spawn a real
+   Node `--input-type=module -e` fixture which imports the repository runner after `npm run build`, creates a referenced
+   interval, and calls the seam with a poison-named rejected Promise. Assert stdout is empty, stderr is
+   exactly the fixed diagnostic with no poison/sentinel, exit code is `1`, signal is null, and the
+   process closes after the 1-second grace and before a 3-second outer bound. Register the PID before
+   awaiting output and kill it in `finally`; a source substring assertion is not termination evidence.
+11. **No sentinel leak, owned outer watchdog, and dedicated TMPDIR real runs.** Exercise proxy upstream failure, child
+   non-zero/timeout, cleanup timeout, and aggregate
+   cleanup failure while capturing returned bodies and `stderr`; assert no value from
+   `CONFORMANCE_SENTINELS` and no poison ambient credential appears. Diagnostics contain only the
+   fixed CLI failure line or stable internal categories—not caller-controlled error names/messages,
+   environment values, paths, report contents, or argv.
+   For each version create a dedicated empty directory, pass it as the subprocess `TMPDIR`, and spawn
+   the built runner with ambient poison `OPNSENSE_*`, `MCP_*`, `ENABLE_*`, `IAC_*`, and guardrail
+   variables. Immediately record the PID and install a referenced test-owned watchdog which sends
+   `SIGTERM` at 198 seconds, `SIGKILL` at 200 seconds if still open, and rejects if `close` is still
+   absent at 202 seconds. Give the Vitest case a 210-second bound, register stdout/stderr and cleanup
+   before its first assertion, and in `finally` kill any remaining PID then poll for `ESRCH`. A plain
+   Vitest timeout with no child destruction is forbidden. Assert exit `0`, captured stdout/stderr contains
+   no poison or sentinel, every selected child produced a strictly accepted machine-readable report
+   before cleanup, the dedicated `TMPDIR` is still exactly empty after exit, and no `results/`
+   or conformance state exists in the repository. Remove the dedicated parent in test teardown. These
+   are the real alpha.9 processes against the real authenticated default product HTTP runtime through
+   the private proxy, not mocks; a repository-only residue assertion is vacuous and insufficient.
+
+Use teardown with `Promise.allSettled` and force-destroy test sockets/children so a failed assertion
+cannot hang Vitest. Snapshot every `process.env` name a test changes and restore exact presence/value
+in `afterEach`, including `TMPDIR`, even after a partial assertion failure. Do not relax the real-run
+assertions or skip them in `npm test`.
+
+Now change `vitest.config.ts` to `include: ['tests/**/*.test.{ts,mjs}']`. This is test-discovery
+infrastructure, not the runner implementation. Run
+`npx vitest list tests/conformance/run-conformance.test.mjs` and require it to print the harness test
+names successfully even though `scripts/run-conformance.mjs` is still absent.
+
+- [ ] **Step 3: Build and record the expected red state**
+
+Run with the repository's Node 22 toolchain:
+
+```bash
+export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+npm run build
+npx vitest list tests/conformance/run-conformance.test.mjs
+npx vitest run \
+  tests/conformance/run-conformance.test.mjs \
+  tests/architecture/execution-boundary.test.ts \
+  tests/foundation/package-contract.test.ts
+```
+
+Expected: `vitest list` succeeds and names the `.mjs` harness; `vitest run` then FAILS from its dynamic
+`beforeAll` import because `scripts/run-conformance.mjs` and its named seams do not exist, while the
+package scripts also do not build first. The exact package/lock alpha.9 assertions already pass. Do
+not use `--passWithNoTests`; collection and failing module load are both required RED evidence.
+
+- [ ] **Step 4: Implement the owned runner around the real product runtime**
+
+The `.mjs` harness is already discoverable from RED. Do not add a second Vitest config or a special
+conformance-only test command.
+
+Create `scripts/run-conformance.mjs` with the AGPL header and these public seams/constants:
 
 ```js
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, readdir, realpath, rm } from 'node:fs/promises';
+import { createServer, request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createMcpExpressApp } from '@modelcontextprotocol/express';
-import { toNodeHandler } from '@modelcontextprotocol/node';
-import { createMcpHandler } from '@modelcontextprotocol/server';
-import { createDefaultApplicationRuntime } from '../dist/app/default-application.js';
 import {
-  configureNodeHttpLimits,
-  DEFAULT_HTTP_LIMITS,
-  enforceHttpLimits
-} from '../dist/http/limits.js';
-import { exactOriginValidation } from '../dist/http/origin.js';
-import { createServerFactory } from '../dist/mcp/server-factory.js';
+  dispatchApplicationCapability,
+  listApplicationCapabilities
+} from '../dist/app/application-context.js';
+import { createDefaultApplicationRuntime } from '../dist/app/default-application.js';
+import { serverStatusCapability } from '../dist/capabilities/foundation/server-status.js';
+import { startHttp } from '../dist/http/runtime.js';
 
-const version = process.argv[2];
-if (version !== '2025-11-25' && version !== '2026-07-28') {
-  throw new Error('Usage: node scripts/run-conformance.mjs 2025-11-25|2026-07-28');
+const LOOPBACK = '127.0.0.1';
+const CHILD_TIMEOUT_MS = 60_000;
+const CHILD_KILL_GRACE_MS = 2_000;
+const CHILD_KILL_CONFIRM_MS = 2_000;
+const REPORT_VALIDATION_TIMEOUT_MS = 1_000;
+export const STARTUP_PHASE_TIMEOUT_MS = 1_000;
+const LATE_STARTUP_ARRIVAL_GRACE_MS = 1_000;
+const LATE_STARTUP_CLEANUP_TIMEOUT_MS = 1_000;
+const OWNER_CLEANUP_TIMEOUT_MS = 1_000;
+const STATE_CLEANUP_TIMEOUT_MS = 1_000;
+const ENVIRONMENT_RESTORE_TIMEOUT_MS = 1_000;
+const DIRECT_EXIT_GRACE_MS = 1_000;
+const MAX_PROXY_CONNECTIONS = 16;
+export const MAX_PROXY_REQUESTS_PER_SOCKET = 16;
+const CONFORMANCE_VERSION = '0.2.0-alpha.9';
+
+export const MAX_CONFORMANCE_REPORT_BYTES = 1_048_576;
+
+export const SCENARIOS_BY_VERSION = Object.freeze({
+  '2025-11-25': Object.freeze(['server-initialize', 'ping', 'tools-list']),
+  '2026-07-28': Object.freeze([
+    'tools-list',
+    'input-required-result-unsupported-methods',
+    'http-header-validation'
+  ])
+});
+
+export const CONFORMANCE_SENTINELS = Object.freeze({
+  token: 'CONFORMANCE_HTTP_SENTINEL_TOKEN_0123456789',
+  requestState: 'CONFORMANCE_REQUEST_STATE_0123456789',
+  apiKey: 'conformance-sentinel-key',
+  apiSecret: 'conformance-sentinel-secret'
+});
+```
+
+Define the owned environment namespace and the injectable real timer once:
+
+```js
+const OWNED_ENVIRONMENT_PREFIXES = Object.freeze(['OPNSENSE_', 'MCP_', 'ENABLE_', 'IAC_']);
+const OWNED_ENVIRONMENT_EXACT = Object.freeze([
+  'READ_ONLY',
+  'ALLOWED_RESOURCES',
+  'ENABLED_FEATURE_FLAGS',
+  'AUTO_BACKUP',
+  'AUTO_BACKUP_STRICT',
+  'AUDIT_LOG',
+  'AUDIT_LOG_STRICT',
+  'BACKUP_PATH'
+]);
+
+const SYSTEM_TIMER = Object.freeze({
+  set: setTimeout,
+  clear: clearTimeout
+});
+
+function scheduleReferencedTimer(clock, callback, milliseconds) {
+  return clock.set(callback, milliseconds);
 }
 
-const stateDirectory = await mkdtemp(join(tmpdir(), 'opnsense-mcp-conformance-'));
-for (const key of Object.keys(process.env)) {
-  if (
-    /^(OPNSENSE_|MCP_|ENABLE_|IAC_)/.test(key) ||
-    key === 'READ_ONLY' ||
-    key === 'ALLOWED_RESOURCES' ||
-    key === 'ENABLED_FEATURE_FLAGS'
-  ) {
-    delete process.env[key];
-  }
+function isOwnedEnvironmentName(name) {
+  return (
+    OWNED_ENVIRONMENT_EXACT.includes(name) ||
+    OWNED_ENVIRONMENT_PREFIXES.some((prefix) => name.startsWith(prefix))
+  );
 }
-Object.assign(process.env, {
+```
+
+Implement `installConformanceEnvironment(stateDirectory, environment = process.env)` as a
+transactional owner. Build the replacement object below first; snapshot exact `{ present, value }`
+entries for the union of its keys and every currently owned key; delete all currently owned keys;
+then assign the explicit inert set (including both current and historical backup/audit path names so
+later product composition cannot inherit a host path):
+
+```js
+const replacements = Object.freeze({
   READ_ONLY: 'true',
   ALLOWED_RESOURCES: '',
   ENABLED_FEATURE_FLAGS: '',
-  MCP_REQUEST_STATE_SECRET: '0'.repeat(32),
-  MCP_HTTP_ENABLED: 'false',
+  AUTO_BACKUP: 'false',
+  AUTO_BACKUP_STRICT: 'true',
+  AUDIT_LOG_STRICT: 'true',
+  MCP_HTTP_ENABLED: 'true',
+  MCP_HTTP_HOST: LOOPBACK,
+  MCP_HTTP_PORT: '3000',
+  MCP_HTTP_TOKEN: CONFORMANCE_SENTINELS.token,
   MCP_LEGACY_SSE_ENABLED: 'false',
-  MCP_ALLOWED_HOSTS: '127.0.0.1,localhost',
+  MCP_ALLOWED_HOSTS: LOOPBACK,
   MCP_ALLOWED_ORIGINS: '',
+  MCP_REQUEST_STATE_SECRET: CONFORMANCE_SENTINELS.requestState,
   OPNSENSE_URL: 'https://127.0.0.1:9/api',
-  OPNSENSE_API_KEY: 'conformance-sentinel-key',
-  OPNSENSE_API_SECRET: 'conformance-sentinel-secret',
+  OPNSENSE_API_KEY: CONFORMANCE_SENTINELS.apiKey,
+  OPNSENSE_API_SECRET: CONFORMANCE_SENTINELS.apiSecret,
   OPNSENSE_VERIFY_TLS: 'true',
+  ENABLE_SSH_FEATURES: 'false',
+  ENABLE_SHELL_TOOLS: 'false',
+  ENABLE_RESTORE_TOOLS: 'false',
+  IAC_ENABLED: 'false',
+  BACKUP_PATH: join(stateDirectory, 'backups'),
+  AUDIT_LOG: join(stateDirectory, 'audit.jsonl'),
   OPNSENSE_BACKUP_PATH: join(stateDirectory, 'backups'),
   OPNSENSE_AUDIT_LOG: join(stateDirectory, 'audit.jsonl')
 });
-
-let applicationRuntime;
-let handler;
-let server;
-
-function listen(app) {
-  return new Promise((resolve, reject) => {
-    const listening = app.listen(0, '127.0.0.1', () => {
-      resolve();
-    });
-    server = listening;
-    configureNodeHttpLimits(listening);
-    listening.once('error', reject);
-  });
+const snapshotNames = new Set([
+  ...Object.keys(replacements),
+  ...Object.keys(environment).filter(isOwnedEnvironmentName)
+]);
+const snapshot = new Map(
+  [...snapshotNames].map((name) => [
+    name,
+    { present: Object.hasOwn(environment, name), value: environment[name] }
+  ])
+);
+for (const name of Object.keys(environment)) {
+  if (isOwnedEnvironmentName(name) || Object.hasOwn(replacements, name)) delete environment[name];
 }
+Object.assign(environment, replacements);
+```
 
-function closeServer() {
-  return new Promise((resolve, reject) => {
-    if (server === undefined) resolve();
-    else server.close((error) => (error === undefined ? resolve() : reject(error)));
-  });
-}
+Return `Object.freeze({ restore })`, where `restore` is idempotent and executes this exact algorithm:
 
-const scenarios =
-  version === '2025-11-25'
-    ? ['server-initialize', 'ping', 'tools-list']
-    : ['tools-list', 'input-required-result-unsupported-methods'];
-
-async function runScenario(url, scenario) {
-  const executable = fileURLToPath(
-    new URL('../node_modules/@modelcontextprotocol/conformance/dist/index.js', import.meta.url)
-  );
-  const args = [
-    executable,
-    'server',
-    '--url',
-    url,
-    '--scenario',
-    scenario,
-    '--spec-version',
-    version,
-    '--verbose'
-  ];
-  const exitCode = await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, args, { stdio: 'inherit' });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => {
-      if (signal !== null) reject(new Error(`Conformance terminated by ${signal}`));
-      else resolve(code ?? 1);
-    });
-  });
-  if (exitCode !== 0) {
-    throw new Error(`Conformance ${version}/${scenario} exited ${exitCode}`);
-  }
-}
-
-let primaryError;
-try {
-  applicationRuntime = createDefaultApplicationRuntime();
-  handler = createMcpHandler(
-    createServerFactory(applicationRuntime.application, 'http'),
-    {
-      legacy: 'stateless',
-      maxSubscriptions: DEFAULT_HTTP_LIMITS.maxSubscriptions,
-      onerror: (error) => process.stderr.write(`Conformance host error: ${error.name}\n`)
+```js
+function restore() {
+  for (const name of Object.keys(environment)) {
+    if (isOwnedEnvironmentName(name) || Object.hasOwn(replacements, name)) {
+      delete environment[name];
     }
-  );
-  const nodeHandler = toNodeHandler(handler, {
-    onerror: (error) => process.stderr.write(`Conformance adapter error: ${error.name}\n`)
-  });
-  const app = createMcpExpressApp({
-    host: '127.0.0.1',
-    allowedHosts: ['127.0.0.1', 'localhost'],
-    allowedOrigins: [],
-    jsonLimit: DEFAULT_HTTP_LIMITS.jsonBodyLimit
-  });
-  app.use(exactOriginValidation([]));
-  app.use(enforceHttpLimits());
-  app.all('/mcp', (request, response) => void nodeHandler(request, response, request.body));
-
-  await listen(app);
-  const address = server?.address();
-  if (address === undefined || address === null || typeof address === 'string') {
-    throw new Error('Conformance listener did not expose a TCP address.');
   }
-  const url = `http://127.0.0.1:${address.port}/mcp`;
-  for (const scenario of scenarios) await runScenario(url, scenario);
-} catch (error) {
-  primaryError = error;
-} finally {
-  const cleanupErrors = [];
-  for (const closePhase of [
-    () => closeServer(),
-    () => handler?.close() ?? Promise.resolve(),
-    () => applicationRuntime?.close() ?? Promise.resolve(),
-    () => rm(stateDirectory, { recursive: true, force: true })
-  ]) {
-    const [result] = await Promise.allSettled([Promise.resolve().then(closePhase)]);
-    if (result.status === 'rejected') cleanupErrors.push(result.reason);
-  }
-  if (primaryError !== undefined || cleanupErrors.length > 0) {
-    throw new AggregateError(
-      primaryError === undefined ? cleanupErrors : [primaryError, ...cleanupErrors],
-      'Conformance host or cleanup failed.'
-    );
+  for (const [name, entry] of snapshot) {
+    if (entry.present) environment[name] = entry.value;
   }
 }
 ```
 
-This loopback listener is deliberately test-only. It still applies the product exact-Origin and finite HTTP limits, but omits bearer authentication solely because the official conformance process has no token option. Product HTTP continues to go through `startHttp` and therefore cannot bypass authentication, Host validation, exact-Origin validation, or limits.
+If any delete or assignment throws during installation, call `restore()` before rethrowing the
+original error; if rollback also throws, throw `AggregateError([original, rollback])` in that order.
+Restoration owns only the prefixes, exact names, and explicit replacement keys. The process-isolation
+contract deliberately restores the initial value of an owned key even if another writer changed it
+during the run, but it never rewinds a non-owned key.
 
-The atomic `server-stateless` scenario mixes useful generic checks with mandatory conformance-only tools,
-dynamic list mutation, and fixture behavior; the remaining unselected `input-required-result-*` scenarios
-similarly prescribe named `test_*` tools or response schemas that are not product APIs. The harness cannot
-select only the generic assertions inside one scenario. Do not add those tools to the product catalog merely
-to make a generic server look conformant. Task 6 directly covers the omitted generic stateless/MRTR
-guarantees through beta.4: modern metadata validation, discovery/capabilities, version binding, signed request
-state, method/principal binding, tamper and replay rejection, and multi-round confirmation. This is an
-explicit coverage limit, not an expected-failure baseline.
+Validate the exact product behavior alpha.9 will exercise before opening a listener:
 
-- [ ] **Step 3: Ensure every conformance script builds first**
+```js
+function conformanceProductContractError() {
+  const error = new Error('Conformance product contract is unavailable');
+  error.name = 'ConformanceProductContractError';
+  return error;
+}
 
-Replace the three conformance scripts in `package.json` with:
+export async function assertConformanceProductContract(application, overrides = {}) {
+  const dependencies = {
+    list: listApplicationCapabilities,
+    dispatch: dispatchApplicationCapability,
+    expected: serverStatusCapability,
+    ...overrides
+  };
+  try {
+    const exposed = dependencies.list(application, 'http');
+    const first = exposed[0];
+    if (
+      first !== dependencies.expected ||
+      first.id !== 'server.status' ||
+      first.mcpName !== 'server_status' ||
+      first.title !== 'Server status' ||
+      first.description !==
+        'Report whether the MCP server is healthy and operating in read-only mode.' ||
+      first.annotations.readOnlyHint !== true ||
+      first.annotations.destructiveHint !== false ||
+      first.annotations.idempotentHint !== true ||
+      first.annotations.openWorldHint !== false ||
+      first.transports.length !== 2 ||
+      first.transports[0] !== 'stdio' ||
+      first.transports[1] !== 'http' ||
+      first.policy.effect !== 'read' ||
+      first.policy.backup !== 'none' ||
+      first.policy.audit !== 'none' ||
+      first.policy.confirmation !== 'none' ||
+      first.policy.timeoutMs !== 1_000 ||
+      first.policy.resourceScopes.length !== 1 ||
+      first.policy.resourceScopes[0] !== 'server.status' ||
+      first.policy.requiredFeatureFlags.length !== 0 ||
+      first.policy.redactFields.length !== 0
+    ) {
+      throw conformanceProductContractError();
+    }
+    const parsed = first.parseInput({});
+    if (parsed === null || typeof parsed !== 'object' || Object.keys(parsed).length !== 0) {
+      throw conformanceProductContractError();
+    }
+    let rejectsExtra = false;
+    try {
+      first.parseInput({ unexpected: true });
+    } catch {
+      rejectsExtra = true;
+    }
+    if (!rejectsExtra) throw conformanceProductContractError();
+
+    const result = await dependencies.dispatch(
+      application,
+      { name: 'server_status', arguments: {} },
+      { transport: 'http', principalId: 'conformance:preflight' }
+    );
+    if (
+      result.kind !== 'success' ||
+      result.output.status !== 'ok' ||
+      result.output.readOnly !== true ||
+      result.output.version !== '0.1.0' ||
+      Object.keys(result.output).sort().join(',') !== 'readOnly,status,version'
+    ) {
+      throw conformanceProductContractError();
+    }
+  } catch {
+    throw conformanceProductContractError();
+  }
+}
+```
+
+Never call a handler property directly: the definition intentionally exposes no handler. The exact
+foundation object identity plus application dispatch preserves the closed kernel, timeout, exposure,
+and policy path. The architecture contract on the foundation module proves this exact object has no
+OPNsense/network dependency.
+
+Implement these remaining seams exactly by responsibility:
+
+```js
+export function buildScenarioArgv(executable, proxyUrl, version, scenario, stateDirectory) {
+  return [
+    executable,
+    'server',
+    '--url',
+    proxyUrl,
+    '--scenario',
+    scenario,
+    '--spec-version',
+    version,
+    '--verbose',
+    '--output-dir',
+    join(stateDirectory, 'results', version, scenario)
+  ];
+}
+
+export async function resolveConformanceExecutable() {
+  const packagePath = fileURLToPath(
+    new URL('../node_modules/@modelcontextprotocol/conformance/package.json', import.meta.url)
+  );
+  const document = JSON.parse(await readFile(packagePath, 'utf8'));
+  if (document.version !== CONFORMANCE_VERSION) {
+    throw new Error('Conformance package version mismatch');
+  }
+  return join(dirname(packagePath), 'dist', 'index.js');
+}
+
+export function parseExactLoopbackMcpUrl(value) {
+  if (typeof value !== 'string') throw new Error('Invalid loopback MCP URL');
+  const match = /^http:\/\/127\.0\.0\.1:(?<port>0|[1-9][0-9]{0,4})\/mcp(?![\s\S])/u.exec(value);
+  if (match?.[0] !== value) throw new Error('Invalid loopback MCP URL');
+  const portText = match?.groups?.port;
+  const port = portText === undefined ? Number.NaN : Number(portText);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new Error('Invalid loopback MCP URL');
+  }
+  const parsed = new URL(value);
+  return Object.freeze({
+    href: value,
+    url: parsed,
+    hostname: LOOPBACK,
+    port,
+    host: `${LOOPBACK}:${portText}`,
+    pathname: '/mcp'
+  });
+}
+```
+
+The raw start anchor plus the absolute `(?![\s\S])` end assertion and full-match equality run before
+`new URL()`. They consume the entire input, including rejecting leading or trailing LF, CRLF, tab,
+space, and NUL, so normalization cannot erase explicit `:80`, accept a leading-zero port, or hide
+empty query/fragment delimiters. `startLoopbackProxy()` must use
+only the returned numeric `port`, `hostname`, `host`, and `pathname` for its upstream request and Host
+injection; `projection.url.port` is never an authority source.
+
+Validate alpha.9 evidence through filesystem structure, never through console text or exit code alone:
+
+```js
+function conformanceReportError() {
+  const error = new Error('Conformance scenario report is invalid');
+  error.name = 'ConformanceReportError';
+  return error;
+}
+
+function isStrictDescendant(parent, candidate) {
+  const child = relative(parent, candidate);
+  return child !== '' && child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child);
+}
+
+export async function validateScenarioReport(stateDirectory, version, scenario) {
+  try {
+    const stateMetadata = await lstat(stateDirectory);
+    if (stateMetadata.isSymbolicLink() || !stateMetadata.isDirectory()) throw conformanceReportError();
+    const stateRoot = await realpath(stateDirectory);
+
+    const resultsPath = join(stateRoot, 'results');
+    const resultsMetadata = await lstat(resultsPath);
+    if (resultsMetadata.isSymbolicLink() || !resultsMetadata.isDirectory()) {
+      throw conformanceReportError();
+    }
+    const resultsRoot = await realpath(resultsPath);
+    if (!isStrictDescendant(stateRoot, resultsRoot)) throw conformanceReportError();
+
+    const versionPath = join(resultsRoot, version);
+    const versionMetadata = await lstat(versionPath);
+    if (versionMetadata.isSymbolicLink() || !versionMetadata.isDirectory()) {
+      throw conformanceReportError();
+    }
+    const versionRoot = await realpath(versionPath);
+    if (!isStrictDescendant(resultsRoot, versionRoot)) throw conformanceReportError();
+
+    const scenarioPath = join(versionRoot, scenario);
+    const scenarioMetadata = await lstat(scenarioPath);
+    if (scenarioMetadata.isSymbolicLink() || !scenarioMetadata.isDirectory()) {
+      throw conformanceReportError();
+    }
+    const scenarioRoot = await realpath(scenarioPath);
+    if (!isStrictDescendant(versionRoot, scenarioRoot)) throw conformanceReportError();
+
+    const runEntries = await readdir(scenarioRoot, { withFileTypes: true });
+    if (
+      runEntries.length !== 1 ||
+      !runEntries[0].isDirectory() ||
+      runEntries[0].isSymbolicLink() ||
+      !runEntries[0].name.startsWith(`server-${scenario}-`)
+    ) {
+      throw conformanceReportError();
+    }
+    const runPath = join(scenarioRoot, runEntries[0].name);
+    const runMetadata = await lstat(runPath);
+    if (runMetadata.isSymbolicLink() || !runMetadata.isDirectory()) throw conformanceReportError();
+    const runRoot = await realpath(runPath);
+    if (!isStrictDescendant(scenarioRoot, runRoot)) throw conformanceReportError();
+
+    const reportEntries = await readdir(runRoot, { withFileTypes: true });
+    if (
+      reportEntries.length !== 1 ||
+      reportEntries[0].name !== 'checks.json' ||
+      reportEntries[0].isSymbolicLink() ||
+      !reportEntries[0].isFile()
+    ) {
+      throw conformanceReportError();
+    }
+    const reportPath = join(runRoot, 'checks.json');
+    const reportMetadata = await lstat(reportPath);
+    if (
+      reportMetadata.isSymbolicLink() ||
+      !reportMetadata.isFile() ||
+      reportMetadata.size < 1 ||
+      reportMetadata.size > MAX_CONFORMANCE_REPORT_BYTES
+    ) {
+      throw conformanceReportError();
+    }
+    const reportRoot = await realpath(reportPath);
+    if (!isStrictDescendant(runRoot, reportRoot) || reportRoot !== reportPath) {
+      throw conformanceReportError();
+    }
+
+    const checks = JSON.parse(await readFile(reportRoot, 'utf8'));
+    if (!Array.isArray(checks) || checks.length === 0) throw conformanceReportError();
+    const statuses = checks.map((check) => {
+      if (check === null || typeof check !== 'object' || Array.isArray(check)) {
+        throw conformanceReportError();
+      }
+      return check.status;
+    });
+    if (
+      !statuses.includes('SUCCESS') ||
+      statuses.some((status) => status !== 'SUCCESS' && status !== 'INFO')
+    ) {
+      throw conformanceReportError();
+    }
+  } catch {
+    throw conformanceReportError();
+  }
+}
+```
+
+The fixed error deliberately omits version, scenario, paths, parsed checks, and nested filesystem or
+JSON errors. A fresh private state directory means exactly one run directory and one report are
+expected per selected scenario; accepting an older or additional report would make the attestation
+ambiguous. The 1 MiB pre-read bound is part of the public seam contract.
+
+Use one case-insensitive raw-header filter in both directions:
+
+```js
+const HOP_BY_HOP = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'proxy-connection',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade'
+]);
+
+function filterRawHeaders(rawHeaders, additionalNames = []) {
+  const dropped = new Set([...HOP_BY_HOP, ...additionalNames.map((name) => name.toLowerCase())]);
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    if (rawHeaders[index].toLowerCase() !== 'connection') continue;
+    for (const value of rawHeaders[index + 1].split(',')) {
+      const name = value.trim().toLowerCase();
+      if (name !== '') dropped.add(name);
+    }
+  }
+  const result = [];
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    if (!dropped.has(rawHeaders[index].toLowerCase())) {
+      result.push(rawHeaders[index], rawHeaders[index + 1]);
+    }
+  }
+  return result;
+}
+```
+
+`startLoopbackProxy(upstreamUrl, token, limits, overrides = {})` has injectable
+`createProxyServer`, `listenProxy`, and `requestUpstream` defaults for deterministic listen/error
+tests, and must:
+
+- validate upstream as exact loopback `/mcp`;
+- create the proxy with constructor-time `headersTimeout: limits.headersTimeoutMs`,
+  `requestTimeout: limits.bodyReceiptTimeoutMs`, `keepAliveTimeout: limits.keepAliveTimeoutMs`, and
+  `connectionsCheckingInterval: Math.min(1_000, limits.headersTimeoutMs,
+  limits.bodyReceiptTimeoutMs)`, then set
+  `server.maxRequestsPerSocket = MAX_PROXY_REQUESTS_PER_SOCKET` and
+  `server.maxConnections = MAX_PROXY_CONNECTIONS`; never use `limits.maxRequestsPerSocket` for the
+  proxy;
+- track sockets on `connection` and destroy an admission above 16;
+- reject every target except exact origin-form `/mcp` before opening upstream;
+- copy request `rawHeaders` in order while removing inbound `Host`, `Authorization`, and hop-by-hop
+  fields (including names nominated by `Connection`), append only upstream `Host` and sentinel
+  `Authorization`, and use `agent: false`;
+- inspect declared `Content-Length` before `requestUpstream`: if it is greater than
+  `limits.bodyBytes`, return a fixed generic `413` with `Connection: close`, finish the response, then
+  destroy the unread request without creating upstream. For every other body, count actual Buffer byte
+  lengths while forwarding with pause/resume backpressure; on the first byte above `bodyBytes`, pause
+  and detach body forwarding, destroy the upstream request, return the same generic `413`, and destroy
+  the inbound request after response finish. This counter applies to chunked and undeclared bodies;
+- stream request to upstream and upstream response to downstream, preserve status/status-message and
+  filtered response `rawHeaders`, and couple abort/error/close destruction in both directions. A
+  pre-header upstream failure returns fixed generic `502`; a post-header failure destroys the
+  downstream response. Fixed local `404`/`413`/`502` bodies contain no error detail, URL, header, or
+  credential;
+- return frozen `{ url, close }`, where `close` is idempotent, calls `server.close()` and
+  `server.closeAllConnections()`, destroys all tracked sockets, independently settles those actions,
+  and deterministically aggregates failures. Every call returns the identical memoized close Promise.
+  If listen fails or the resolved address is non-TCP before return, perform that same forced cleanup
+  before rejecting.
+
+`runConformanceChild({ executable, proxyUrl, version, scenario, stateDirectory }, dependencies = {})`
+must construct no local argv variant. Its spawn line is exactly:
+
+```js
+const child = dependencies.spawnProcess(
+  process.execPath,
+  buildScenarioArgv(executable, proxyUrl, version, scenario, stateDirectory),
+  { stdio: 'inherit', env: process.env }
+);
+```
+
+Implement the fixed deadline state machine described above around `close`, not merely `exit`; timeout
+must still reject after the terminated process closes. The injectable dependencies are
+`spawnProcess`, `setTimer`, and `clearTimer`, with `spawn`, `setTimeout`, and `clearTimeout` defaults.
+Create every timeout through `scheduleReferencedTimer({ set: dependencies.setTimer, clear:
+dependencies.clearTimer }, ...)`; do not call `unref()` on those handles, and clear every active
+handle on the single settlement path. On the
+final no-close bound, call `child.unref()` before rejecting. Error objects contain only stable
+version/scenario/category/signal/code data and never argv, environment, URL, output, or child error
+messages.
+
+Use the same referenced finite-operation primitive for report validation and runner cleanup:
+
+```js
+function operationTimeout(label) {
+  const error = new Error(`Conformance cleanup timed out: ${label}`);
+  error.name = 'ConformanceCleanupTimeoutError';
+  return error;
+}
+
+function settleWithin(
+  label,
+  operation,
+  milliseconds,
+  clock,
+  timeoutError = operationTimeout
+) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let handle;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      if (handle !== undefined) clock.clear(handle);
+      callback(value);
+    };
+    handle = scheduleReferencedTimer(
+      clock,
+      () => finish(reject, timeoutError(label)),
+      milliseconds
+    );
+    Promise.resolve()
+      .then(operation)
+      .then(
+        (value) => finish(resolve, value),
+        (error) => finish(reject, error)
+      );
+  });
+}
+```
+
+Use a distinct acquisition primitive for startup. Its timer is referenced; after timeout the original
+Promise remains observed and any owner that appears is handed to the late tracker exactly once:
+
+```js
+function startupTimeout() {
+  const error = new Error('Conformance startup phase timed out');
+  error.name = 'ConformanceStartupTimeoutError';
+  return error;
+}
+
+function waitReferenced(clock, milliseconds) {
+  return new Promise((resolve) => {
+    scheduleReferencedTimer(clock, resolve, milliseconds);
+  });
+}
+
+function createLateStartupTracker(clock) {
+  const slots = [];
+  return Object.freeze({
+    reserve(label) {
+      const slot = { label, state: 'pending', cleanupResult: undefined };
+      slots.push(slot);
+      return slot;
+    },
+    rejected(slot) {
+      slot.state = 'rejected';
+    },
+    fulfilled(slot, value, cleanupLate) {
+      slot.state = 'fulfilled';
+      slot.cleanupResult =
+        cleanupLate === undefined
+          ? Promise.resolve(fulfilled())
+          : settleWithin(
+              'late-startup',
+              () => cleanupLate(value),
+              LATE_STARTUP_CLEANUP_TIMEOUT_MS,
+              clock
+            ).then(
+              () => fulfilled(),
+              (reason) => ({ status: 'rejected', reason })
+            );
+    },
+    async drain() {
+      if (slots.length === 0) return fulfilled();
+      await waitReferenced(clock, LATE_STARTUP_ARRIVAL_GRACE_MS);
+      const results = await Promise.all(
+        slots.map((slot) => {
+          if (slot.state === 'pending') {
+            return { status: 'rejected', reason: operationTimeout('late-startup') };
+          }
+          if (slot.state === 'rejected') return fulfilled();
+          return slot.cleanupResult;
+        })
+      );
+      const reasons = results
+        .filter((result) => result.status === 'rejected')
+        .map((result) => result.reason);
+      return reasons.length === 0
+        ? fulfilled()
+        : { status: 'rejected', reason: new AggregateError(reasons) };
+    }
+  });
+}
+
+function acquireStartupPhase(label, operation, cleanupLate, lateTracker, clock) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timedOut = false;
+    let lateSlot;
+    let handle;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      if (handle !== undefined) clock.clear(handle);
+      callback(value);
+    };
+    handle = scheduleReferencedTimer(clock, () => {
+      timedOut = true;
+      lateSlot = lateTracker.reserve(label);
+      finish(reject, startupTimeout());
+    }, STARTUP_PHASE_TIMEOUT_MS);
+    Promise.resolve()
+      .then(operation)
+      .then(
+        (value) => {
+          if (timedOut) lateTracker.fulfilled(lateSlot, value, cleanupLate);
+          else finish(resolve, value);
+        },
+        (error) => {
+          if (timedOut) lateTracker.rejected(lateSlot);
+          else finish(reject, error);
+        }
+      );
+  });
+}
+```
+
+`slots` is appended only when a startup deadline fires, so normal child-failure and success cleanup
+do not wait the late-arrival grace. After the grace, a still-pending acquisition produces the honest
+`late-startup` not-confirmed result; its attached fulfillment/rejection handlers remain active, and a
+later owner cleanup is still observed under its own referenced deadline.
+
+The deadline does not cancel JavaScript promises and must never be described as proof that a timed-out
+owner closed or report validator stopped. It only produces a stable failure and lets later cleanup
+phases run. Late fulfillment or rejection stays observed by the attached handlers and cannot become an
+unhandled rejection. For reports pass `() => conformanceReportError()` as `timeoutError`; cleanup uses
+the default `operationTimeout`.
+
+Normalize aggregation without retaining arbitrary error messages or non-Error string values:
+
+```js
+const NO_FAILURE = Symbol('no-failure');
+
+function fulfilled() {
+  return { status: 'fulfilled', value: undefined };
+}
+
+function failuresForSlot(slot, value) {
+  if (value instanceof AggregateError) {
+    return value.errors.flatMap((entry) => failuresForSlot(slot, entry));
+  }
+  const timedOut = value instanceof Error && value.name === 'ConformanceCleanupTimeoutError';
+  const startupTimedOut =
+    slot === 'primary' && value instanceof Error && value.name === 'ConformanceStartupTimeoutError';
+  const productDrift =
+    slot === 'primary' &&
+    value instanceof Error &&
+    value.name === 'ConformanceProductContractError';
+  const error = new Error(
+    startupTimedOut
+      ? 'Conformance startup phase timed out'
+      : productDrift
+        ? 'Conformance product contract is unavailable'
+        : timedOut
+          ? `Conformance cleanup timed out: ${slot}`
+          : `Conformance operation failed: ${slot}`
+  );
+  error.name = startupTimedOut
+    ? 'ConformanceStartupTimeoutError'
+    : productDrift
+      ? 'ConformanceProductContractError'
+      : timedOut
+        ? 'ConformanceCleanupTimeoutError'
+        : slot === 'primary'
+          ? 'ConformanceRunError'
+          : 'ConformanceCleanupError';
+  return [error];
+}
+```
+
+`collectFailuresInOrder(primary, ownedResults, lateResult, stateResult, environmentResult)` applies
+`failuresForSlot` in exact `primary`, `proxy`, `http`, `application`, `late-startup`, `temp-state`, `environment`
+order, skips `NO_FAILURE` and fulfilled results, and flattens an aggregate only within its current
+slot. It preserves only the two fixed safe primary categories
+`ConformanceStartupTimeoutError`/`ConformanceProductContractError`, never injected text. Tests compare
+the resulting name/message arrays, not identities of injected errors. This makes aggregation order
+observable without retaining a poison error message.
+
+Finally implement the orchestration with injectable defaults:
+
+```js
+export async function runConformance(version, overrides = {}) {
+  if (!Object.hasOwn(SCENARIOS_BY_VERSION, version)) {
+    throw new Error('Usage: node scripts/run-conformance.mjs 2025-11-25|2026-07-28');
+  }
+  const dependencies = {
+    makeStateDirectory: () => mkdtemp(join(tmpdir(), 'opnsense-mcp-conformance-')),
+    removeStateDirectory: (path) => rm(path, { recursive: true, force: true }),
+    installEnvironment: installConformanceEnvironment,
+    createApplicationRuntime: () => createDefaultApplicationRuntime(),
+    assertProductContract: assertConformanceProductContract,
+    startProductHttp: startHttp,
+    startProxy: startLoopbackProxy,
+    resolveExecutable: resolveConformanceExecutable,
+    runChild: runConformanceChild,
+    validateReport: validateScenarioReport,
+    clock: SYSTEM_TIMER,
+    ...overrides
+  };
+  let stateDirectory;
+  let environmentOwner;
+  let applicationRuntime;
+  let httpRuntime;
+  let proxyRuntime;
+  const lateTracker = createLateStartupTracker(dependencies.clock);
+  let primaryFailure = NO_FAILURE;
+  try {
+    stateDirectory = await acquireStartupPhase(
+      'makeStateDirectory',
+      dependencies.makeStateDirectory,
+      (latePath) => dependencies.removeStateDirectory(latePath),
+      lateTracker,
+      dependencies.clock
+    );
+    environmentOwner = await acquireStartupPhase(
+      'installEnvironment',
+      () => dependencies.installEnvironment(stateDirectory),
+      (lateOwner) => lateOwner.restore(),
+      lateTracker,
+      dependencies.clock
+    );
+    applicationRuntime = await acquireStartupPhase(
+      'createApplicationRuntime',
+      dependencies.createApplicationRuntime,
+      (lateOwner) => lateOwner.close(),
+      lateTracker,
+      dependencies.clock
+    );
+    await acquireStartupPhase(
+      'productPreflight',
+      () => dependencies.assertProductContract(applicationRuntime.application),
+      undefined,
+      lateTracker,
+      dependencies.clock
+    );
+    httpRuntime = await acquireStartupPhase(
+      'startProductHttp',
+      () => dependencies.startProductHttp(applicationRuntime.application, { port: 0 }),
+      (lateOwner) => lateOwner.close(),
+      lateTracker,
+      dependencies.clock
+    );
+    proxyRuntime = await acquireStartupPhase(
+      'startProxy',
+      () =>
+        dependencies.startProxy(
+          httpRuntime.url,
+          CONFORMANCE_SENTINELS.token,
+          httpRuntime.limits
+        ),
+      (lateOwner) => lateOwner.close(),
+      lateTracker,
+      dependencies.clock
+    );
+    const executable = await acquireStartupPhase(
+      'resolveExecutable',
+      dependencies.resolveExecutable,
+      undefined,
+      lateTracker,
+      dependencies.clock
+    );
+    for (const scenario of SCENARIOS_BY_VERSION[version]) {
+      await dependencies.runChild({
+        executable,
+        proxyUrl: proxyRuntime.url,
+        version,
+        scenario,
+        stateDirectory
+      });
+      await settleWithin(
+        'scenario-report',
+        () => dependencies.validateReport(stateDirectory, version, scenario),
+        REPORT_VALIDATION_TIMEOUT_MS,
+        dependencies.clock,
+        () => conformanceReportError()
+      );
+    }
+  } catch (error) {
+    primaryFailure = error;
+  }
+
+  let ownedResults = [fulfilled(), fulfilled(), fulfilled()];
+  let lateResult = fulfilled();
+  let stateResult = fulfilled();
+  let environmentResult = fulfilled();
+  try {
+    ownedResults = await Promise.allSettled([
+      settleWithin(
+        'proxy',
+        () => proxyRuntime?.close(),
+        OWNER_CLEANUP_TIMEOUT_MS,
+        dependencies.clock
+      ),
+      settleWithin(
+        'http',
+        () => httpRuntime?.close(),
+        OWNER_CLEANUP_TIMEOUT_MS,
+        dependencies.clock
+      ),
+      settleWithin(
+        'application',
+        () => applicationRuntime?.close(),
+        OWNER_CLEANUP_TIMEOUT_MS,
+        dependencies.clock
+      )
+    ]);
+    const [lateDrainResult] = await Promise.allSettled([lateTracker.drain()]);
+    lateResult =
+      lateDrainResult.status === 'fulfilled' ? lateDrainResult.value : lateDrainResult;
+    if (stateDirectory !== undefined) {
+      [stateResult] = await Promise.allSettled([
+        settleWithin(
+          'temp-state',
+          () => dependencies.removeStateDirectory(stateDirectory),
+          STATE_CLEANUP_TIMEOUT_MS,
+          dependencies.clock
+        )
+      ]);
+    }
+  } finally {
+    if (environmentOwner !== undefined) {
+      [environmentResult] = await Promise.allSettled([
+        settleWithin(
+          'environment',
+          () => environmentOwner.restore(),
+          ENVIRONMENT_RESTORE_TIMEOUT_MS,
+          dependencies.clock
+        )
+      ]);
+    }
+  }
+
+  const failures = collectFailuresInOrder(
+    primaryFailure,
+    ownedResults,
+    lateResult,
+    stateResult,
+    environmentResult
+  );
+  if (failures.length > 0) {
+    throw new AggregateError(failures, 'Conformance host or cleanup failed');
+  }
+}
+```
+
+`collectFailuresInOrder` converts non-Errors and recursively flattens nested aggregates without
+reordering within the fixed primary/proxy/HTTP/application/late-startup/temp/environment slots. `fulfilled()`
+returns `{ status: 'fulfilled', value: undefined }`. A missing owner resolves. Do not sequentially
+await proxy, HTTP, and application close. The late tracker drains only after those three outcomes and
+before temp removal; environment restoration is the unconditional final phase.
+
+Use an exported process-boundary seam and keep the direct-execution guard declarative:
+
+```js
+export async function runConformanceCli(version, overrides = {}) {
+  const dependencies = {
+    run: runConformance,
+    writeDiagnostic: (value) => process.stderr.write(value),
+    markFailed: () => {
+      process.exitCode = 1;
+    },
+    setTimer: setTimeout,
+    exit: (code) => process.exit(code),
+    ...overrides
+  };
+  try {
+    await dependencies.run(version);
+  } catch {
+    try {
+      dependencies.writeDiagnostic('Conformance run failed\n');
+    } catch {
+      // Exit behavior must not depend on a writable diagnostic stream.
+    }
+    dependencies.markFailed();
+    const handle = dependencies.setTimer(
+      () => dependencies.exit(1),
+      DIRECT_EXIT_GRACE_MS
+    );
+    handle.unref();
+  }
+}
+
+const invokedPath = process.argv[1];
+if (invokedPath !== undefined && fileURLToPath(import.meta.url) === resolve(invokedPath)) {
+  void runConformanceCli(process.argv[2]);
+}
+```
+
+Do not print error names/messages, argv, paths, report contents, environment values, or tokens in this
+terminal path. Child output remains official CLI output through inherited stdio. This direct-exit
+watchdog is the only Task 8 timer whose handle is unreferenced: it has no effect when all other handles
+are released naturally, while a timed-out owner retaining a live handle lets it force termination.
+
+- [ ] **Step 5: Make every public conformance command build first**
+
+Replace only these scripts in `package.json`:
 
 ```json
 "test:conformance:2025": "npm run build && node scripts/run-conformance.mjs 2025-11-25",
@@ -3781,32 +5116,59 @@ Replace the three conformance scripts in `package.json` with:
 "test:conformance": "npm run test:conformance:2025 && npm run test:conformance:2026"
 ```
 
-- [ ] **Step 4: Run all five targeted official invocations without a baseline**
+Do not change the exact conformance dependency or lockfile.
 
-Run:
+- [ ] **Step 6: Run focused harness, architecture, and real official evidence**
 
 ```bash
+export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+npm run build
+npx vitest list tests/conformance/run-conformance.test.mjs
+npx vitest run \
+  tests/conformance/run-conformance.test.mjs \
+  tests/architecture/execution-boundary.test.ts \
+  tests/foundation/package-contract.test.ts
 npm run test:conformance:2025
 npm run test:conformance:2026
 ```
 
-Expected: all five scenario invocations report zero failures and warnings; both commands exit `0`; no invocation uses `--suite`, `--force`, or `--expected-failures`. This is targeted interoperability evidence against the product surface, not full-suite conformance.
+Expected: proxy/lifecycle tests pass; the two real-run tests pass; then the public scripts run the same
+six official alpha.9 scenario invocations successfully. Each child exit `0` is followed by a strict
+accepted `checks.json` containing only `SUCCESS`/`INFO` before the next child starts. There are zero
+failures, zero warnings, zero skipped/unknown checks, no expected-failure file, no retained `results/`,
+no temp state in the repository, and no sentinel output.
+This is targeted interoperability evidence against the authenticated product surface, not full-suite
+conformance and not an OAuth or remote-deployment claim.
 
-- [ ] **Step 5: Re-run deterministic gates**
+The atomic `server-stateless` scenario still mixes generic checks with mandatory conformance-only
+fixtures and dynamic list mutation; other unselected MRTR scenarios prescribe named `test_*` product
+tools or response schemas. Do not add fixture tools to the product catalog. Task 6 supplies direct
+deterministic coverage for the omitted modern metadata, request-state binding, tamper/replay, and
+multi-round guarantees. This remains an explicit coverage limit, never an expected-failure baseline.
 
-Run:
+- [ ] **Step 7: Run full gates and commit executable protocol evidence atomically**
 
 ```bash
+export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 npm run verify
+npm run test:conformance
 git diff --check
+git status --short
 ```
 
-Expected: all deterministic tests and static checks pass; whitespace validation exits `0`.
-
-- [ ] **Step 6: Commit executable protocol evidence atomically**
+Expected: formatting, lint, strict TypeScript, AGPL headers, build, all deterministic tests (including
+the real conformance subprocess tests), and all six explicit public invocations pass. Only the six
+Task 8 files named above are added/modified by this task; Task 7b's preceding files remain its own
+slice. Do not run against a production firewall.
 
 ```bash
-git add package.json scripts/run-conformance.mjs
+git add \
+  scripts/run-conformance.mjs \
+  tests/conformance/run-conformance.test.mjs \
+  tests/architecture/execution-boundary.test.ts \
+  tests/foundation/package-contract.test.ts \
+  vitest.config.ts \
+  package.json
 git commit -m "test: enforce MCP v2 conformance"
 ```
 
@@ -3838,6 +5200,7 @@ describe('foundation documentation', () => {
     expect(readme).toContain('No firewall mutation capability is registered');
     expect(readme).toContain('2025-11-25');
     expect(readme).toContain('2026-07-28');
+    expect(readme).toContain('http-header-validation');
     expect(readme).toContain('2.0.0-beta.4');
     expect(readme).toContain('repinned to one stable MCP v2 release');
     expect(readme).toContain('AGPL-3.0-or-later');
@@ -3927,7 +5290,7 @@ npm run verify
 npm run test:conformance
 ```
 
-`npm run verify` runs formatting, lint, strict TypeScript, the JavaScript/TypeScript AGPL header gate, build, and deterministic Vitest tests. `npm run test:conformance` runs five targeted official invocations: `server-initialize`, `ping`, and `tools-list` at `2025-11-25`, then `tools-list` and `input-required-result-unsupported-methods` at draft `2026-07-28`. There is no expected-failure baseline. This is targeted interoperability evidence, not full-suite conformance.
+`npm run verify` runs formatting, lint, strict TypeScript, the JavaScript/TypeScript AGPL header gate, build, and deterministic Vitest tests. `npm run test:conformance` runs six targeted official invocations: `server-initialize`, `ping`, and `tools-list` at `2025-11-25`, then `tools-list`, `input-required-result-unsupported-methods`, and `http-header-validation` at draft `2026-07-28`. There is no expected-failure baseline. This is targeted interoperability evidence, not full-suite conformance.
 
 The MCP packages are deliberately pinned to `2.0.0-beta.4` for this foundation. Before public package publication, all MCP packages must be repinned to one stable MCP v2 release and every deterministic and conformance gate must pass again.
 
@@ -3971,7 +5334,7 @@ npm run test:conformance:2025
 npm run test:conformance:2026
 ```
 
-The first command runs targeted `server-initialize`, `ping`, and `tools-list` scenarios at `2025-11-25`. The second runs targeted `tools-list` and `input-required-result-unsupported-methods` at draft `2026-07-28`. Do not introduce an expected-failure baseline or describe these five invocations as a full suite.
+The first command runs targeted `server-initialize`, `ping`, and `tools-list` scenarios at `2025-11-25`. The second runs targeted `tools-list`, `input-required-result-unsupported-methods`, and `http-header-validation` at draft `2026-07-28`. Do not introduce an expected-failure baseline or describe these six invocations as a full suite.
 
 ## Change discipline
 
@@ -4052,7 +5415,7 @@ git status --short
 Expected:
 - dependency installation exits `0` under Node 22.19.0;
 - formatting, lint, typecheck, build, and all Vitest tests pass;
-- the five targeted official invocations report zero failures and warnings;
+- the six targeted official invocations report zero failures and warnings;
 - whitespace validation exits `0`;
 - `git status --short` lists only the four files created by this task before commit.
 
@@ -4076,6 +5439,6 @@ git diff --check
 git status --short
 ```
 
-Expected: every command exits `0`, all five targeted protocol invocations remain clean, and `git status --short` prints nothing.
+Expected: every command exits `0`, all six targeted protocol invocations remain clean, and `git status --short` prints nothing.
 
 The implementation is ready for a separate firewall-adapter plan only after this final state is reproduced. Public package publication remains blocked until the four MCP v2 beta pins are changed together to one stable release, the isolated legacy `@modelcontextprotocol/sdk@1.29.0` pin is removed or explicitly re-approved after its drift/audit gate, Guided Task 8 finalizes the independently authored public docs, and the same final state is reproduced again.

@@ -34,7 +34,7 @@ or release is allowed until every release gate in the approved design is green.
 
 ## Cross-plan checkpoints
 
-- After foundation: deterministic tests and the five named applicable official 2025/2026 MCP protocol
+- After foundation: deterministic tests and the six named applicable official 2025/2026 MCP protocol
   scenarios are green; this checkpoint makes no full-suite claim.
 - After provenance Tasks 1–4: public provenance, secrets, bootstrap and VM-doctor validators are green; the
   private source and baseline remain outside Git, while unsealed rows are explicitly pending.
