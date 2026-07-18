@@ -27,7 +27,7 @@
 - Use TDD for every implementation task. See the named test fail for the intended reason before adding product code.
 - End each task with the stated atomic local commit. Do not push or publish until the final release task and explicit operator authorization.
 - Do not weaken an assertion, accept an indeterminate exit code, suppress a command failure, or add a bypass to make a gate green.
-- Use only the canonical public identifiers derived from the package and plugin manifests: package `@gabrielion/opnsense-mcp`, executable `opnsense-mcp`, MCP server `opnsense`, plugin `opnsense-mcp`, and skill `opnsense-guide`. The exact forbidden public aliases are `opnsense-mcp-server`, `opnsense-mcp-install`, `opnsense-mcp-plugin`, and `configure-opnsense`; provide no compatibility bins or generated/user-facing references to them. The naming gate keeps its denylist fixture out of the scanned output set.
+- Use only the canonical public identifiers derived from the package and plugin manifests: package `@gabrielion/opnsense-mcp`, executable `opnsense-mcp`, MCP server `opnsense`, plugin `opnsense-mcp`, and skill `opnsense-guide`. Only manifest-derived canonical public identifiers are accepted; no aliases or compatibility bins exist.
 - Put this concise notice in README, package-facing documentation, and MCP Registry documentation: “OPNsense MCP is an independent project and is not affiliated with or endorsed by the OPNsense project or Deciso. OPNsense remains a trademark of its owners.” Keep project naming consistent and describe this as a non-affiliation/trademark notice, never as legal clearance.
 
 ## Cross-plan contracts

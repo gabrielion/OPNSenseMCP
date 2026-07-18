@@ -83,10 +83,12 @@ For both protocol versions stderr remains empty, including the five expected neg
 accepted `checks.json` records contain only `SUCCESS` or `INFO`. There is no expected-failure baseline.
 This is targeted interoperability evidence, not full-suite conformance.
 
-The four MCP v2 packages `@modelcontextprotocol/server`, `@modelcontextprotocol/client`,
-`@modelcontextprotocol/node`, and `@modelcontextprotocol/express` are each deliberately pinned to
-`2.0.0-beta.4` for this foundation. Before public package publication, all four must be repinned to one stable MCP v2 release
-together and every deterministic and conformance gate must pass again.
+The three MCP v2 packages `@modelcontextprotocol/server`, `@modelcontextprotocol/client`, and
+`@modelcontextprotocol/node` are deliberately pinned to `2.0.0-beta.4` for this foundation. Before public
+package publication, all three must be repinned to one stable MCP v2 release together and every
+deterministic and conformance gate must pass again. The optional `@modelcontextprotocol/express` helper
+package is intentionally not installed: direct Express integration preserves the project-owned guard
+order of exact Host -> exact serialized Origin -> bounded body receipt -> authentication.
 
 Separately, the isolated deprecated-SSE adapter pins the legacy `@modelcontextprotocol/sdk@1.29.0`
 exactly. Before release run `npm run release:check:legacy-sse` and `npm audit --omit=dev`, then decide

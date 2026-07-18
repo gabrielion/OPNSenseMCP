@@ -29,7 +29,7 @@ async function withInstalledPackage(
   assertion: (installedBin: string, packageCopy: string) => Promise<void>
 ): Promise<void> {
   const repository = resolve('.');
-  const temporaryRoot = await mkdtemp(join(tmpdir(), 'opnsense-mcp-installed-package-'));
+  const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-package-installation-'));
   try {
     const packageCopy = join(temporaryRoot, 'package');
     const consumer = join(temporaryRoot, 'consumer');

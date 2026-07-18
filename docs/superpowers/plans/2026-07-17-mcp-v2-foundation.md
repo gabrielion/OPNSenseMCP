@@ -4,26 +4,27 @@
 
 **Goal:** Establish a safe, strictly typed MCP v2 foundation with a closed capability catalog, a fail-closed policy kernel, pedagogical MCP guidance, dual-era stdio and hardened Streamable HTTP, and executable conformance evidence for MCP `2025-11-25` and draft `2026-07-28`.
 
-**Architecture:** A transport-neutral `buildServer(application, transport): McpServer` factory registers every primary v2 tool from one typed capability catalog and routes every call through one closed policy kernel. The handler vault and one-shot confirmation ledger are lexical kernel authorities and are not package exports. Stdio uses the dual-era `serveStdio` factory entry, HTTP uses `createMcpHandler` behind the official Node and Express adapters, and signed request state carries only a kernel-issued confirmation challenge across protocol rounds without trusting caller booleans. One default-off compatibility module owns all deprecated v1 SSE server and transport types; it re-registers only catalog metadata and calls the same transport-neutral dispatch facade, never passing a v1 transport to a v2 server. The foundation exposes only a read-only server status capability; mutation fixtures exist only under `tests/` until backup and audit enforcement are present.
+**Architecture:** A transport-neutral `buildServer(application, transport): McpServer` factory registers every primary v2 tool from one typed capability catalog and routes every call through one closed policy kernel. The handler vault and one-shot confirmation ledger are lexical kernel authorities and are not package exports. Stdio uses the dual-era `serveStdio` factory entry, HTTP uses `createMcpHandler` through the official Node adapter on a direct Express application, and signed request state carries only a kernel-issued confirmation challenge across protocol rounds without trusting caller booleans. One default-off compatibility module owns all deprecated v1 SSE server and transport types; it re-registers only catalog metadata and calls the same transport-neutral dispatch facade, never passing a v1 transport to a v2 server. The foundation exposes only a read-only server status capability; mutation fixtures exist only under `tests/` until backup and audit enforcement are present.
 
-**Tech Stack:** Node.js 22.19.0, TypeScript 5.9.3 strict ESM, Zod 4.2.0, `@modelcontextprotocol/server@2.0.0-beta.4`, `@modelcontextprotocol/client@2.0.0-beta.4` for tests, `@modelcontextprotocol/node@2.0.0-beta.4`, `@modelcontextprotocol/express@2.0.0-beta.4`, isolated deprecated-SSE compatibility through `@modelcontextprotocol/sdk@1.29.0`, Express 5.2.1, Vitest 4.1.10, official MCP conformance `0.2.0-alpha.9`.
+**Tech Stack:** Node.js 22.19.0, TypeScript 5.9.3 strict ESM, Zod 4.2.0, `@modelcontextprotocol/server@2.0.0-beta.4`, `@modelcontextprotocol/client@2.0.0-beta.4` for tests, `@modelcontextprotocol/node@2.0.0-beta.4`, isolated deprecated-SSE compatibility through `@modelcontextprotocol/sdk@1.29.0`, Express 5.2.1, Vitest 4.1.10, official MCP conformance `0.2.0-alpha.9`.
 
 ## Global Constraints
 
 - Every project file is AGPL-3.0-or-later; every TypeScript and JavaScript source file has `// SPDX-License-Identifier: AGPL-3.0-or-later` as its first line, or as its first non-shebang line for an executable.
 - Runtime and CI use Node.js `22.19.0` or newer within major 22; `package.json` rejects versions outside `>=22.19 <23`.
 - The current workstation's default Node is outside the supported major. Before executing any local command block in this plan, prepend `/opt/homebrew/opt/node@22/bin` when it exists and run the version assertion in Task 1; never treat a Node 26 result as foundation evidence.
-- Pin `@modelcontextprotocol/server`, `@modelcontextprotocol/client`, `@modelcontextprotocol/node`, and `@modelcontextprotocol/express` exactly to `2.0.0-beta.4`; use no range or dist-tag.
+- Pin `@modelcontextprotocol/server`, `@modelcontextprotocol/client`, and `@modelcontextprotocol/node` exactly to `2.0.0-beta.4`; use no range or dist-tag.
 - Pin the deprecated compatibility-only `@modelcontextprotocol/sdk` exactly to `1.29.0` when Task 7b adds it. Only `src/http/legacy-sse.ts` and its focused test may import that package; all primary MCP imports remain the official beta.4 packages above.
-- Treat that beta pin as a foundation-only interoperability target. Before any public package publication, replace all four pins with the same stable MCP v2 release, regenerate the lockfile, and rerun every deterministic and conformance gate in this plan.
+- Treat that beta pin as a foundation-only interoperability target. Before any public package publication, replace all three pins with the same stable MCP v2 release, regenerate the lockfile, and rerun every deterministic and conformance gate in this plan.
 - Pin Zod exactly to `4.2.0`; import it as `zod/v4` and pass complete Standard Schema objects such as `z.object(...)`.
 - Keep `exactOptionalPropertyTypes` enabled. When a value may be absent, omit the optional key with a conditional spread as shown in the snippets; never materialize an absent optional property with an undefined value.
 - Import no symbol from `@modelcontextprotocol/core-internal`.
 - `buildServer(application, transport): McpServer` is the only primary beta.4 MCP assembly point. The sole exception is Task 7b's isolated deprecated-SSE v1 adapter, which may import only shared catalog metadata and `dispatchCapability`; capability handlers import no MCP transport type and v1 objects never cross into the v2 server.
 - Stdio is the default executable path and uses `serveStdio`; production Streamable HTTP uses
   `createMcpHandler` plus `toNodeHandler` on a plain Express application so project Host, exact-Origin,
-  body, and authentication middleware run in the required order. `createMcpExpressApp` is reserved for the
-  isolated conformance harness because it installs its own JSON and hostname-only Origin middleware.
+  body, and authentication middleware run in the required order. The optional Express helper package is
+  intentionally not installed because its preinstalled middleware does not preserve the stricter exact
+  Host -> exact serialized Origin -> bounded body -> authentication order.
 - The capability catalog is closed: undeclared, hidden, disabled, transport-incompatible, and read-only-forbidden calls fail before a handler runs.
 - The foundation registers no local-write or firewall-write product capability. Mutation execution remains unavailable until strict backup and audit gates are implemented in a separately reviewed plan.
 - MCP instructions and prompts guide behavior but never authorize a change. Form elicitation is used only when the client advertises it, and missing support fails closed.
@@ -266,7 +267,6 @@ Create `package.json`:
     "verify": "npm run format:check && npm run lint && npm run typecheck && npm run license:check && npm test"
   },
   "dependencies": {
-    "@modelcontextprotocol/express": "2.0.0-beta.4",
     "@modelcontextprotocol/node": "2.0.0-beta.4",
     "@modelcontextprotocol/server": "2.0.0-beta.4",
     "express": "5.2.1",
@@ -535,7 +535,6 @@ describe('package contract', () => {
     expect(document.dependencies).toMatchObject({
       '@modelcontextprotocol/server': '2.0.0-beta.4',
       '@modelcontextprotocol/node': '2.0.0-beta.4',
-      '@modelcontextprotocol/express': '2.0.0-beta.4',
       zod: '4.2.0'
     });
     expect(document.devDependencies['@modelcontextprotocol/client']).toBe('2.0.0-beta.4');
@@ -2387,8 +2386,8 @@ legacySseEnabled plus an authenticate RequestHandler already closed over the exp
 never a property, callback argument, serialization value, or return value. Only src/http/runtime.ts may
 import this helper; add the import allow-list to the architecture test.
 
-Create src/http/auth.ts. Compare SHA-256 digests with timingSafeEqual and set validated AuthInfo through the
-`@modelcontextprotocol/express` Request augmentation (a narrow local typed projection is also acceptable).
+Create src/http/auth.ts. Compare SHA-256 digests with timingSafeEqual and set validated AuthInfo through a
+narrow local Request projection.
 Do not use any or add another global mutable augmentation. `toNodeHandler` reads this `req.auth`. Set exactly:
 
 ~~~ts
@@ -2456,10 +2455,11 @@ Create DEFAULT_HTTP_LIMITS and the documented body/concurrency/subscription/requ
 bounds. Reject invalid option overrides at construction.
 
 startHttp(application, options?) obtains buildApplicationHttpSecurity(application), refuses disabled or
-unsafe configuration, then creates the beta.4 handler and Node adapter on plain `express()`. Do not use
-`createMcpExpressApp` here: it installs `express.json()` and hostname-only Origin validation before project
-guards. Middleware order is exact: Host, Origin, body receipt/time/size and concurrency bounds, bearer auth,
-then `/mcp`. Keep 2025 traffic stateless. An injected options port of `0` is allowed only for ephemeral test
+unsafe configuration, then creates the beta.4 handler and Node adapter on plain `express()`. The optional
+Express helper package is intentionally not installed because its preinstalled JSON and hostname-only
+Origin middleware would precede project guards. Middleware order is exact: exact Host -> exact serialized
+Origin -> bounded body receipt/time/size and concurrency -> bearer authentication -> `/mcp`. Keep 2025
+traffic stateless. An injected options port of `0` is allowed only for ephemeral test
 listeners; environment-derived configuration remains constrained to 1024..65535.
 
 The SDK has no ordinary-execution or absolute-stream deadline option. Add a project-owned per-response
@@ -2696,7 +2696,6 @@ interface LockDocument {
 }
 
 expect(document.dependencies).toMatchObject({
-  '@modelcontextprotocol/express': '2.0.0-beta.4',
   '@modelcontextprotocol/node': '2.0.0-beta.4',
   '@modelcontextprotocol/server': '2.0.0-beta.4',
   '@modelcontextprotocol/sdk': '1.29.0',
@@ -5562,10 +5561,12 @@ For both protocol versions stderr remains empty, including the five expected neg
 accepted `checks.json` records contain only `SUCCESS` or `INFO`. There is no expected-failure baseline.
 This is targeted interoperability evidence, not full-suite conformance.
 
-The four MCP v2 packages `@modelcontextprotocol/server`, `@modelcontextprotocol/client`,
-`@modelcontextprotocol/node`, and `@modelcontextprotocol/express` are each deliberately pinned to
-`2.0.0-beta.4` for this foundation. Before public package publication, all four must be repinned to one stable MCP v2 release
-together and every deterministic and conformance gate must pass again.
+The three MCP v2 packages `@modelcontextprotocol/server`, `@modelcontextprotocol/client`, and
+`@modelcontextprotocol/node` are deliberately pinned to `2.0.0-beta.4` for this foundation. Before public
+package publication, all three must be repinned to one stable MCP v2 release together and every
+deterministic and conformance gate must pass again. The optional `@modelcontextprotocol/express` helper
+package is intentionally not installed: direct Express integration preserves the project-owned guard
+order of exact Host -> exact serialized Origin -> bounded body receipt -> authentication.
 
 Separately, the isolated deprecated-SSE adapter pins the legacy `@modelcontextprotocol/sdk@1.29.0`
 exactly. Before release run `npm run release:check:legacy-sse` and `npm audit --omit=dev`, then decide
@@ -5817,7 +5818,7 @@ reproduced; it is neither the complete product nor release-ready. The first task
 must update the phase-scoped documentation contract in the same commit. Guided Task 8 later modifies or
 removes the remaining foundation-only assertions as it finalizes the independently authored public docs.
 Public package publication remains blocked until `@modelcontextprotocol/server`,
-`@modelcontextprotocol/client`, `@modelcontextprotocol/node`, and `@modelcontextprotocol/express` move
-together from `2.0.0-beta.4` to one stable MCP v2 release, the separate legacy
+`@modelcontextprotocol/client`, and `@modelcontextprotocol/node` move together from `2.0.0-beta.4` to one
+stable MCP v2 release, the separate legacy
 `@modelcontextprotocol/sdk@1.29.0` pin is removed or explicitly re-approved after its drift/audit gate, and
 the final state is reproduced again.

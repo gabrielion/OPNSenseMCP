@@ -37,7 +37,6 @@ describe('package contract', () => {
     expect(document.dependencies).toMatchObject({
       '@modelcontextprotocol/server': '2.0.0-beta.4',
       '@modelcontextprotocol/node': '2.0.0-beta.4',
-      '@modelcontextprotocol/express': '2.0.0-beta.4',
       '@modelcontextprotocol/sdk': '1.29.0',
       express: '5.2.1',
       zod: '4.2.0'

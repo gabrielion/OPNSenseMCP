@@ -55,7 +55,9 @@ because they exist in an older source tree. A future dashboard would be designed
   - `@modelcontextprotocol/server`;
   - `@modelcontextprotocol/client` as a development dependency;
   - `@modelcontextprotocol/node` for Node HTTP integration;
-  - `@modelcontextprotocol/express` only where its hardened HTTP helpers are required.
+  - The optional `@modelcontextprotocol/express` helper package is not installed because this project
+    owns a stricter middleware order: exact Host -> exact serialized Origin -> bounded body receipt ->
+    authentication.
 - Because the v2 beta server package does not expose the deprecated SSE transport, the optional legacy SSE
   adapter pins `@modelcontextprotocol/sdk` exactly to `1.29.0` and isolates its server and types from the v2
   assembly. It shares only the typed capability catalog and business handlers, and its necessity is reviewed

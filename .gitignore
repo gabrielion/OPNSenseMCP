@@ -4,4 +4,5 @@ coverage/
 .env
 *.log
 results/
+.superpowers/sdd/
 .DS_Store
