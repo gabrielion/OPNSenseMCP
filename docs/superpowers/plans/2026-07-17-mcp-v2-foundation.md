@@ -5219,7 +5219,8 @@ git commit -m "test: enforce MCP v2 conformance"
   `>=22.19 <23`; every install uses exactly `npm ci --ignore-scripts`.
 - CI runs a lightweight Node 22.19.0 compatibility-floor lane, the full verification gate on the current
   patched Node 22.23.1 runtime, then the public 2025 and draft 2026 protocol scripts on Node 22.23.1. GitHub
-  actions are immutable full-SHA pins and checkout never persists credentials.
+  actions are immutable full-SHA pins and checkout never persists credentials. The compatibility floor also
+  executes the real stdio entrypoint tests; build plus typecheck alone are not runtime compatibility evidence.
 - The six scenario/version tuples run once inside `npm run verify`'s real subprocess tests and once through
   `npm run test:conformance`'s public scripts: twelve official child invocations in the combined local gate,
   but exactly six public-script invocations. Expected negative header-validation probes are silent on stderr;
@@ -5238,7 +5239,7 @@ const NODE_22_PREFLIGHT = [
   'if test -x /opt/homebrew/opt/node@22/bin/node; then',
   'export PATH="/opt/homebrew/opt/node@22/bin:$PATH"',
   'fi',
-  'node -e "const [major, minor] = process.versions.node.split(\'.\').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"'
+  'node -e "const [major, minor] = process.versions.node.split(\'.\').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&'
 ] as const;
 
 function bashBlocks(document: string): readonly string[] {
@@ -5251,9 +5252,30 @@ function commandLines(document: string): readonly string[] {
   return bashBlocks(document).flatMap((block) =>
     block
       .split('\n')
-      .map((line) => line.trim())
+      .map((line) => line.trim().replace(/\s+&&$/u, ''))
       .filter((line) => line !== '')
   );
+}
+
+function logicalCommandsAfterPreflight(block: string): readonly string[] {
+  const lines = block
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  const preflightIndex = lines.indexOf(NODE_22_PREFLIGHT.at(-1) ?? '');
+  if (preflightIndex < 0) return [];
+  const commands: string[] = [];
+  let current = '';
+  for (const line of lines.slice(preflightIndex)) {
+    const continued = line.endsWith('\\');
+    current = `${current}${current === '' ? '' : ' '}${continued ? line.slice(0, -1).trim() : line}`;
+    if (!continued) {
+      commands.push(current);
+      current = '';
+    }
+  }
+  if (current !== '') commands.push(current);
+  return commands;
 }
 
 describe('foundation documentation', () => {
@@ -5278,9 +5300,10 @@ describe('foundation documentation', () => {
   });
 
   it('publishes exact guarded contributor commands', async () => {
-    const [readme, contributing] = await Promise.all([
+    const [readme, contributing, stdioTest] = await Promise.all([
       readFile('README.md', 'utf8'),
-      readFile('CONTRIBUTING.md', 'utf8')
+      readFile('CONTRIBUTING.md', 'utf8'),
+      readFile('tests/mcp/stdio.test.ts', 'utf8')
     ]);
     const readmeLines = commandLines(readme);
     const contributingLines = commandLines(contributing);
@@ -5306,7 +5329,24 @@ describe('foundation documentation', () => {
       for (const preflightLine of NODE_22_PREFLIGHT) {
         expect(lines).toContain(preflightLine);
       }
+      const commands = logicalCommandsAfterPreflight(block);
+      expect(commands.length).toBeGreaterThan(1);
+      for (const command of commands.slice(0, -1)) {
+        expect(command).toMatch(/ &&$/u);
+      }
     }
+    expect(readmeLines).toContain('node dist/main.js');
+    expect(readmeLines).not.toContain('npm start');
+    expect(stdioTest).toContain("spawn(process.execPath, ['dist/main.js']");
+    expect(readme).toContain('the same random 32-or-more-character value');
+    expect(readme).toContain('local secret manager');
+    expect(readme).toContain(': "${MCP_HTTP_TOKEN:?Set MCP_HTTP_TOKEN in the server shell}" &&');
+    expect(readme).toContain(
+      `MCP_HTTP_TOKEN="$MCP_HTTP_TOKEN" node -e 'process.exit(process.env.MCP_HTTP_TOKEN?.length >= 32 ? 0 : 1)' &&`
+    );
+    expect(readme).toContain('MCP_HTTP_TOKEN="$MCP_HTTP_TOKEN" \\');
+    expect(readme).not.toContain('MCP_HTTP_TOKEN="$(');
+    expect(readme).not.toContain('0123456789abcdef0123456789abcdef');
   });
 });
 ```
@@ -5318,7 +5358,28 @@ Create `tests/foundation/ci-workflow.test.ts`:
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
+function actionUses(workflow: string): readonly string[] {
+  return workflow
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^(?:- )?uses:/u.test(line));
+}
+
 describe('foundation CI workflow', () => {
+  it('detects both step actions and reusable workflow jobs', () => {
+    expect(
+      actionUses(`jobs:
+  steps-job:
+    steps:
+      - uses: owner/step@0000000000000000000000000000000000000000
+  reusable-job:
+    uses: owner/repository/.github/workflows/example.yml@main`)
+    ).toEqual([
+      '- uses: owner/step@0000000000000000000000000000000000000000',
+      'uses: owner/repository/.github/workflows/example.yml@main'
+    ]);
+  });
+
   it('pins supported runtimes, immutable actions, guarded installs, and residue checks', async () => {
     const workflow = await readFile('.github/workflows/ci.yml', 'utf8');
     const lines = workflow.split('\n').map((line) => line.trim());
@@ -5326,6 +5387,14 @@ describe('foundation CI workflow', () => {
 
     expect(count('- uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0')).toBe(3);
     expect(count('- uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0')).toBe(3);
+    expect(actionUses(workflow)).toEqual([
+      '- uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0',
+      '- uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0',
+      '- uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0',
+      '- uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0',
+      '- uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0',
+      '- uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0'
+    ]);
     expect(count('persist-credentials: false')).toBe(3);
     expect(count('node-version: 22.19.0 # compatibility floor')).toBe(1);
     expect(count('node-version: 22.23.1 # current patched Node 22')).toBe(2);
@@ -5335,7 +5404,7 @@ describe('foundation CI workflow', () => {
       ...workflow.matchAll(
         /(?:^|[^A-Za-z0-9_-])(?<command>npm[ \t]+(?:ci|i|install)\b[^\r\n]*)/gmu
       )
-    ].map((match) => match.groups?.command.trim());
+    ].map((match) => match.groups?.command?.trim());
     expect(installInvocations).toEqual([
       'npm ci --ignore-scripts',
       'npm ci --ignore-scripts',
@@ -5343,6 +5412,7 @@ describe('foundation CI workflow', () => {
     ]);
     expect(count('- run: npm run build')).toBe(1);
     expect(count('- run: npm run typecheck')).toBe(1);
+    expect(count('- run: npm test -- tests/mcp/stdio.test.ts')).toBe(1);
     expect(count('- run: npm run verify')).toBe(1);
     expect(count('- run: npm run test:conformance')).toBe(1);
     expect(count('needs: [compatibility-floor, verify]')).toBe(1);
@@ -5352,6 +5422,9 @@ describe('foundation CI workflow', () => {
     expect(count('test ! -e results')).toBe(3);
     expect(count('test -z "$(git status --porcelain=v1 --untracked-files=all)"')).toBe(3);
     expect(workflow).toContain('permissions:\n  contents: read');
+    expect(workflow.match(/^[ \t]*permissions:/gmu)).toHaveLength(1);
+    expect(workflow).not.toMatch(/^[ \t]*permissions:[ \t]*write-all[ \t]*$/gmu);
+    expect(workflow).not.toMatch(/^[ \t]+[A-Za-z][A-Za-z-]*:[ \t]*write[ \t]*$/gmu);
     expect(workflow).not.toContain('pull_request_target');
   });
 });
@@ -5371,6 +5444,7 @@ claim into a product phase that has registered mutations.
 Run:
 
 ```bash
+set -e
 if test -x /opt/homebrew/opt/node@22/bin/node; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
@@ -5411,13 +5485,16 @@ Requirements: Node.js 22.19.0 or newer within major 22, and npm.
 if test -x /opt/homebrew/opt/node@22/bin/node; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
-node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
-npm ci --ignore-scripts
-npm run build
-npm start
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&
+npm ci --ignore-scripts &&
+npm run build &&
+node dist/main.js
 ```
 
-`npm start` is a stdio MCP process. Configure an MCP client to run `node dist/main.js` with this repository as its working directory. The server instructions ask the agent to explain concepts in plain language, clarify ambiguity, investigate read-only first, and obtain exact confirmation before any future mutation.
+`node dist/main.js` is a protocol-clean stdio MCP process. Configure an MCP client to run that exact
+command with this repository as its working directory. The server instructions ask the agent to explain
+concepts in plain language, clarify ambiguity, investigate read-only first, and obtain exact confirmation
+before any future mutation.
 
 HTTP is an explicit local-development option:
 
@@ -5425,13 +5502,21 @@ HTTP is an explicit local-development option:
 if test -x /opt/homebrew/opt/node@22/bin/node; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
-node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&
+: "${MCP_HTTP_TOKEN:?Set MCP_HTTP_TOKEN in the server shell}" &&
+MCP_HTTP_TOKEN="$MCP_HTTP_TOKEN" node -e 'process.exit(process.env.MCP_HTTP_TOKEN?.length >= 32 ? 0 : 1)' &&
 MCP_HTTP_ENABLED=true \
-MCP_HTTP_TOKEN=0123456789abcdef0123456789abcdef \
-npm run start:http
+MCP_HTTP_TOKEN="$MCP_HTTP_TOKEN" \
+node dist/entrypoints/http.js
 ```
 
-HTTP binds to loopback, validates Host, applies finite body/request/stream/session limits, and requires the bearer token. Non-browser clients may omit Origin. Browser Origin access is denied by default; `MCP_ALLOWED_ORIGINS` accepts only comma-separated exact serialized origin values including scheme, host, and port, for example `https://console.example:8443`. A same-host value with another scheme or port is not equivalent. This is not a remote deployment endpoint.
+Set `MCP_HTTP_TOKEN` to the same random 32-or-more-character value in the server shell and the client
+configuration, preferably through a local secret manager. The command refuses a missing or short value and
+does not print it. HTTP binds to loopback, validates Host, applies finite body/request/stream/session limits,
+and requires that bearer. Non-browser clients may omit Origin. Browser Origin access is denied by default;
+`MCP_ALLOWED_ORIGINS` accepts only comma-separated exact serialized origin values including scheme, host,
+and port, for example `https://console.example:8443`. A same-host value with another scheme or port is not
+equivalent. This is not a remote deployment endpoint.
 
 Deprecated SSE compatibility is disabled by default. `MCP_LEGACY_SSE_ENABLED=true` adds authenticated `GET /sse` and `POST /messages` on the same hardened loopback listener without replacing Streamable HTTP at `/mcp`. It exists only for migration and must be re-reviewed or removed before release.
 
@@ -5449,8 +5534,8 @@ Prompts guide an MCP client; they are not authorization and they do not bypass p
 if test -x /opt/homebrew/opt/node@22/bin/node; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
-node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
-npm run verify
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&
+npm run verify &&
 npm run test:conformance
 ```
 
@@ -5466,8 +5551,8 @@ This is targeted interoperability evidence, not full-suite conformance.
 
 The four MCP v2 packages `@modelcontextprotocol/server`, `@modelcontextprotocol/client`,
 `@modelcontextprotocol/node`, and `@modelcontextprotocol/express` are each deliberately pinned to
-`2.0.0-beta.4` for this foundation. Before public package publication, all four must be repinned to one
-stable MCP v2 release together and every deterministic and conformance gate must pass again.
+`2.0.0-beta.4` for this foundation. Before public package publication, all four must be repinned to one stable MCP v2 release
+together and every deterministic and conformance gate must pass again.
 
 Separately, the isolated deprecated-SSE adapter pins the legacy `@modelcontextprotocol/sdk@1.29.0`
 exactly. Before release run `npm run release:check:legacy-sse` and `npm audit --omit=dev`, then decide
@@ -5495,10 +5580,10 @@ From the repository root:
 if test -x /opt/homebrew/opt/node@22/bin/node; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
-node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
-node --version
-npm ci --ignore-scripts
-npm run verify
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&
+node --version &&
+npm ci --ignore-scripts &&
+npm run verify &&
 git diff --check
 ```
 
@@ -5510,8 +5595,8 @@ The Node version must satisfy `>=22.19 <23` and every command must exit `0`.
 if test -x /opt/homebrew/opt/node@22/bin/node; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
-node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)"
-npm run test:conformance:2025
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&
+npm run test:conformance:2025 &&
 npm run test:conformance:2026
 ```
 
@@ -5541,6 +5626,7 @@ Every JavaScript and TypeScript source begins with `// SPDX-License-Identifier: 
 Run:
 
 ```bash
+set -e
 if test -x /opt/homebrew/opt/node@22/bin/node; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
@@ -5584,6 +5670,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run build
       - run: npm run typecheck
+      - run: npm test -- tests/mcp/stdio.test.ts
       - name: Assert no generated or repository residue
         run: |
           git diff --check
@@ -5633,6 +5720,7 @@ jobs:
 Run the exact CI contract:
 
 ```bash
+set -e
 if test -x /opt/homebrew/opt/node@22/bin/node; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
@@ -5641,15 +5729,17 @@ npx --no-install vitest run tests/foundation/ci-workflow.test.ts
 ```
 
 Expected: PASS. The workflow test verifies the exact action pins and version comments, disabled checkout
-credential persistence, three guarded installs, the compatibility/current runtime split, timeouts, and
-clean/residue assertions. The primary `verify` and `protocol` jobs use the current patched Node 22; the
-22.19.0 lane is an additional compatibility floor.
+credential persistence, every step-action and reusable-workflow `uses:` entry, the single read-only
+permission block, three guarded installs, the compatibility/current runtime split, the real stdio smoke,
+timeouts, and clean/residue assertions. The primary `verify` and `protocol` jobs use the current patched
+Node 22; the 22.19.0 lane is an additional compatibility floor.
 
 - [ ] **Step 7: Run the complete local release gate**
 
 Run exactly:
 
 ```bash
+set -e
 if test -x /opt/homebrew/opt/node@22/bin/node; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
@@ -5691,6 +5781,7 @@ git commit -m "docs: define MCP foundation evidence"
 Run:
 
 ```bash
+set -e
 if test -x /opt/homebrew/opt/node@22/bin/node; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
