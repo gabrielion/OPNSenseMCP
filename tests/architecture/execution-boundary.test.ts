@@ -120,7 +120,8 @@ describe('closed capability execution boundary', () => {
       createApplicationRequestStateCodec: [
         'src/app/application-context.ts',
         'src/server/build-server.ts'
-      ]
+      ],
+      buildApplicationHttpSecurity: ['src/app/application-context.ts', 'src/http/runtime.ts']
     };
     for (const [helper, allowed] of Object.entries(allowLists)) {
       expect(

@@ -21,6 +21,8 @@ import type {
 } from '../capabilities/types.js';
 import type { FeatureFlag } from '../config/feature-flags.js';
 import type { RuntimeConfig } from '../config/runtime-config.js';
+import { createLocalBearerAuthentication } from '../http/auth.js';
+import type { RequestHandler } from 'express';
 
 const INVALID_APPLICATION_MESSAGE = 'Application context is not initialized';
 
@@ -51,6 +53,16 @@ interface ApplicationInternals {
 }
 
 const applicationInternals = new WeakMap<ApplicationContext, ApplicationInternals>();
+
+export interface ApplicationHttpSecurity {
+  readonly enabled: boolean;
+  readonly host: '127.0.0.1' | 'localhost';
+  readonly port: number;
+  readonly allowedHosts: readonly string[];
+  readonly allowedOrigins: readonly string[];
+  readonly legacySseEnabled: boolean;
+  readonly authenticate: RequestHandler;
+}
 
 function snapshotConfig(config: RuntimeConfig): RuntimeSnapshot {
   const allowedResourceScopes =
@@ -140,4 +152,23 @@ export function createApplicationRequestStateCodec<T>(
     Buffer.from(internalsFor(application).snapshot.requestStateKeyBase64url, 'base64url')
   );
   return createRequestStateCodec<T>({ key, ttlSeconds: 300, bind });
+}
+
+export function buildApplicationHttpSecurity(
+  application: ApplicationContext
+): ApplicationHttpSecurity {
+  const { http } = internalsFor(application).snapshot;
+  if (http.enabled && http.token === undefined) {
+    throw new Error('Invalid HTTP security configuration');
+  }
+  const authenticate = createLocalBearerAuthentication(http.token ?? 'disabled-http-token');
+  return Object.freeze({
+    enabled: http.enabled,
+    host: http.host,
+    port: http.port,
+    allowedHosts: Object.freeze([...http.allowedHosts]),
+    allowedOrigins: Object.freeze([...http.allowedOrigins]),
+    legacySseEnabled: http.legacySseEnabled,
+    authenticate
+  });
 }

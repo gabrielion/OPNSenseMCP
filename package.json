@@ -26,6 +26,8 @@
   ],
   "scripts": {
     "clean": "node scripts/clean.mjs",
+    "start": "node dist/main.js",
+    "start:http": "node dist/entrypoints/http.js",
     "build": "npm run clean && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint . --max-warnings 0",
