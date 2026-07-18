@@ -1509,6 +1509,15 @@ arrays after defineCapability() must have no effect on parsing, metadata, or exe
 handler, defensively revalidate the timeout so a structurally forged catalog entry yields sanitized
 INVALID_POLICY rather than a thrown RangeError or an unbounded call.
 
+This capture boundary protects against mutable declaration containers and adapter/request bypasses; it is
+not an isolation boundary for executable code already loaded into the server process. Capability modules,
+handlers, Zod schema graphs, refinements/transforms, and callback closure state are trusted static startup
+code and must not be mutated after definition. Arbitrary Zod schemas cannot be faithfully snapshotted into
+an immutable parser: cloning is shallow, lazy/cached internals are undocumented, and callbacks retain
+mutable lexical state. The rebuilt server therefore loads no dynamic third-party capability code. If that
+becomes a future requirement, it needs a separate process plus a validated, callback-free declarative
+schema language rather than in-process Zod objects.
+
 The kernel also records every returned definition in a private WeakSet. Export one source-internal predicate
 isKernelDefinedCapability() for CapabilityCatalog construction only; it conveys no handler authority.
 CapabilityCatalog rejects any structural/spread/forged definition before indexing it. The architecture test

@@ -442,7 +442,7 @@ describe('closed capability definitions', () => {
     expect(defineCapability(definition).transports).toEqual(transports);
   });
 
-  it('captures parsers, handler, policy, annotations, and arrays before sealing', async () => {
+  it('captures schema/parser entry points, handler, policy, annotations, and arrays before sealing', async () => {
     const originalHandler = vi.fn((input: { value: string }) =>
       Promise.resolve({ echoed: `original:${input.value}` })
     );

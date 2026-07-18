@@ -106,6 +106,10 @@ export interface TypedCapabilityDefinition<
   readonly handler: (input: TInput, context: CapabilityExecutionContext) => Promise<TOutput>;
 }
 
+// Definitions and executable schema/callback graphs are trusted static startup code. This factory seals
+// their declaration metadata and captures entry points; it cannot isolate malicious code already running
+// in this JavaScript process. Never use this as an admission boundary for third-party plugins.
+
 export interface CapabilityCatalogView {
   getByMcpName(name: string): CapabilityDefinition | undefined;
   listExposed(context: ExposureContext): readonly CapabilityDefinition[];
