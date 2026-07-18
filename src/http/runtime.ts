@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { createServer, type Server } from 'node:http';
+import { createServer, type RequestListener, type Server, type ServerOptions } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createMcpHandler, type McpHttpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler, type NodeMcpRequestHandler } from '@modelcontextprotocol/node';
@@ -39,14 +39,15 @@ const SYSTEM_CLOCK: DeadlineClock = Object.freeze({
 export interface HttpRuntimeDependencies {
   readonly createHandler: typeof createMcpHandler;
   readonly adaptHandler: typeof toNodeHandler;
-  readonly createNodeServer: typeof createServer;
+  readonly createNodeServer: (options: ServerOptions, listener: RequestListener) => Server;
   readonly listen: (server: Server, port: number, host: string) => Promise<AddressInfo>;
 }
 
 const DEFAULT_DEPENDENCIES: HttpRuntimeDependencies = Object.freeze({
   createHandler: createMcpHandler,
   adaptHandler: toNodeHandler,
-  createNodeServer: createServer,
+  createNodeServer: (options: ServerOptions, listener: RequestListener) =>
+    createServer(options, listener),
   listen: (server: Server, port: number, host: string) =>
     new Promise<AddressInfo>((resolve, reject) => {
       const onError = (error: Error) => {
@@ -84,7 +85,9 @@ function failuresFrom(results: readonly PromiseSettledResult<void>[]): Error[] {
 }
 
 async function settleOperations(operations: readonly (() => Promise<void>)[]): Promise<Error[]> {
-  return failuresFrom(await Promise.allSettled(operations.map((operation) => operation())));
+  return failuresFrom(
+    await Promise.allSettled(operations.map((operation) => Promise.resolve().then(operation)))
+  );
 }
 
 export function createAggregateClose(
@@ -115,11 +118,23 @@ function diagnose(error: Error): void {
   process.stderr.write(`${error.name}\n`);
 }
 
+function rejectUnreadRequest(
+  request: Parameters<RequestHandler>[0],
+  response: Parameters<RequestHandler>[1],
+  status: number,
+  error: string
+): void {
+  response.status(status).set('Connection', 'close').json({ error });
+  response.once('finish', () => {
+    setImmediate(() => request.destroy());
+  });
+}
+
 function concurrentRequestLimit(maximum: number): RequestHandler {
   let active = 0;
-  return (_request, response, next) => {
+  return (request, response, next) => {
     if (active >= maximum) {
-      response.status(503).json({ error: 'request_limit_reached' });
+      rejectUnreadRequest(request, response, 503, 'request_limit_reached');
       return;
     }
     active += 1;
@@ -150,10 +165,7 @@ function bodyReceiptDeadline(milliseconds: number): RequestHandler {
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      response.status(408).json({ error: 'request_body_timeout' });
-      response.once('finish', () => {
-        setImmediate(() => request.destroy());
-      });
+      rejectUnreadRequest(request, response, 408, 'request_body_timeout');
     }, milliseconds);
     timer.unref();
     request.once('end', clear);
@@ -165,41 +177,51 @@ function bodyReceiptDeadline(milliseconds: number): RequestHandler {
   };
 }
 
-const bodyErrorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
+const bodyErrorHandler: ErrorRequestHandler = (error, request, response, _next) => {
   void _next;
+  if (response.headersSent) return;
   const candidateStatus =
     typeof error === 'object' && error !== null
       ? (error as { readonly status?: unknown }).status
       : undefined;
   const status = candidateStatus === 413 ? 413 : 400;
-  response
-    .status(status)
-    .json({ error: status === 413 ? 'request_body_too_large' : 'invalid_json' });
+  rejectUnreadRequest(
+    request,
+    response,
+    status,
+    status === 413 ? 'request_body_too_large' : 'invalid_json'
+  );
 };
 
 function bodyTypeAndDeclaredSize(limit: number): RequestHandler {
   return (request, response, next) => {
-    if (request.method.toUpperCase() !== 'POST') {
-      next();
-      return;
-    }
+    const method = request.method.toUpperCase();
     const contentLength = request.headers['content-length'];
     if (
-      typeof contentLength === 'string' &&
-      (!/^[0-9]+$/u.test(contentLength) || Number(contentLength) > limit)
+      contentLength !== undefined &&
+      (typeof contentLength !== 'string' || !/^[0-9]+$/u.test(contentLength))
     ) {
-      response.status(413).json({ error: 'request_body_too_large' });
-      response.once('finish', () => {
-        setImmediate(() => request.destroy());
-      });
+      rejectUnreadRequest(request, response, 413, 'request_body_too_large');
+      return;
+    }
+    const declaredLength = contentLength === undefined ? 0 : Number(contentLength);
+    const hasTransferEncoding = request.headers['transfer-encoding'] !== undefined;
+    const hasBody = declaredLength > 0 || hasTransferEncoding;
+    if (new Set(['GET', 'HEAD']).has(method) && hasBody) {
+      rejectUnreadRequest(request, response, 400, 'request_body_not_allowed');
+      return;
+    }
+    if (declaredLength > limit) {
+      rejectUnreadRequest(request, response, 413, 'request_body_too_large');
+      return;
+    }
+    if (method !== 'POST' && !hasBody) {
+      next();
       return;
     }
     const contentType = request.headers['content-type'];
     if (typeof contentType !== 'string' || !/^application\/json(?:\s*;|\s*$)/iu.test(contentType)) {
-      response.status(415).json({ error: 'unsupported_media_type' });
-      response.once('finish', () => {
-        setImmediate(() => request.destroy());
-      });
+      rejectUnreadRequest(request, response, 415, 'unsupported_media_type');
       return;
     }
     next();
@@ -281,7 +303,8 @@ export function withResponseDeadline(
 export function buildHttpExpressApplication(
   security: ApplicationHttpSecurity,
   limits: HttpLimits,
-  handler: NodeMcpRequestHandler
+  handler: NodeMcpRequestHandler,
+  clock: DeadlineClock = SYSTEM_CLOCK
 ): Express {
   const application = express();
   application.use(exactHostValidation(security.allowedHosts));
@@ -293,7 +316,7 @@ export function buildHttpExpressApplication(
   application.use(bodyErrorHandler);
   application.use(stopAfterAnswered);
   application.use(security.authenticate);
-  application.all('/mcp', withResponseDeadline(handler, limits));
+  application.all('/mcp', withResponseDeadline(handler, limits, clock));
   application.use(terminalErrorHandler);
   return application;
 }
@@ -345,10 +368,15 @@ export async function startHttpWithDependencies(
     });
     const nodeHandler = dependencies.adaptHandler(handler, { onerror: diagnose });
     const expressApplication = buildHttpExpressApplication(security, limits, nodeHandler);
-    server = dependencies.createNodeServer(expressApplication);
-    server.headersTimeout = limits.headersTimeoutMs;
-    server.keepAliveTimeout = limits.keepAliveTimeoutMs;
-    server.requestTimeout = limits.bodyReceiptTimeoutMs;
+    server = dependencies.createNodeServer(
+      {
+        connectionsCheckingInterval: Math.min(1_000, limits.headersTimeoutMs),
+        headersTimeout: limits.headersTimeoutMs,
+        keepAliveTimeout: limits.keepAliveTimeoutMs,
+        requestTimeout: Math.max(limits.bodyReceiptTimeoutMs, limits.headersTimeoutMs)
+      },
+      expressApplication
+    );
     server.maxRequestsPerSocket = limits.maxRequestsPerSocket;
     const address = await dependencies.listen(server, port, security.host);
     const ownedHandler = handler;

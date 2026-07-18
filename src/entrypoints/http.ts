@@ -52,7 +52,7 @@ export async function startOwnedHttpEntrypoint(
   try {
     http = await dependencies.start(owned.application);
   } catch (startupFailure) {
-    const cleanup = await Promise.allSettled([owned.close()]);
+    const cleanup = await Promise.allSettled([Promise.resolve().then(() => owned.close())]);
     const cleanupFailures = cleanup.flatMap((result) =>
       result.status === 'rejected'
         ? [result.reason instanceof Error ? result.reason : new Error(String(result.reason))]

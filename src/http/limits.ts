@@ -24,10 +24,22 @@ export const DEFAULT_HTTP_LIMITS: HttpLimits = Object.freeze({
   maxRequestsPerSocket: 100
 });
 
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const TIMER_LIMIT_NAMES = new Set<keyof HttpLimits>([
+  'bodyReceiptTimeoutMs',
+  'executionTimeoutMs',
+  'streamLifetimeMs',
+  'headersTimeoutMs',
+  'keepAliveTimeoutMs'
+]);
+
 export function resolveHttpLimits(overrides: Partial<HttpLimits> = {}): HttpLimits {
   const limits: HttpLimits = { ...DEFAULT_HTTP_LIMITS, ...overrides };
   for (const [name, value] of Object.entries(limits)) {
     if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new TypeError(`Invalid HTTP limit: ${name}`);
+    }
+    if (TIMER_LIMIT_NAMES.has(name as keyof HttpLimits) && value > MAX_TIMER_DELAY_MS) {
       throw new TypeError(`Invalid HTTP limit: ${name}`);
     }
   }

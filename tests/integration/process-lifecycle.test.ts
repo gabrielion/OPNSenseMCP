@@ -57,7 +57,9 @@ describe('owned lifecycle aggregation', () => {
   it('retains every independent cleanup failure in one AggregateError', async () => {
     const handlerFailure = new Error('handler-close');
     const serverFailure = new Error('server-close');
-    const handlerClose = vi.fn(() => Promise.reject(handlerFailure));
+    const handlerClose = vi.fn(() => {
+      throw handlerFailure;
+    });
     const serverClose = vi.fn(() => Promise.reject(serverFailure));
     const applicationClose = vi.fn(() => Promise.resolve());
     const close = createAggregateClose([handlerClose, serverClose, applicationClose]);
@@ -104,7 +106,9 @@ describe('owned lifecycle aggregation', () => {
     const startupFailure = new Error('listen');
     const handlerFailure = new Error('handler');
     const serverFailure = new Error('server');
-    const handlerClose = vi.fn(() => Promise.reject(handlerFailure));
+    const handlerClose = vi.fn(() => {
+      throw handlerFailure;
+    });
     const handler = { close: handlerClose } as unknown as McpHttpHandler;
     const server = createServer();
     const serverClose = vi.fn((callback?: (error?: Error) => void) => {
@@ -135,16 +139,19 @@ describe('owned lifecycle aggregation', () => {
 
   it('closes the owned default application when HTTP startup fails', async () => {
     const startupFailure = new Error('http-start');
-    const applicationClose = vi.fn(() => Promise.resolve());
-    await expect(
-      startOwnedHttpEntrypoint({
-        createDefaultRuntime: () => ({
-          application: createApplicationContext(config()),
-          close: applicationClose
-        }),
-        start: () => Promise.reject(startupFailure)
-      })
-    ).rejects.toThrow(startupFailure);
+    const cleanupFailure = new Error('application-close');
+    const applicationClose = vi.fn(() => {
+      throw cleanupFailure;
+    });
+    const error = await startOwnedHttpEntrypoint({
+      createDefaultRuntime: () => ({
+        application: createApplicationContext(config()),
+        close: applicationClose
+      }),
+      start: () => Promise.reject(startupFailure)
+    }).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toEqual([startupFailure, cleanupFailure]);
     expect(applicationClose).toHaveBeenCalledTimes(1);
   });
 
@@ -171,6 +178,7 @@ describe('owned lifecycle aggregation', () => {
       const second = listeners.get('SIGTERM')?.();
       expect(first).toBeInstanceOf(Promise);
       expect(second).toBeInstanceOf(Promise);
+      await Promise.resolve();
       expect(operation).toHaveBeenCalledTimes(1);
       let settled = false;
       void Promise.all([first, second]).then(() => {

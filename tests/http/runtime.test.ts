@@ -4,7 +4,8 @@ import {
   request as httpRequest,
   Agent,
   type RequestListener,
-  type Server
+  type Server,
+  type ServerOptions
 } from 'node:http';
 import { EventEmitter } from 'node:events';
 import { Client } from '@modelcontextprotocol/client';
@@ -486,6 +487,7 @@ describe.each([
 it('passes stateless legacy and 16 subscriptions to beta.4 and configures exact socket bounds', async () => {
   let capturedOptions: Parameters<typeof createMcpHandler>[1];
   let capturedServer: Server | undefined;
+  let capturedNodeOptions: ServerOptions | undefined;
   const dependencies = {
     createHandler: (
       factory: Parameters<typeof createMcpHandler>[0],
@@ -495,8 +497,9 @@ it('passes stateless legacy and 16 subscriptions to beta.4 and configures exact 
       return createMcpHandler(factory, options);
     },
     adaptHandler: toNodeHandler,
-    createNodeServer: (listener: RequestListener) => {
-      capturedServer = createServer(listener);
+    createNodeServer: (options: ServerOptions, listener: RequestListener) => {
+      capturedNodeOptions = options;
+      capturedServer = createServer(options, listener);
       return capturedServer;
     },
     listen: (server: Server, port: number, host: string) =>
@@ -517,6 +520,7 @@ it('passes stateless legacy and 16 subscriptions to beta.4 and configures exact 
   try {
     expect(capturedOptions).toMatchObject({ legacy: 'stateless', maxSubscriptions: 16 });
     expect(Object.keys(capturedOptions ?? {})).not.toContain('sessionStore');
+    expect(capturedNodeOptions?.connectionsCheckingInterval).toBeLessThanOrEqual(5_000);
     expect(capturedServer?.headersTimeout).toBe(5_000);
     expect(capturedServer?.keepAliveTimeout).toBe(5_000);
     expect(capturedServer?.maxRequestsPerSocket).toBe(100);

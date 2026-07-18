@@ -45,7 +45,9 @@ export function createStdioAggregateClose(
   return () => {
     settlement ??= (async () => {
       const operations = [serverClose, ...(runtimeClose === undefined ? [] : [runtimeClose])];
-      const results = await Promise.allSettled(operations.map((operation) => operation()));
+      const results = await Promise.allSettled(
+        operations.map((operation) => Promise.resolve().then(operation))
+      );
       const failures = [
         ...recordedFailures().flatMap(flattenFailure),
         ...results.flatMap((result) =>
@@ -84,7 +86,10 @@ export async function startStdioWithDependencies(
       ...(options.transport === undefined ? {} : { transport: options.transport })
     });
   } catch (error) {
-    const cleanup = owned === undefined ? [] : await Promise.allSettled([owned.close()]);
+    const cleanup =
+      owned === undefined
+        ? []
+        : await Promise.allSettled([Promise.resolve().then(() => owned.close())]);
     const cleanupFailures = cleanup.flatMap((result) =>
       result.status === 'rejected' ? [toError(result.reason)] : []
     );

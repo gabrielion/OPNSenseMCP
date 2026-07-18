@@ -252,7 +252,10 @@ it('aggregates recorded probe/server failures with runtime failure and closes ea
   const probeFailure = new Error('probe-close');
   const serverFailure = new Error('server-close');
   const runtimeFailure = new Error('runtime-close');
-  const serverClose = vi.fn(() => Promise.resolve());
+  const synchronousServerFailure = new Error('synchronous-server-close');
+  const serverClose = vi.fn(() => {
+    throw synchronousServerFailure;
+  });
   const runtimeClose = vi.fn(() => Promise.reject(runtimeFailure));
   const close = createStdioAggregateClose(serverClose, runtimeClose, () => [
     probeFailure,
@@ -263,7 +266,12 @@ it('aggregates recorded probe/server failures with runtime failure and closes ea
   expect(first).toBe(second);
   const error = await first.catch((reason: unknown) => reason);
   expect(error).toBeInstanceOf(AggregateError);
-  expect((error as AggregateError).errors).toEqual([probeFailure, serverFailure, runtimeFailure]);
+  expect((error as AggregateError).errors).toEqual([
+    probeFailure,
+    serverFailure,
+    synchronousServerFailure,
+    runtimeFailure
+  ]);
   expect(serverClose).toHaveBeenCalledTimes(1);
   expect(runtimeClose).toHaveBeenCalledTimes(1);
   await expect(close()).rejects.toBe(error);
@@ -272,7 +280,9 @@ it('aggregates recorded probe/server failures with runtime failure and closes ea
 it('awaits and aggregates owned runtime cleanup when stdio construction throws', async () => {
   const startupFailure = new Error('serve-start');
   const runtimeFailure = new Error('runtime-close');
-  const runtimeClose = vi.fn(() => Promise.reject(runtimeFailure));
+  const runtimeClose = vi.fn(() => {
+    throw runtimeFailure;
+  });
   const testConfig: RuntimeConfig = {
     readOnly: true,
     allowedResourceScopes: null,
@@ -302,6 +312,42 @@ it('awaits and aggregates owned runtime cleanup when stdio construction throws',
   expect(error).toBeInstanceOf(AggregateError);
   expect((error as AggregateError).errors).toEqual([startupFailure, runtimeFailure]);
   expect(runtimeClose).toHaveBeenCalledTimes(1);
+});
+
+it('records a discovery-probe close failure through the configured serve onerror path', async () => {
+  const probeFailure = new Error('discovery-probe-close');
+  const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  const serverClose = vi.fn(() => Promise.resolve());
+  const dependencies: StdioRuntimeDependencies = {
+    createDefaultRuntime: () => {
+      throw new Error('unexpected default runtime');
+    },
+    serve: ((factory, options) => {
+      expect(factory).toBeTypeOf('function');
+      options?.onerror?.(probeFailure);
+      return { close: serverClose };
+    }) as StdioRuntimeDependencies['serve']
+  };
+  const application = createApplicationContext({
+    readOnly: true,
+    allowedResourceScopes: null,
+    enabledFeatureFlags: new Set(),
+    requestStateKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
+    http: {
+      enabled: false,
+      host: '127.0.0.1',
+      port: 3000,
+      allowedHosts: ['127.0.0.1'],
+      allowedOrigins: [],
+      legacySseEnabled: false
+    }
+  });
+  const handle = await startStdioWithDependencies(application, {}, dependencies);
+  const error = await handle.close().catch((reason: unknown) => reason);
+  expect(error).toBeInstanceOf(AggregateError);
+  expect((error as AggregateError).errors).toEqual([probeFailure]);
+  expect(serverClose).toHaveBeenCalledTimes(1);
+  expect(write.mock.calls.flat().join('')).toBe('Error\n');
 });
 
 it('writes only diagnostic error names to stderr', async () => {
