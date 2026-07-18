@@ -610,6 +610,8 @@ export function runBoundedCommand(
       state = 'closed';
       options.onClose?.();
       if (terminationStarted) {
+        // Before ready, exact-child close proves that no target process could have been started.
+        if (!supervisorReady) treeSettled = true;
         settleTerminatedCommand();
         return;
       }

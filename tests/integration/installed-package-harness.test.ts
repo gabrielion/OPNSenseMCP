@@ -72,6 +72,29 @@ async function waitForFixtureExit(pid: number, milliseconds = 4_000): Promise<vo
   if (processIsAlive(pid)) throw new Error('Fixture process did not self-expire');
 }
 
+async function writePreReadyExitSupervisor(
+  supervisorPath: string,
+  supervisorPidFile: string,
+  pipeHolderPidFile: string,
+  pipeHoldMs: number
+): Promise<void> {
+  await writeFile(
+    supervisorPath,
+    [
+      "import { spawn } from 'node:child_process';",
+      "import { writeFileSync } from 'node:fs';",
+      `const holder = spawn(process.execPath, ['-e', ${JSON.stringify(
+        `setTimeout(() => {}, ${String(pipeHoldMs)})`
+      )}], { stdio: ['ignore', 'inherit', 'inherit'] });`,
+      `writeFileSync(${JSON.stringify(supervisorPidFile)}, String(process.pid));`,
+      `writeFileSync(${JSON.stringify(pipeHolderPidFile)}, String(holder.pid));`,
+      'holder.unref();',
+      'setTimeout(() => process.exit(0), 250);'
+    ].join(''),
+    'utf8'
+  );
+}
+
 describe('installed-package harness portability', () => {
   it('makes the local archive install offline and lifecycle-script free', () => {
     expect(localArchiveInstallArguments('/tmp/package.tgz')).toEqual([
@@ -368,6 +391,85 @@ describe('installed-package harness portability', () => {
     } finally {
       supervisorPid ??= await readFixturePidIfPresent(pidFile);
       if (supervisorPid !== undefined) await waitForFixtureExit(supervisorPid);
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  }, 6_000);
+
+  it('settles a pre-ready kill race from the exact supervisor close event', async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-pre-ready-close-race-'));
+    const supervisorPath = join(temporaryRoot, 'exiting-supervisor.mjs');
+    const supervisorPidFile = join(temporaryRoot, 'supervisor.pid');
+    const pipeHolderPidFile = join(temporaryRoot, 'pipe-holder.pid');
+    let supervisorPid: number | undefined;
+    let pipeHolderPid: number | undefined;
+    await writePreReadyExitSupervisor(
+      supervisorPath,
+      supervisorPidFile,
+      pipeHolderPidFile,
+      COMMAND_SUPERVISOR_STARTUP_TIMEOUT_MS + 300
+    );
+    try {
+      await expect(
+        runBoundedCommand(
+          { command: process.execPath, arguments: ['-e', 'process.exit(0)'] },
+          {
+            cwd: process.cwd(),
+            environment: process.env,
+            input: '',
+            timeoutMs: 1_000,
+            cleanupTimeoutMs: 1_000
+          },
+          { supervisorPath }
+        )
+      ).rejects.toThrow('Command startup timed out');
+      supervisorPid = validateFixturePid(await readFile(supervisorPidFile, 'utf8'));
+      pipeHolderPid = validateFixturePid(await readFile(pipeHolderPidFile, 'utf8'));
+      expect(processIsAlive(supervisorPid)).toBe(false);
+      expect(processIsAlive(pipeHolderPid)).toBe(false);
+    } finally {
+      supervisorPid ??= await readFixturePidIfPresent(supervisorPidFile);
+      pipeHolderPid ??= await readFixturePidIfPresent(pipeHolderPidFile);
+      if (supervisorPid !== undefined) await waitForFixtureExit(supervisorPid);
+      if (pipeHolderPid !== undefined) await waitForFixtureExit(pipeHolderPid);
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  }, 6_000);
+
+  it('retains the cleanup bound when a raced pre-ready supervisor does not close', async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-pre-ready-no-close-'));
+    const supervisorPath = join(temporaryRoot, 'exiting-supervisor.mjs');
+    const supervisorPidFile = join(temporaryRoot, 'supervisor.pid');
+    const pipeHolderPidFile = join(temporaryRoot, 'pipe-holder.pid');
+    let supervisorPid: number | undefined;
+    let pipeHolderPid: number | undefined;
+    await writePreReadyExitSupervisor(
+      supervisorPath,
+      supervisorPidFile,
+      pipeHolderPidFile,
+      COMMAND_SUPERVISOR_STARTUP_TIMEOUT_MS + 600
+    );
+    try {
+      await expect(
+        runBoundedCommand(
+          { command: process.execPath, arguments: ['-e', 'process.exit(0)'] },
+          {
+            cwd: process.cwd(),
+            environment: process.env,
+            input: '',
+            timeoutMs: 1_000,
+            cleanupTimeoutMs: 150
+          },
+          { supervisorPath }
+        )
+      ).rejects.toThrow('Command cleanup timed out');
+      supervisorPid = validateFixturePid(await readFile(supervisorPidFile, 'utf8'));
+      pipeHolderPid = validateFixturePid(await readFile(pipeHolderPidFile, 'utf8'));
+      expect(processIsAlive(supervisorPid)).toBe(false);
+    } finally {
+      supervisorPid ??= await readFixturePidIfPresent(supervisorPidFile);
+      pipeHolderPid ??= await readFixturePidIfPresent(pipeHolderPidFile);
+      if (supervisorPid !== undefined) await waitForFixtureExit(supervisorPid);
+      if (pipeHolderPid !== undefined) await waitForFixtureExit(pipeHolderPid);
       await rm(temporaryRoot, { recursive: true, force: true });
     }
   }, 6_000);
