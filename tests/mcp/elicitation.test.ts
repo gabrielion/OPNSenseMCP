@@ -160,6 +160,34 @@ function claimsFromState(state: string) {
   return ConfirmationStateSchema.parse(envelope.p);
 }
 
+const BASE64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+function mutateRequestStateMac(
+  state: string,
+  mode: 'equivalent-non-canonical' | 'different-bytes'
+): string {
+  const segments = state.split('.');
+  const prefix = segments[0];
+  const body = segments[1];
+  const mac = segments[2];
+  if (segments.length !== 3 || prefix === undefined || body === undefined || mac === undefined) {
+    throw new Error('Malformed signed state');
+  }
+  const decodedMac = Buffer.from(mac, 'base64url');
+  const replacement = Array.from(BASE64URL_ALPHABET)
+    .map((character) => `${mac.slice(0, -1)}${character}`)
+    .find((candidate) => {
+      if (candidate === mac) return false;
+      const decodedCandidate = Buffer.from(candidate, 'base64url');
+      const candidateIsCanonical = decodedCandidate.toString('base64url') === candidate;
+      return mode === 'equivalent-non-canonical'
+        ? decodedCandidate.equals(decodedMac) && !candidateIsCanonical
+        : !decodedCandidate.equals(decodedMac) && candidateIsCanonical;
+    });
+  if (replacement === undefined) throw new Error('Could not mutate signed state');
+  return `${prefix}.${body}.${replacement}`;
+}
+
 describe.each(MCP_ERAS)('$label one-shot confirmation [$continuationSurface]', ({ connect }) => {
   it.each([
     ['accept', { action: 'accept', content: { confirm: true } }, 1],
@@ -482,7 +510,7 @@ describe('2026-only raw continuation security (the 2025 shim exposes neither req
     }
   });
 
-  it.each(['tampered', 'unsigned', 'malformed'] as const)(
+  it.each(['non-canonical', 'tampered', 'unsigned', 'malformed'] as const)(
     '%s state is rejected before settlement and leaves the genuine state usable once',
     async (kind) => {
       const onCall = vi.fn();
@@ -497,11 +525,13 @@ describe('2026-only raw continuation security (the 2025 shim exposes neither req
         const args = { change: { value: 'safe' } };
         const state = requestStateFrom(await rawModernCall(handler, 1, mutation.mcpName, args));
         const invalid =
-          kind === 'tampered'
-            ? `${state.slice(0, -1)}${state.endsWith('A') ? 'B' : 'A'}`
-            : kind === 'unsigned'
-              ? (state.split('.')[1] ?? 'unsigned')
-              : 'not-a-request-state';
+          kind === 'non-canonical'
+            ? mutateRequestStateMac(state, 'equivalent-non-canonical')
+            : kind === 'tampered'
+              ? mutateRequestStateMac(state, 'different-bytes')
+              : kind === 'unsigned'
+                ? (state.split('.')[1] ?? 'unsigned')
+                : 'not-a-request-state';
         const rejected = await rawModernCall(handler, 2, mutation.mcpName, args, {
           requestState: invalid,
           inputResponses: acceptedResponse()

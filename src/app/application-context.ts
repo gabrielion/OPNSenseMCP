@@ -25,6 +25,7 @@ import { createLocalBearerAuthentication } from '../http/auth.js';
 import type { RequestHandler } from 'express';
 
 const INVALID_APPLICATION_MESSAGE = 'Application context is not initialized';
+const BASE64URL_SEGMENT = /^[A-Za-z0-9_-]+$/u;
 
 export interface ApplicationContext {
   readonly catalog: CapabilityCatalog;
@@ -94,6 +95,27 @@ function internalsFor(application: ApplicationContext): ApplicationInternals {
   return internals;
 }
 
+function isCanonicalBase64Url(value: string | undefined): value is string {
+  if (value === undefined || !BASE64URL_SEGMENT.test(value)) return false;
+  try {
+    return Buffer.from(value, 'base64url').toString('base64url') === value;
+  } catch {
+    return false;
+  }
+}
+
+function requireCanonicalRequestState(state: string): void {
+  const segments = state.split('.');
+  if (
+    segments.length !== 3 ||
+    segments[0] !== 'v1' ||
+    !isCanonicalBase64Url(segments[1]) ||
+    !isCanonicalBase64Url(segments[2])
+  ) {
+    throw new Error('malformed');
+  }
+}
+
 export function createApplicationContext(
   config: RuntimeConfig,
   catalog: CapabilityCatalog = CAPABILITY_CATALOG
@@ -151,7 +173,14 @@ export function createApplicationRequestStateCodec<T>(
   const key = Uint8Array.from(
     Buffer.from(internalsFor(application).snapshot.requestStateKeyBase64url, 'base64url')
   );
-  return createRequestStateCodec<T>({ key, ttlSeconds: 300, bind });
+  const codec = createRequestStateCodec<T>({ key, ttlSeconds: 300, bind });
+  return Object.freeze({
+    mint: (payload: T, context?: McpServerContext) => codec.mint(payload, context),
+    verify: (state: string, context: McpServerContext) => {
+      requireCanonicalRequestState(state);
+      return codec.verify(state, context);
+    }
+  });
 }
 
 export function buildApplicationHttpSecurity(
