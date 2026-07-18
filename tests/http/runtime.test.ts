@@ -18,12 +18,13 @@ import {
   createApplicationContext
 } from '../../src/app/application-context.js';
 import type { RuntimeConfig } from '../../src/config/runtime-config.js';
-import { DEFAULT_HTTP_LIMITS } from '../../src/http/limits.js';
+import { DEFAULT_HTTP_LIMITS, resolveHttpLimits } from '../../src/http/limits.js';
 import {
   buildHttpExpressApplication,
   startHttp,
   startHttpWithDependencies,
-  withResponseDeadline,
+  invokeNodeHandler,
+  responseDeadline,
   type HttpRuntimeDependencies,
   type HttpRuntime
 } from '../../src/http/runtime.js';
@@ -174,6 +175,8 @@ describe('hardened HTTP construction', () => {
       bodyBytes: 256 * 1024,
       maxConcurrentRequests: 32,
       maxSubscriptions: 16,
+      maxLegacySseSessions: 8,
+      legacySessionIdleTimeoutMs: 120_000,
       bodyReceiptTimeoutMs: 10_000,
       executionTimeoutMs: 30_000,
       streamLifetimeMs: 5 * 60_000,
@@ -191,6 +194,15 @@ describe('hardened HTTP construction', () => {
         limits: { maxConcurrentRequests: 0 }
       })
     ).rejects.toThrow(/maxConcurrentRequests/u);
+    expect(
+      resolveHttpLimits({ legacySessionIdleTimeoutMs: 2_147_483_647 }).legacySessionIdleTimeoutMs
+    ).toBe(2_147_483_647);
+    expect(() => resolveHttpLimits({ legacySessionIdleTimeoutMs: 2_147_483_648 })).toThrow(
+      'Invalid HTTP limit: legacySessionIdleTimeoutMs'
+    );
+    expect(() => resolveHttpLimits({ maxLegacySseSessions: 0 })).toThrow(
+      'Invalid HTTP limit: maxLegacySseSessions'
+    );
   });
 });
 
@@ -617,28 +629,39 @@ it('starts an ordinary deadline once and upgrades an SSE response once to an abs
     }
   }
   const ordinaryResponse = new FakeResponse();
-  const handler = vi.fn(() => Promise.resolve());
-  withResponseDeadline(
-    handler as never,
-    { executionTimeoutMs: 30_000, streamLifetimeMs: 300_000 },
-    clock as never
-  )({ body: undefined } as never, ordinaryResponse as never, vi.fn());
+  const next = vi.fn();
+  responseDeadline({ executionTimeoutMs: 30_000, streamLifetimeMs: 300_000 }, clock as never)(
+    { body: undefined } as never,
+    ordinaryResponse as never,
+    next
+  );
+  expect(next).toHaveBeenCalledTimes(1);
   expect(scheduled[0]?.milliseconds).toBe(30_000);
   scheduled[0]?.callback();
   expect(ordinaryResponse.destroyed).toBe(1);
 
   const streamResponse = new FakeResponse();
-  withResponseDeadline(
-    handler as never,
-    { executionTimeoutMs: 30_000, streamLifetimeMs: 300_000 },
-    clock as never
-  )({ body: undefined } as never, streamResponse as never, vi.fn());
+  responseDeadline({ executionTimeoutMs: 30_000, streamLifetimeMs: 300_000 }, clock as never)(
+    { body: undefined } as never,
+    streamResponse as never,
+    next
+  );
   streamResponse.writeHead(200, { 'content-type': 'text/event-stream' } as never);
   streamResponse.writeHead(200, { 'content-type': 'text/event-stream' } as never);
   expect(scheduled.map(({ milliseconds }) => milliseconds)).toEqual([30_000, 30_000, 300_000]);
   expect(scheduled[1]?.cleared).toBe(true);
   scheduled[2]?.callback();
   expect(streamResponse.destroyed).toBe(1);
+});
+
+it('adapts an Express request to the beta Node handler exactly once', async () => {
+  const handler = vi.fn(() => Promise.resolve());
+  const next = vi.fn();
+  invokeNodeHandler(handler as never)({ body: { value: 1 } } as never, {} as never, next);
+  await expect.poll(() => handler.mock.calls.length).toBe(1);
+  expect((handler.mock.calls[0] as unknown as readonly unknown[] | undefined)?.[2]).toEqual({
+    value: 1
+  });
 });
 
 it('admits 32 held requests, rejects request 33, and releases capacity after completion', async () => {

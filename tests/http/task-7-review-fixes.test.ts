@@ -25,8 +25,8 @@ import { createLocalBearerAuthentication } from '../../src/http/auth.js';
 import { DEFAULT_HTTP_LIMITS, resolveHttpLimits, type HttpLimits } from '../../src/http/limits.js';
 import {
   buildHttpExpressApplication,
+  responseDeadline,
   startHttp,
-  withResponseDeadline,
   type HttpRuntime
 } from '../../src/http/runtime.js';
 
@@ -672,11 +672,11 @@ describe('real adapter deadline boundary', () => {
         }
       }
       const response = new FakeResponse();
-      withResponseDeadline(
-        (() => Promise.resolve()) as never,
-        { executionTimeoutMs: 30_000, streamLifetimeMs: 300_000 },
-        clock as never
-      )({ body: undefined } as never, response as never, vi.fn());
+      responseDeadline({ executionTimeoutMs: 30_000, streamLifetimeMs: 300_000 }, clock as never)(
+        { body: undefined } as never,
+        response as never,
+        vi.fn()
+      );
 
       if (terminal === 'expiry') scheduled[0]?.callback();
       else response.dispatchEvent(new Event(terminal));

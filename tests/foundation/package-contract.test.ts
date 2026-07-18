@@ -11,6 +11,20 @@ interface PackageDocument {
   devDependencies: Record<string, string>;
 }
 
+interface LockPackage {
+  readonly version?: string;
+  readonly resolved?: string;
+  readonly integrity?: string;
+  readonly dev?: boolean;
+}
+
+interface LockDocument {
+  readonly packages: Record<
+    string,
+    LockPackage & { readonly dependencies?: Record<string, string> }
+  >;
+}
+
 describe('package contract', () => {
   it('pins the MCP v2 beta and AGPL foundation exactly', async () => {
     const document = JSON.parse(await readFile('package.json', 'utf8')) as PackageDocument;
@@ -23,11 +37,30 @@ describe('package contract', () => {
       '@modelcontextprotocol/server': '2.0.0-beta.4',
       '@modelcontextprotocol/node': '2.0.0-beta.4',
       '@modelcontextprotocol/express': '2.0.0-beta.4',
+      '@modelcontextprotocol/sdk': '1.29.0',
+      express: '5.2.1',
       zod: '4.2.0'
     });
     expect(document.devDependencies['@modelcontextprotocol/client']).toBe('2.0.0-beta.4');
     expect(document.devDependencies['@modelcontextprotocol/conformance']).toBe('0.2.0-alpha.9');
     expect(document.devDependencies.vitest).toBe('4.1.10');
+    expect(document.scripts['release:check:legacy-sse']).toBe(
+      'node scripts/check-legacy-sse-dependency.mjs'
+    );
+
+    const lock = JSON.parse(await readFile('package-lock.json', 'utf8')) as LockDocument;
+    expect(lock.packages['']?.dependencies?.['@modelcontextprotocol/sdk']).toBe('1.29.0');
+    const sdkNodes = Object.entries(lock.packages).filter(([path]) =>
+      /(?:^|\/)node_modules\/@modelcontextprotocol\/sdk$/u.test(path)
+    );
+    expect(sdkNodes.map(([path]) => path)).toEqual(['node_modules/@modelcontextprotocol/sdk']);
+    expect(sdkNodes[0]?.[1]).toMatchObject({
+      version: '1.29.0',
+      resolved: 'https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.29.0.tgz',
+      integrity:
+        'sha512-zo37mZA9hJWpULgkRpowewez1y6ML5GsXJPY8FI0tBBCd77HEvza4jDqRKOXgHNn867PVGCyTdzqpz0izu5ZjQ=='
+    });
+    expect(sdkNodes[0]?.[1].dev).toBeUndefined();
   });
 
   it('contains no forbidden internal MCP dependency', async () => {

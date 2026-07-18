@@ -16,7 +16,7 @@ import {
 import { installStdioSignalHandlers } from '../../src/main.js';
 import { installHttpSignalHandlers, startOwnedHttpEntrypoint } from '../../src/entrypoints/http.js';
 
-function config(): RuntimeConfig {
+function config(legacySseEnabled = false): RuntimeConfig {
   return {
     readOnly: true,
     allowedResourceScopes: null,
@@ -28,7 +28,7 @@ function config(): RuntimeConfig {
       port: 3000,
       allowedHosts: ['127.0.0.1'],
       allowedOrigins: [],
-      legacySseEnabled: false,
+      legacySseEnabled,
       token: 'LIFECYCLE_SENTINEL_TOKEN_0123456789'
     }
   };
@@ -188,6 +188,154 @@ describe('owned lifecycle aggregation', () => {
       expect(handlerClose).toHaveBeenCalledTimes(stage === 'createHandler' ? 0 : 1);
     }
   );
+
+  it('does not load the isolated compatibility module while legacy SSE is disabled', async () => {
+    const startupFailure = new Error('node-construction');
+    const handlerClose = vi.fn(() => Promise.resolve());
+    const loadLegacySse = vi.fn();
+    const dependencies = {
+      createHandler: () => ({ close: handlerClose }),
+      adaptHandler: () => (() => Promise.resolve()) as never,
+      createNodeServer: () => {
+        throw startupFailure;
+      },
+      listen: () => Promise.reject(new Error('unexpected-listen')),
+      loadLegacySse
+    } as unknown as HttpRuntimeDependencies;
+    await expect(
+      startHttpWithDependencies(createApplicationContext(config(false)), { port: 0 }, dependencies)
+    ).rejects.toThrow(startupFailure);
+    expect(loadLegacySse).not.toHaveBeenCalled();
+    expect(handlerClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleans up the beta handler when legacy loading or metadata mounting rejects', async () => {
+    const loaderFailure = new Error('legacy-loader');
+    const handlerClose = vi.fn(() => Promise.resolve());
+    const dependencies = {
+      createHandler: () => ({ close: handlerClose }),
+      adaptHandler: () => (() => Promise.resolve()) as never,
+      createNodeServer: () => createServer(),
+      listen: () => Promise.reject(new Error('unexpected-listen')),
+      loadLegacySse: () => Promise.reject(loaderFailure)
+    } as unknown as HttpRuntimeDependencies;
+    await expect(
+      startHttpWithDependencies(createApplicationContext(config(true)), { port: 0 }, dependencies)
+    ).rejects.toThrow(loaderFailure);
+    expect(handlerClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not construct a TCP listener when the compatibility mount rejects', async () => {
+    const mountFailure = new Error('Legacy SSE capability schema is not representable');
+    const handlerClose = vi.fn(() => Promise.resolve());
+    const createNodeServer = vi.fn(() => createServer());
+    const dependencies = {
+      createHandler: () => ({ close: handlerClose }),
+      adaptHandler: () => (() => Promise.resolve()) as never,
+      createNodeServer,
+      listen: () => Promise.reject(new Error('unexpected-listen')),
+      loadLegacySse: () =>
+        Promise.resolve({
+          mountLegacySseCompatibility: () => {
+            throw mountFailure;
+          }
+        })
+    } as unknown as HttpRuntimeDependencies;
+    const error = await startHttpWithDependencies(
+      createApplicationContext(config(true)),
+      { port: 0 },
+      dependencies
+    ).catch((reason: unknown) => reason);
+    expect(error).toBe(mountFailure);
+    expect(createNodeServer).not.toHaveBeenCalled();
+    expect(handlerClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('settles legacy, beta, and Node cleanup in deterministic order after legacy mounting', async () => {
+    const legacyFailure = new Error('legacy-close');
+    const handlerFailure = new Error('handler-close');
+    const serverFailure = new Error('server-close');
+    const legacyClose = vi.fn(() => {
+      throw legacyFailure;
+    });
+    const handlerClose = vi.fn(() => Promise.reject(handlerFailure));
+    const server = {
+      maxRequestsPerSocket: 0,
+      close: vi.fn((callback: (error?: Error) => void) => {
+        callback(serverFailure);
+      })
+    };
+    const dependencies = {
+      createHandler: () => ({ close: handlerClose }),
+      adaptHandler: () => (() => Promise.resolve()) as never,
+      createNodeServer: () => server,
+      listen: () => Promise.resolve({ port: 12345 }),
+      loadLegacySse: () =>
+        Promise.resolve({
+          mountLegacySseCompatibility: () => ({ close: legacyClose })
+        })
+    } as unknown as HttpRuntimeDependencies;
+    const runtime = await startHttpWithDependencies(
+      createApplicationContext(config(true)),
+      { port: 0 },
+      dependencies
+    );
+    const first = runtime.close();
+    const second = runtime.close();
+    expect(first).toBe(second);
+    const error = await first.catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toEqual([
+      legacyFailure,
+      handlerFailure,
+      serverFailure
+    ]);
+    expect(legacyClose).toHaveBeenCalledTimes(1);
+    expect(handlerClose).toHaveBeenCalledTimes(1);
+    expect(server.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleans legacy, beta, and Node owners after a post-mount listen failure', async () => {
+    const startupFailure = new Error('listen');
+    const legacyFailure = new Error('legacy-close');
+    const handlerFailure = new Error('handler-close');
+    const serverFailure = new Error('server-close');
+    const legacyClose = vi.fn(() => {
+      throw legacyFailure;
+    });
+    const handlerClose = vi.fn(() => Promise.reject(handlerFailure));
+    const server = {
+      maxRequestsPerSocket: 0,
+      close: vi.fn((callback: (error?: Error) => void) => {
+        callback(serverFailure);
+      })
+    };
+    const dependencies = {
+      createHandler: () => ({ close: handlerClose }),
+      adaptHandler: () => (() => Promise.resolve()) as never,
+      createNodeServer: () => server,
+      listen: () => Promise.reject(startupFailure),
+      loadLegacySse: () =>
+        Promise.resolve({
+          mountLegacySseCompatibility: () => ({ close: legacyClose })
+        })
+    } as unknown as HttpRuntimeDependencies;
+    const error = await startHttpWithDependencies(
+      createApplicationContext(config(true)),
+      { port: 0 },
+      dependencies
+    ).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toEqual([
+      startupFailure,
+      legacyFailure,
+      handlerFailure,
+      serverFailure
+    ]);
+    expect(legacyClose).toHaveBeenCalledTimes(1);
+    expect(handlerClose).toHaveBeenCalledTimes(1);
+    expect(server.close).toHaveBeenCalledTimes(1);
+  });
 
   it('aggregates listen, handler-close, and server-close failures from partial HTTP startup', async () => {
     const startupFailure = new Error('listen');

@@ -4,6 +4,8 @@ export interface HttpLimits {
   readonly bodyBytes: number;
   readonly maxConcurrentRequests: number;
   readonly maxSubscriptions: number;
+  readonly maxLegacySseSessions: number;
+  readonly legacySessionIdleTimeoutMs: number;
   readonly bodyReceiptTimeoutMs: number;
   readonly executionTimeoutMs: number;
   readonly streamLifetimeMs: number;
@@ -16,6 +18,8 @@ export const DEFAULT_HTTP_LIMITS: HttpLimits = Object.freeze({
   bodyBytes: 256 * 1024,
   maxConcurrentRequests: 32,
   maxSubscriptions: 16,
+  maxLegacySseSessions: 8,
+  legacySessionIdleTimeoutMs: 120_000,
   bodyReceiptTimeoutMs: 10_000,
   executionTimeoutMs: 30_000,
   streamLifetimeMs: 5 * 60_000,
@@ -26,6 +30,7 @@ export const DEFAULT_HTTP_LIMITS: HttpLimits = Object.freeze({
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const TIMER_LIMIT_NAMES = new Set<keyof HttpLimits>([
+  'legacySessionIdleTimeoutMs',
   'bodyReceiptTimeoutMs',
   'executionTimeoutMs',
   'streamLifetimeMs',

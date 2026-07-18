@@ -41,6 +41,23 @@ export interface HttpRuntimeDependencies {
   readonly adaptHandler: typeof toNodeHandler;
   readonly createNodeServer: (options: ServerOptions, listener: RequestListener) => Server;
   readonly listen: (server: Server, port: number, host: string) => Promise<AddressInfo>;
+  readonly loadLegacySse: () => Promise<LegacySseModule>;
+}
+
+interface LegacySseHandle {
+  close(): Promise<void>;
+}
+
+interface LegacySseModule {
+  readonly mountLegacySseCompatibility: (
+    router: Express,
+    options: {
+      readonly application: ApplicationContext;
+      readonly authenticate: RequestHandler;
+      readonly limits: Pick<HttpLimits, 'maxLegacySseSessions' | 'legacySessionIdleTimeoutMs'>;
+      readonly onerror: (error: Error) => void;
+    }
+  ) => LegacySseHandle;
 }
 
 const DEFAULT_DEPENDENCIES: HttpRuntimeDependencies = Object.freeze({
@@ -48,26 +65,30 @@ const DEFAULT_DEPENDENCIES: HttpRuntimeDependencies = Object.freeze({
   adaptHandler: toNodeHandler,
   createNodeServer: (options: ServerOptions, listener: RequestListener) =>
     createServer(options, listener),
-  listen: (server: Server, port: number, host: string) =>
-    new Promise<AddressInfo>((resolve, reject) => {
-      const onError = (error: Error) => {
-        server.off('listening', onListening);
-        reject(error);
-      };
-      const onListening = () => {
-        server.off('error', onError);
-        const address = server.address();
-        if (address === null || typeof address === 'string') {
-          reject(new Error('HTTP server did not expose a TCP address'));
-          return;
-        }
-        resolve(address);
-      };
-      server.once('error', onError);
-      server.once('listening', onListening);
-      server.listen(port, host);
-    })
+  listen: listenNodeServer,
+  loadLegacySse: () => import('./legacy-sse.js')
 });
+
+function listenNodeServer(server: Server, port: number, host: string): Promise<AddressInfo> {
+  return new Promise<AddressInfo>((resolve, reject) => {
+    const onError = (error: Error) => {
+      server.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        reject(new Error('HTTP server did not expose a TCP address'));
+        return;
+      }
+      resolve(address);
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(port, host);
+  });
+}
 
 function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
@@ -261,12 +282,11 @@ function contentTypeFromWriteHead(arguments_: readonly unknown[]): string | unde
   return undefined;
 }
 
-export function withResponseDeadline(
-  handler: NodeMcpRequestHandler,
+export function responseDeadline(
   limits: Pick<HttpLimits, 'executionTimeoutMs' | 'streamLifetimeMs'>,
   clock: DeadlineClock = SYSTEM_CLOCK
 ): RequestHandler {
-  return (request, response, next) => {
+  return (_request, response, next) => {
     const projected = response as unknown as WritableResponseProjection;
     const originalWriteHead = projected.writeHead;
     let terminal = false;
@@ -275,9 +295,11 @@ export function withResponseDeadline(
       terminal = true;
       projected.destroy();
     }, limits.executionTimeoutMs);
+    let cleared = false;
     let streaming = false;
     const clear = () => {
-      if (terminal) return;
+      if (cleared || terminal) return;
+      cleared = true;
       terminal = true;
       clock.clear(deadline);
     };
@@ -300,6 +322,12 @@ export function withResponseDeadline(
       }
       return Reflect.apply(originalWriteHead, response, arguments_);
     };
+    next();
+  };
+}
+
+export function invokeNodeHandler(handler: NodeMcpRequestHandler): RequestHandler {
+  return (request, response, next) => {
     const parsedBody = (request as unknown as { readonly body?: unknown }).body;
     void handler(request, response, parsedBody).catch(next);
   };
@@ -309,7 +337,8 @@ export function buildHttpExpressApplication(
   security: ApplicationHttpSecurity,
   limits: HttpLimits,
   handler: NodeMcpRequestHandler,
-  clock: DeadlineClock = SYSTEM_CLOCK
+  clock: DeadlineClock = SYSTEM_CLOCK,
+  mountCompatibility?: (application: Express) => void
 ): Express {
   const application = express();
   application.use(exactHostValidation(security.allowedHosts));
@@ -320,8 +349,9 @@ export function buildHttpExpressApplication(
   application.use(express.json({ limit: limits.bodyBytes }));
   application.use(bodyErrorHandler);
   application.use(stopAfterAnswered);
-  application.use(security.authenticate);
-  application.all('/mcp', withResponseDeadline(handler, limits, clock));
+  application.use(responseDeadline(limits, clock));
+  mountCompatibility?.(application);
+  application.all('/mcp', security.authenticate, invokeNodeHandler(handler));
   application.use(terminalErrorHandler);
   return application;
 }
@@ -364,6 +394,7 @@ export async function startHttpWithDependencies(
   const port = validateSecurity(security, options.port);
   const limits = resolveHttpLimits(options.limits);
   let handler: McpHttpHandler | undefined;
+  let legacy: LegacySseHandle | undefined;
   let server: Server | undefined;
   try {
     handler = dependencies.createHandler(createServerFactory(application, 'http'), {
@@ -372,7 +403,25 @@ export async function startHttpWithDependencies(
       onerror: diagnose
     });
     const nodeHandler = dependencies.adaptHandler(handler, { onerror: diagnose });
-    const expressApplication = buildHttpExpressApplication(security, limits, nodeHandler);
+    let mountCompatibility: ((expressApplication: Express) => void) | undefined;
+    if (security.legacySseEnabled) {
+      const legacyModule = await dependencies.loadLegacySse();
+      mountCompatibility = (expressApplication) => {
+        legacy = legacyModule.mountLegacySseCompatibility(expressApplication, {
+          application,
+          authenticate: security.authenticate,
+          limits,
+          onerror: diagnose
+        });
+      };
+    }
+    const expressApplication = buildHttpExpressApplication(
+      security,
+      limits,
+      nodeHandler,
+      SYSTEM_CLOCK,
+      mountCompatibility
+    );
     server = dependencies.createNodeServer(
       {
         connectionsCheckingInterval: Math.min(1_000, limits.headersTimeoutMs),
@@ -384,9 +433,11 @@ export async function startHttpWithDependencies(
     );
     server.maxRequestsPerSocket = limits.maxRequestsPerSocket;
     const address = await dependencies.listen(server, port, security.host);
+    const ownedLegacy = legacy;
     const ownedHandler = handler;
     const ownedServer = server;
     const close = createAggregateClose([
+      ...(ownedLegacy === undefined ? [] : [() => ownedLegacy.close()]),
       () => ownedHandler.close(),
       () => closeNodeServer(ownedServer)
     ]);
@@ -397,6 +448,10 @@ export async function startHttpWithDependencies(
     });
   } catch (startupFailure) {
     const operations: (() => Promise<void>)[] = [];
+    if (legacy !== undefined) {
+      const initializedLegacy = legacy;
+      operations.push(() => initializedLegacy.close());
+    }
     if (handler !== undefined) {
       const initializedHandler = handler;
       operations.push(() => initializedHandler.close());

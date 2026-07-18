@@ -110,6 +110,7 @@ describe('closed capability execution boundary', () => {
     const allowLists: Readonly<Record<string, readonly string[]>> = {
       listApplicationCapabilities: [
         'src/app/application-context.ts',
+        'src/http/legacy-sse.ts',
         'src/mcp/register-capabilities.ts'
       ],
       dispatchApplicationCapability: [
@@ -131,6 +132,51 @@ describe('closed capability execution boundary', () => {
           .sort()
       ).toEqual([...allowed].sort());
     }
+  });
+
+  it('confines version-one MCP imports to the compatibility adapter and its focused test', async () => {
+    const collect = async (directory: string) =>
+      Promise.all(
+        (await sourceFiles(directory)).map(async (path) => ({
+          path: relative('.', path),
+          source: await readFile(path, 'utf8')
+        }))
+      );
+    const imports = (sources: readonly { path: string; source: string }[]) =>
+      sources
+        .flatMap(({ path, source }) =>
+          [...source.matchAll(/from\s+['"](?<specifier>[^'"]+)['"]/gu)].flatMap((match) => {
+            const specifier = match.groups?.specifier;
+            return specifier === '@modelcontextprotocol/sdk' ||
+              specifier?.startsWith('@modelcontextprotocol/sdk/')
+              ? [[path, specifier] as const]
+              : [];
+          })
+        )
+        .sort(
+          ([pathA, specifierA], [pathB, specifierB]) =>
+            pathA.localeCompare(pathB) || specifierA.localeCompare(specifierB)
+        );
+    expect(imports(await collect('src'))).toEqual([
+      ['src/http/legacy-sse.ts', '@modelcontextprotocol/sdk/server/index.js'],
+      ['src/http/legacy-sse.ts', '@modelcontextprotocol/sdk/server/sse.js'],
+      ['src/http/legacy-sse.ts', '@modelcontextprotocol/sdk/types.js']
+    ]);
+    expect(imports(await collect('tests'))).toEqual([
+      ['tests/http/legacy-sse.test.ts', '@modelcontextprotocol/sdk/client/index.js'],
+      ['tests/http/legacy-sse.test.ts', '@modelcontextprotocol/sdk/client/sse.js']
+    ]);
+    const source = await readFile('src/http/legacy-sse.ts', 'utf8');
+    for (const forbidden of [
+      '@modelcontextprotocol/server',
+      'buildServer',
+      'createServerFactory',
+      'settleApplicationConfirmation',
+      'handleConfirmationCall'
+    ]) {
+      expect(source).not.toContain(forbidden);
+    }
+    expect(source).not.toMatch(/SSEServerTransport\s+as\s+.*(?:beta|Mcp)/u);
   });
 
   it('does not duplicate kernel policy branches in MCP adapters', async () => {
