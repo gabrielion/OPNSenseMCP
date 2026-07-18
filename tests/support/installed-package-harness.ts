@@ -43,6 +43,7 @@ interface BoundedCommandOptions {
 
 interface BoundedCommandDependencies {
   readonly platform?: NodeJS.Platform;
+  readonly supervisorPath?: string;
   readonly terminateOwnedTree?: (pid: number, signal: AbortSignal) => Promise<void>;
   readonly outputLimitBytes?: number;
   readonly windowsSystemRoot?: string;
@@ -434,7 +435,7 @@ export function runBoundedCommand(
         : Object.freeze({});
     let supervisor: ReturnType<typeof fork>;
     try {
-      supervisor = fork(COMMAND_SUPERVISOR_PATH, [], {
+      supervisor = fork(dependencies.supervisorPath ?? COMMAND_SUPERVISOR_PATH, [], {
         cwd: options.cwd,
         detached: platform !== 'win32',
         env: supervisorEnvironment,
@@ -456,7 +457,7 @@ export function runBoundedCommand(
     const supervisorError = supervisor.stderr;
     const stdout: OutputCapture = { chunks: [], bytes: 0, exceeded: false };
     const stderr: OutputCapture = { chunks: [], bytes: 0, exceeded: false };
-    let state: 'starting' | 'active' | 'release-sent' | 'terminating' | 'closed' = 'starting';
+    let state: 'starting' | 'active' | 'terminating' | 'closed' = 'starting';
     let supervisorReady = false;
     let supervisorSpawnFailed = false;
     let supervisorExited = false;
@@ -465,16 +466,14 @@ export function runBoundedCommand(
     let terminationStarted = false;
     let treeSettled = false;
     let settled = false;
-    let terminationReason = 'Command timed out';
+    let terminationReason: string | undefined;
     let commandDeadline: ReturnType<typeof setTimeout> | undefined;
     let cleanupDeadline: ReturnType<typeof setTimeout> | undefined;
-    let releaseDeadline: ReturnType<typeof setTimeout> | undefined;
     const terminationAbort = new AbortController();
     const clearDeadlines = () => {
       clearTimeout(startupDeadline);
       if (commandDeadline !== undefined) clearTimeout(commandDeadline);
       if (cleanupDeadline !== undefined) clearTimeout(cleanupDeadline);
-      if (releaseDeadline !== undefined) clearTimeout(releaseDeadline);
     };
     const finish = (callback: () => void, detach = false) => {
       if (settled) return;
@@ -494,57 +493,7 @@ export function runBoundedCommand(
       }
       callback();
     };
-    const settleTerminatedCommand = () => {
-      if (!terminationStarted || !supervisorClosed || !treeSettled) return;
-      finish(() => {
-        rejectCommand(new Error(terminationReason));
-      });
-    };
-    const beginTermination = (reason: string) => {
-      if (settled || terminationStarted || state === 'release-sent' || state === 'closed') return;
-      terminationStarted = true;
-      terminationReason = reason;
-      state = 'terminating';
-      clearDeadlines();
-      cleanupDeadline = setTimeout(() => {
-        finish(() => {
-          rejectCommand(new Error('Command cleanup timed out'));
-        }, true);
-      }, options.cleanupTimeoutMs);
-      cleanupDeadline.unref();
-      let termination: Promise<void>;
-      try {
-        if (
-          !supervisorReady ||
-          supervisorExited ||
-          supervisor.exitCode !== null ||
-          supervisor.signalCode !== null
-        ) {
-          termination = Promise.reject(new Error('Process identity is no longer owned'));
-        } else {
-          const ownedPid = validatedOwnedPid(supervisor.pid, process.pid);
-          termination =
-            dependencies.terminateOwnedTree === undefined
-              ? terminateOwnedProcessTree(
-                  platform,
-                  ownedPid,
-                  terminationAbort.signal,
-                  windowsSystemRoot
-                )
-              : dependencies.terminateOwnedTree(ownedPid, terminationAbort.signal);
-        }
-      } catch {
-        termination = Promise.reject(new Error('Process tree termination failed'));
-      }
-      void termination.then(
-        () => {
-          treeSettled = true;
-          settleTerminatedCommand();
-        },
-        () => undefined
-      );
-    };
-    const finishReleasedCommand = () => {
+    const finishCleanedCommand = () => {
       if (targetResult === undefined) {
         finish(() => {
           rejectCommand(new Error('Command cleanup unconfirmed'));
@@ -572,6 +521,67 @@ export function runBoundedCommand(
           stderr: Buffer.concat(stderr.chunks).toString('utf8')
         });
       });
+    };
+    const settleTerminatedCommand = () => {
+      if (!terminationStarted || !supervisorClosed || !treeSettled) return;
+      if (terminationReason === undefined) {
+        finishCleanedCommand();
+        return;
+      }
+      const reason = terminationReason;
+      finish(() => {
+        rejectCommand(new Error(reason));
+      });
+    };
+    const beginTermination = (reason?: string) => {
+      if (settled || terminationStarted || state === 'closed') return;
+      terminationStarted = true;
+      terminationReason = reason;
+      state = 'terminating';
+      clearDeadlines();
+      cleanupDeadline = setTimeout(() => {
+        finish(() => {
+          rejectCommand(new Error('Command cleanup timed out'));
+        }, true);
+      }, options.cleanupTimeoutMs);
+      cleanupDeadline.unref();
+      if (!supervisorReady) {
+        try {
+          if (supervisor.kill('SIGKILL')) {
+            treeSettled = true;
+            settleTerminatedCommand();
+          }
+        } catch {
+          // The independently owned cleanup deadline remains authoritative.
+        }
+        return;
+      }
+      let termination: Promise<void>;
+      try {
+        if (supervisorExited || supervisor.exitCode !== null || supervisor.signalCode !== null) {
+          termination = Promise.reject(new Error('Process identity is no longer owned'));
+        } else {
+          const ownedPid = validatedOwnedPid(supervisor.pid, process.pid);
+          termination =
+            dependencies.terminateOwnedTree === undefined
+              ? terminateOwnedProcessTree(
+                  platform,
+                  ownedPid,
+                  terminationAbort.signal,
+                  windowsSystemRoot
+                )
+              : dependencies.terminateOwnedTree(ownedPid, terminationAbort.signal);
+        }
+      } catch {
+        termination = Promise.reject(new Error('Process tree termination failed'));
+      }
+      void termination.then(
+        () => {
+          treeSettled = true;
+          settleTerminatedCommand();
+        },
+        () => undefined
+      );
     };
     const sendToSupervisor = (message: object): boolean => {
       if (!supervisor.connected) return false;
@@ -601,10 +611,6 @@ export function runBoundedCommand(
       options.onClose?.();
       if (terminationStarted) {
         settleTerminatedCommand();
-        return;
-      }
-      if (targetResult !== undefined) {
-        finishReleasedCommand();
         return;
       }
       finish(() => {
@@ -660,16 +666,7 @@ export function runBoundedCommand(
       clearTimeout(startupDeadline);
       if (commandDeadline !== undefined) clearTimeout(commandDeadline);
       targetResult = message;
-      state = 'release-sent';
-      releaseDeadline = setTimeout(() => {
-        finish(() => {
-          rejectCommand(new Error('Command cleanup timed out'));
-        }, true);
-      }, options.cleanupTimeoutMs);
-      releaseDeadline.unref();
-      if (!sendToSupervisor({ type: 'release' })) {
-        // The independently owned release deadline remains authoritative.
-      }
+      beginTermination();
     });
     const startupDeadline = setTimeout(() => {
       beginTermination('Command startup timed out');

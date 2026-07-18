@@ -3,8 +3,6 @@ import { spawn } from 'node:child_process';
 import { win32 } from 'node:path';
 
 let target;
-let targetClosed = false;
-let releaseAccepted = false;
 let startAccepted = false;
 let spawnFailed = false;
 
@@ -40,7 +38,6 @@ function send(message) {
 }
 
 function terminateAfterOwnerDisconnect() {
-  if (releaseAccepted) return;
   if (process.platform !== 'win32') {
     try {
       process.kill(-process.pid, 'SIGKILL');
@@ -88,7 +85,6 @@ process.on('message', (message) => {
       });
     } catch {
       spawnFailed = true;
-      targetClosed = true;
       send({ type: 'target-close', code: null, signal: null, spawnFailed: true });
       return;
     }
@@ -99,20 +95,13 @@ process.on('message', (message) => {
       spawnFailed = true;
     });
     target.once('close', (code, signal) => {
-      targetClosed = true;
-      send({ type: 'target-close', code, signal, spawnFailed });
+      send({
+        type: 'target-close',
+        code: spawnFailed ? null : code,
+        signal: spawnFailed ? null : signal,
+        spawnFailed
+      });
     });
-    return;
-  }
-  if (
-    hasExactKeys(message, ['type']) &&
-    message.type === 'release' &&
-    targetClosed &&
-    !releaseAccepted
-  ) {
-    releaseAccepted = true;
-    if (process.connected) process.disconnect();
-    process.exitCode = 0;
   }
 });
 

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, posix, win32 } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  COMMAND_SUPERVISOR_STARTUP_TIMEOUT_MS,
   localArchiveInstallArguments,
   ownedTreeTerminationPlan,
   packageHarnessPlatform,
@@ -41,6 +42,15 @@ async function waitForFixturePid(path: string, signal: AbortSignal): Promise<num
   throw new Error('Fixture readiness wait aborted');
 }
 
+async function readFixturePidIfPresent(path: string): Promise<number | undefined> {
+  try {
+    return validateFixturePid(await readFile(path, 'utf8'));
+  } catch (error) {
+    if (errnoCode(error) === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
 function processIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -51,20 +61,15 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-async function cleanupFixtureTree(parentPid: number | undefined): Promise<void> {
-  if (parentPid === undefined) return;
-  const controller = new AbortController();
-  const deadline = setTimeout(() => {
-    controller.abort();
-  }, 2_000);
-  deadline.unref();
-  try {
-    await terminateOwnedProcessTree(process.platform, parentPid, controller.signal);
-  } catch (error) {
-    if (errnoCode(error) !== 'ESRCH') throw error;
-  } finally {
-    clearTimeout(deadline);
+async function waitForFixtureExit(pid: number, milliseconds = 4_000): Promise<void> {
+  const deadline = Date.now() + milliseconds;
+  while (processIsAlive(pid) && Date.now() < deadline) {
+    await new Promise<void>((resolveWait) => {
+      const timer = setTimeout(resolveWait, 10);
+      timer.unref();
+    });
   }
+  if (processIsAlive(pid)) throw new Error('Fixture process did not self-expire');
 }
 
 describe('installed-package harness portability', () => {
@@ -196,9 +201,9 @@ describe('installed-package harness portability', () => {
     const fixture = [
       "const { spawn } = require('node:child_process');",
       "const { writeFileSync } = require('node:fs');",
-      "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });",
+      "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 3000)'], { stdio: 'ignore' });",
       'writeFileSync(process.argv[1], String(child.pid));',
-      'setInterval(() => {}, 1000);'
+      'setTimeout(() => {}, 3000);'
     ].join('');
     try {
       const timeout = await runBoundedCommand(
@@ -226,38 +231,36 @@ describe('installed-package harness portability', () => {
       expect(processIsAlive(descendantPid)).toBe(false);
       expect(timeout).toMatchObject({ message: 'Command timed out' });
     } finally {
-      if (descendantPid === undefined || processIsAlive(descendantPid)) {
-        await cleanupFixtureTree(parentPid);
-      }
+      if (descendantPid !== undefined) await waitForFixtureExit(descendantPid);
+      if (parentPid !== undefined) await waitForFixtureExit(parentPid);
       await rm(temporaryRoot, { recursive: true, force: true });
     }
   }, 10_000);
 
   it('uses a fixed bounded cleanup failure when tree termination never settles', async () => {
-    const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-owned-tree-fallback-'));
     let parentPid: number | undefined;
     try {
       await expect(
         runBoundedCommand(
-          { command: process.execPath, arguments: ['-e', 'setInterval(() => {}, 1000)'] },
+          { command: process.execPath, arguments: ['-e', 'setTimeout(() => {}, 3000)'] },
           {
             cwd: process.cwd(),
             environment: process.env,
             input: '',
             timeoutMs: 50,
-            cleanupTimeoutMs: 50
+            cleanupTimeoutMs: 500
           },
           {
-            terminateOwnedTree: (pid) => {
+            terminateOwnedTree: async (pid, signal) => {
               parentPid = validateFixturePid(pid);
-              return new Promise(() => undefined);
+              await terminateOwnedProcessTree(process.platform, parentPid, signal);
+              await new Promise(() => undefined);
             }
           }
         )
       ).rejects.toThrow('Command cleanup timed out');
     } finally {
-      await cleanupFixtureTree(parentPid);
-      await rm(temporaryRoot, { recursive: true, force: true });
+      if (parentPid !== undefined) await waitForFixtureExit(parentPid);
     }
   }, 5_000);
 
@@ -281,55 +284,146 @@ describe('installed-package harness portability', () => {
     expect(closed).toBe(true);
   });
 
-  it('never targets a released supervisor whose output is still held by a descendant', async () => {
-    const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-released-supervisor-'));
+  it('finalizes an ignored descendant before preserving a successful target result', async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-successful-owned-family-'));
     const pidFile = join(temporaryRoot, 'descendant.pid');
-    let terminationCalls = 0;
+    let descendantPid: number | undefined;
     const fixture = [
       "const { spawn } = require('node:child_process');",
       "const { writeFileSync } = require('node:fs');",
-      "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 600)'], { stdio: ['ignore', 'inherit', 'inherit'] });",
+      "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1500)'], { stdio: 'ignore' });",
       'writeFileSync(process.argv[1], String(child.pid));',
-      'child.unref();'
+      'child.unref();',
+      "process.stdout.write('target stdout');",
+      "process.stderr.write('target stderr');"
     ].join('');
     try {
-      await expect(
+      const result = await runBoundedCommand(
+        { command: process.execPath, arguments: ['-e', fixture, pidFile] },
+        {
+          cwd: process.cwd(),
+          environment: process.env,
+          input: '',
+          timeoutMs: 1_000,
+          cleanupTimeoutMs: 2_000
+        }
+      );
+      descendantPid = validateFixturePid(await readFile(pidFile, 'utf8'));
+      expect(result).toEqual({
+        code: 0,
+        signal: null,
+        stdout: 'target stdout',
+        stderr: 'target stderr'
+      });
+      expect(processIsAlive(descendantPid)).toBe(false);
+    } finally {
+      descendantPid ??= await readFixturePidIfPresent(pidFile);
+      if (descendantPid !== undefined) await waitForFixtureExit(descendantPid);
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  }, 5_000);
+
+  it('kills a real pre-ready supervisor by child handle and reports the startup timeout', async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-pre-ready-supervisor-'));
+    const supervisorPath = join(temporaryRoot, 'never-ready-supervisor.mjs');
+    const pidFile = join(temporaryRoot, 'supervisor.pid');
+    let supervisorPid: number | undefined;
+    await writeFile(
+      supervisorPath,
+      [
+        "import { writeFileSync } from 'node:fs';",
+        `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+        'setTimeout(() => {}, 3200);'
+      ].join(''),
+      'utf8'
+    );
+    try {
+      const outerBoundMs = COMMAND_SUPERVISOR_STARTUP_TIMEOUT_MS + 1_000;
+      let boundExpired = false;
+      const bound = new Promise<Error>((resolveBound) => {
+        const deadline = setTimeout(() => {
+          boundExpired = true;
+          resolveBound(new Error('outer bound expired'));
+        }, outerBoundMs);
+        deadline.unref();
+      });
+      const result = await Promise.race([
         runBoundedCommand(
-          { command: process.execPath, arguments: ['-e', fixture, pidFile] },
+          { command: process.execPath, arguments: ['-e', 'process.exit(0)'] },
           {
             cwd: process.cwd(),
             environment: process.env,
             input: '',
-            timeoutMs: 200,
-            cleanupTimeoutMs: 50
+            timeoutMs: 1_000,
+            cleanupTimeoutMs: 1_000
           },
+          { supervisorPath }
+        ).catch((error: unknown) => error as Error),
+        bound
+      ]);
+      expect(boundExpired).toBe(false);
+      expect(result).toMatchObject({ message: 'Command startup timed out' });
+      supervisorPid = validateFixturePid(await readFile(pidFile, 'utf8'));
+      expect(processIsAlive(supervisorPid)).toBe(false);
+    } finally {
+      supervisorPid ??= await readFixturePidIfPresent(pidFile);
+      if (supervisorPid !== undefined) await waitForFixtureExit(supervisorPid);
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  }, 6_000);
+
+  it('normalizes a nonexistent target executable to the fixed spawn failure', async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-missing-target-'));
+    try {
+      await expect(
+        runBoundedCommand(
+          { command: join(temporaryRoot, 'does-not-exist'), arguments: [] },
           {
-            terminateOwnedTree: () => {
-              terminationCalls += 1;
-              return Promise.resolve();
-            }
+            cwd: process.cwd(),
+            environment: process.env,
+            input: '',
+            timeoutMs: 1_000,
+            cleanupTimeoutMs: 2_000
           }
         )
-      ).rejects.toThrow('Command cleanup timed out');
-      expect(terminationCalls).toBe(0);
-      const controller = new AbortController();
-      const deadline = setTimeout(() => {
-        controller.abort();
-      }, 1_000);
-      deadline.unref();
-      const descendantPid = await waitForFixturePid(pidFile, controller.signal);
-      while (processIsAlive(descendantPid) && !controller.signal.aborted) {
-        await new Promise<void>((resolveWait) => {
-          const timer = setTimeout(resolveWait, 10);
-          timer.unref();
-        });
-      }
-      clearTimeout(deadline);
-      expect(processIsAlive(descendantPid)).toBe(false);
+      ).rejects.toThrow('Command failed to start');
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }
   });
+
+  it('fails closed on a negative target code that is not a spawn failure', async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-malformed-supervisor-'));
+    const supervisorPath = join(temporaryRoot, 'malformed-supervisor.mjs');
+    await writeFile(
+      supervisorPath,
+      [
+        "process.on('message', (message) => {",
+        "if (message?.type === 'start') process.send({ type: 'target-close', code: -2, signal: null, spawnFailed: false });",
+        '});',
+        "process.send({ type: 'ready' });",
+        'setTimeout(() => {}, 1500);'
+      ].join(''),
+      'utf8'
+    );
+    try {
+      await expect(
+        runBoundedCommand(
+          { command: process.execPath, arguments: ['-e', 'process.exit(0)'] },
+          {
+            cwd: process.cwd(),
+            environment: process.env,
+            input: '',
+            timeoutMs: 1_000,
+            cleanupTimeoutMs: 2_000
+          },
+          { supervisorPath }
+        )
+      ).rejects.toThrow('Command supervisor protocol failed');
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  }, 5_000);
 
   it('bounds captured command output before returning a fixed failure', async () => {
     await expect(
