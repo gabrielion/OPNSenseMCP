@@ -3,6 +3,7 @@ import { Buffer } from 'node:buffer';
 import { randomBytes as secureRandomBytes } from 'node:crypto';
 import type { ToolAnnotations } from '@modelcontextprotocol/server';
 import type * as z from 'zod/v4';
+import { FeatureFlagSchema } from '../config/feature-flags.js';
 import type { FeatureFlag } from '../config/feature-flags.js';
 import { createCanonicalJsonSnapshot } from '../security/canonical-json.js';
 import { areDeclaredResourceScopesAllowed } from './exposure.js';
@@ -25,6 +26,7 @@ const DEFAULT_LEDGER_CAPACITY = 1024;
 const MAX_TIMEOUT_MS = 300_000;
 const CONFIRMATION_ID_BYTES = 32;
 const CONFIRMATION_ID_ATTEMPTS = 4;
+const INVALID_CAPABILITY_DEFINITION_MESSAGE = 'Invalid capability definition';
 
 const REFUSAL_MESSAGES: Readonly<Record<RefusalCode, string>> = Object.freeze({
   CANCELLED: 'Capability execution was cancelled.',
@@ -152,51 +154,141 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+function invalidCapabilityDefinition(): never {
+  throw new Error(INVALID_CAPABILITY_DEFINITION_MESSAGE);
+}
+
+function readOwnDataProperty(source: unknown, key: string): unknown {
+  if (!isRecord(source)) return invalidCapabilityDefinition();
+  const descriptor = Object.getOwnPropertyDescriptor(source, key);
+  if (descriptor === undefined || !('value' in descriptor)) {
+    return invalidCapabilityDefinition();
+  }
+  return descriptor.value;
+}
+
+function copyDenseArray<T>(
+  value: unknown,
+  isValidElement: (element: unknown) => element is T
+): readonly T[] {
+  if (!Array.isArray(value)) return invalidCapabilityDefinition();
+
+  const copy: T[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const key = String(index);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (
+      !Object.hasOwn(value, key) ||
+      descriptor === undefined ||
+      !('value' in descriptor) ||
+      !isValidElement(descriptor.value)
+    ) {
+      return invalidCapabilityDefinition();
+    }
+    copy.push(descriptor.value);
+  }
+
+  for (const key of Reflect.ownKeys(value)) {
+    if (key === 'length') continue;
+    if (typeof key !== 'string') return invalidCapabilityDefinition();
+    const index = Number(key);
+    if (!Number.isInteger(index) || index < 0 || index >= value.length || String(index) !== key) {
+      return invalidCapabilityDefinition();
+    }
+  }
+  return Object.freeze(copy);
+}
+
+function isTransportKind(value: unknown): value is TransportKind {
+  return value === 'stdio' || value === 'http';
+}
+
+function isCapabilityEffect(value: unknown): value is CapabilityEffect {
+  return value === 'read' || value === 'local-write' || value === 'firewall-write';
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string';
+}
+
+function isFeatureFlag(value: unknown): value is FeatureFlag {
+  return FeatureFlagSchema.safeParse(value).success;
+}
+
 export function defineCapability<
   TInput extends Record<string, unknown>,
   TOutput extends Record<string, unknown>
 >(definition: TypedCapabilityDefinition<TInput, TOutput>): CapabilityDefinition {
-  const id = definition.id;
-  const mcpName = definition.mcpName;
-  const title = definition.title;
-  const description = definition.description;
-  const inputSchema = definition.inputSchema;
-  const outputSchema = definition.outputSchema;
-  const parseInput = inputSchema.parse.bind(inputSchema) as (value: unknown) => TInput;
-  const parseOutput = outputSchema.parse.bind(outputSchema) as (value: unknown) => TOutput;
-  const handler = definition.handler;
-  const annotations = Object.freeze({ ...definition.annotations });
-  const transports = Object.freeze([...definition.transports]);
-  const sourcePolicy = definition.policy;
-  const timeoutMs = sourcePolicy.timeoutMs;
-  if (!isValidTimeout(timeoutMs)) throw new Error('Invalid capability timeout policy');
-  const policy: CapabilityPolicy = Object.freeze({
-    effect: sourcePolicy.effect,
-    resourceScopes: Object.freeze([...sourcePolicy.resourceScopes]),
-    requiredFeatureFlags: Object.freeze([...sourcePolicy.requiredFeatureFlags]),
-    backup: sourcePolicy.backup,
-    audit: sourcePolicy.audit,
-    confirmation: sourcePolicy.confirmation,
-    timeoutMs,
-    redactFields: Object.freeze([...sourcePolicy.redactFields])
-  });
+  try {
+    const id = definition.id;
+    const mcpName = definition.mcpName;
+    const title = definition.title;
+    const description = definition.description;
+    const inputSchema = definition.inputSchema;
+    const outputSchema = definition.outputSchema;
+    const parseInput = inputSchema.parse.bind(inputSchema) as (value: unknown) => TInput;
+    const parseOutput = outputSchema.parse.bind(outputSchema) as (value: unknown) => TOutput;
+    const handler = definition.handler;
+    const annotations = Object.freeze({ ...definition.annotations });
+    const transports = copyDenseArray(definition.transports, isTransportKind);
+    const sourcePolicy: unknown = definition.policy;
+    const effect = readOwnDataProperty(sourcePolicy, 'effect');
+    const resourceScopes = copyDenseArray(
+      readOwnDataProperty(sourcePolicy, 'resourceScopes'),
+      isString
+    );
+    const requiredFeatureFlags = copyDenseArray(
+      readOwnDataProperty(sourcePolicy, 'requiredFeatureFlags'),
+      isFeatureFlag
+    );
+    const backup = readOwnDataProperty(sourcePolicy, 'backup');
+    const audit = readOwnDataProperty(sourcePolicy, 'audit');
+    const confirmation = readOwnDataProperty(sourcePolicy, 'confirmation');
+    const timeoutMs = readOwnDataProperty(sourcePolicy, 'timeoutMs');
+    const redactFields = copyDenseArray(
+      readOwnDataProperty(sourcePolicy, 'redactFields'),
+      isString
+    );
+    if (
+      !isCapabilityEffect(effect) ||
+      (backup !== 'none' && backup !== 'strict') ||
+      (audit !== 'none' && audit !== 'required') ||
+      (confirmation !== 'none' && confirmation !== 'elicitation') ||
+      typeof timeoutMs !== 'number' ||
+      !isValidTimeout(timeoutMs)
+    ) {
+      return invalidCapabilityDefinition();
+    }
+    const policy: CapabilityPolicy = Object.freeze({
+      effect,
+      resourceScopes,
+      requiredFeatureFlags,
+      backup,
+      audit,
+      confirmation,
+      timeoutMs,
+      redactFields
+    });
 
-  const capability: CapabilityDefinition = Object.freeze({
-    id,
-    mcpName,
-    title,
-    description,
-    inputSchema,
-    outputSchema,
-    annotations,
-    transports,
-    policy,
-    parseInput: (value: unknown) => parseInput(value),
-    parseOutput: (value: unknown) => parseOutput(value)
-  });
-  capabilityHandlers.set(capability, (input, context) => handler(input as TInput, context));
-  kernelDefinedCapabilities.add(capability);
-  return capability;
+    const capability: CapabilityDefinition = Object.freeze({
+      id,
+      mcpName,
+      title,
+      description,
+      inputSchema,
+      outputSchema,
+      annotations,
+      transports,
+      policy,
+      parseInput: (value: unknown) => parseInput(value),
+      parseOutput: (value: unknown) => parseOutput(value)
+    });
+    capabilityHandlers.set(capability, (input, context) => handler(input as TInput, context));
+    kernelDefinedCapabilities.add(capability);
+    return capability;
+  } catch {
+    return invalidCapabilityDefinition();
+  }
 }
 
 export function isKernelDefinedCapability(capability: CapabilityDefinition): boolean {

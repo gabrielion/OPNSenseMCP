@@ -63,7 +63,9 @@ interface FixtureOptions {
   ) => Promise<Record<string, unknown>>;
 }
 
-function createKernelFixture(options: FixtureOptions = {}): CapabilityDefinition {
+function createKernelDefinition(
+  options: FixtureOptions = {}
+): TypedCapabilityDefinition<Record<string, unknown>, Record<string, unknown>> {
   const inputSchema =
     options.inputSchema ??
     (z.object({ value: z.string() }).strict() as z.ZodType<Record<string, unknown>>);
@@ -74,7 +76,7 @@ function createKernelFixture(options: FixtureOptions = {}): CapabilityDefinition
     options.handler ??
     ((input: Record<string, unknown>) => Promise.resolve({ echoed: input.value }));
 
-  return defineCapability<Record<string, unknown>, Record<string, unknown>>({
+  return {
     id: options.id ?? 'kernel.read',
     mcpName: options.mcpName ?? 'kernel_read',
     title: 'Kernel fixture',
@@ -99,7 +101,11 @@ function createKernelFixture(options: FixtureOptions = {}): CapabilityDefinition
       redactFields: []
     },
     handler
-  });
+  };
+}
+
+function createKernelFixture(options: FixtureOptions = {}): CapabilityDefinition {
+  return defineCapability(createKernelDefinition(options));
 }
 
 function policyOptions(overrides: Partial<CapabilityPolicyOptions> = {}): CapabilityPolicyOptions {
@@ -154,15 +160,121 @@ afterEach(() => {
 });
 
 describe('closed capability definitions', () => {
+  const invalidDefinitionError = /^Invalid capability definition$/;
+
   it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 0, 1.5, 300_001])(
     'rejects invalid timeout metadata %s synchronously',
     (timeoutMs) => {
-      expect(() => createKernelFixture({ timeoutMs })).toThrow('Invalid capability timeout policy');
+      expect(() => createKernelFixture({ timeoutMs })).toThrow(invalidDefinitionError);
     }
   );
 
   it.each([1, 300_000])('accepts boundary timeout metadata %s', (timeoutMs) => {
     expect(createKernelFixture({ timeoutMs }).policy.timeoutMs).toBe(timeoutMs);
+  });
+
+  it.each([
+    ['effect', 'observe'],
+    ['backup', 'best-effort'],
+    ['audit', 'optional'],
+    ['confirmation', 'skip-confirmation']
+  ] as const)('rejects invalid runtime policy enum %s', (field, invalidValue) => {
+    const definition = createKernelDefinition({ effect: 'firewall-write' });
+    Reflect.set(definition.policy, field, invalidValue);
+
+    expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+  });
+
+  it('does not admit an unknown confirmation policy as an unconfirmed write', () => {
+    const handler = vi.fn(() => Promise.resolve({ echoed: 'unsafe' }));
+    const definition = createKernelDefinition({ effect: 'firewall-write', handler });
+    Reflect.set(definition.policy, 'confirmation', 'skip-confirmation');
+
+    expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it.each([{ transports: ['websocket'] }, { transports: ['stdio', 'websocket'] }])(
+    'rejects invalid runtime transports $transports',
+    ({ transports }) => {
+      const definition = createKernelDefinition();
+      Reflect.set(definition, 'transports', transports);
+
+      expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+    }
+  );
+
+  it.each([
+    { field: 'transports', value: 'stdio' },
+    { field: 'transports', value: new Set(['stdio']) },
+    { field: 'resourceScopes', value: 'kernel.read' },
+    { field: 'requiredFeatureFlags', value: new Set(['ssh']) },
+    { field: 'redactFields', value: null }
+  ] as const)('rejects non-array runtime shape for $field', ({ field, value }) => {
+    const definition = createKernelDefinition();
+    if (field === 'transports') Reflect.set(definition, field, value);
+    else Reflect.set(definition.policy, field, value);
+
+    expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+  });
+
+  it.each([
+    { field: 'resourceScopes', value: [42] },
+    { field: 'requiredFeatureFlags', value: ['unknown-feature'] },
+    { field: 'redactFields', value: [null] }
+  ] as const)('rejects invalid $field array members', ({ field, value }) => {
+    const definition = createKernelDefinition();
+    Reflect.set(definition.policy, field, value);
+
+    expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+  });
+
+  it.each(['transports', 'resourceScopes', 'requiredFeatureFlags', 'redactFields'] as const)(
+    'rejects sparse $field arrays',
+    (field) => {
+      const sparse = new Array<string>(1);
+      const definition = createKernelDefinition();
+      if (field === 'transports') Reflect.set(definition, field, sparse);
+      else Reflect.set(definition.policy, field, sparse);
+
+      expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+    }
+  );
+
+  it.each([{ policy: null }, { policy: [] }, { policy: 'policy' }])(
+    'rejects invalid policy container $policy',
+    ({ policy }) => {
+      const definition = createKernelDefinition();
+      Reflect.set(definition, 'policy', policy);
+
+      expect(() => defineCapability(definition)).toThrow(invalidDefinitionError);
+    }
+  );
+
+  it.each([
+    { field: 'effect', values: ['read', 'local-write', 'firewall-write'] },
+    { field: 'backup', values: ['none', 'strict'] },
+    { field: 'audit', values: ['none', 'required'] },
+    { field: 'confirmation', values: ['none', 'elicitation'] }
+  ] as const)('accepts every valid $field policy boundary', ({ field, values }) => {
+    for (const value of values) {
+      const definition = createKernelDefinition();
+      Reflect.set(definition.policy, field, value);
+
+      expect(defineCapability(definition).policy[field]).toBe(value);
+    }
+  });
+
+  it.each([
+    { transports: [] },
+    { transports: ['stdio'] },
+    { transports: ['http'] },
+    { transports: ['stdio', 'http'] }
+  ] as const)('accepts valid runtime transports $transports', ({ transports }) => {
+    const definition = createKernelDefinition();
+    Reflect.set(definition, 'transports', transports);
+
+    expect(defineCapability(definition).transports).toEqual(transports);
   });
 
   it('captures parsers, handler, policy, annotations, and arrays before sealing', async () => {
