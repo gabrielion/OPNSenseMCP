@@ -38,6 +38,7 @@ export class CapabilityCatalog {
       this.#byMcpName.set(definition.mcpName, definition);
     }
     this.all = Object.freeze([...definitions]);
+    Object.freeze(this);
   }
 
   getById(id: string): CapabilityDefinition | undefined {
@@ -49,7 +50,7 @@ export class CapabilityCatalog {
   }
 
   listExposed(context: ExposureContext): readonly CapabilityDefinition[] {
-    return this.all.filter((capability) => isExposed(capability, context));
+    return Object.freeze(this.all.filter((capability) => isExposed(capability, context)));
   }
 }
 

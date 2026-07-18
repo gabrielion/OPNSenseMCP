@@ -27,24 +27,85 @@ describe('CapabilityCatalog', () => {
     );
   });
 
+  it('freezes the catalog instance after constructing its indexes', () => {
+    const catalog = new CapabilityCatalog([createReadFixture()]);
+    const all = catalog.all;
+
+    expect(Object.isFrozen(catalog)).toBe(true);
+    expect(Reflect.set(catalog, 'all', [])).toBe(false);
+    expect(catalog.all).toBe(all);
+  });
+
   it('hides writes in read-only mode and keeps direct metadata immutable', () => {
     const read = createReadFixture();
     const write = createMutationFixture();
     const catalog = new CapabilityCatalog([read, write]);
 
-    expect(
-      catalog.listExposed({
-        readOnly: true,
-        transport: 'stdio',
-        enabledFeatureFlags: new Set(),
-        allowedResourceScopes: null
-      })
-    ).toEqual([read]);
+    const exposed = catalog.listExposed({
+      readOnly: true,
+      transport: 'stdio',
+      enabledFeatureFlags: new Set(),
+      allowedResourceScopes: null
+    });
+
+    expect(exposed).toEqual([read]);
+    expect(Object.isFrozen(exposed)).toBe(true);
     expect(Object.isFrozen(catalog.all)).toBe(true);
     expect(Object.isFrozen(read)).toBe(true);
     expect(Object.isFrozen(read.annotations)).toBe(true);
     expect(Object.isFrozen(read.policy)).toBe(true);
     expect(Object.isFrozen(read.policy.resourceScopes)).toBe(true);
+  });
+
+  it('filters capabilities unavailable on the selected transport', () => {
+    const read = createReadFixture();
+    const httpOnly = { ...read, transports: ['http'] as const };
+    const catalog = new CapabilityCatalog([httpOnly]);
+
+    expect(
+      catalog.listExposed({
+        readOnly: false,
+        transport: 'stdio',
+        enabledFeatureFlags: new Set(),
+        allowedResourceScopes: null
+      })
+    ).toEqual([]);
+  });
+
+  it('filters capabilities whose feature flags are disabled', () => {
+    const read = createReadFixture();
+    const sshOnly = {
+      ...read,
+      policy: { ...read.policy, requiredFeatureFlags: ['ssh'] as const }
+    };
+    const catalog = new CapabilityCatalog([sshOnly]);
+
+    expect(
+      catalog.listExposed({
+        readOnly: false,
+        transport: 'stdio',
+        enabledFeatureFlags: new Set(),
+        allowedResourceScopes: null
+      })
+    ).toEqual([]);
+  });
+
+  it('filters capabilities outside the active resource scope allow-list', () => {
+    const read = createReadFixture();
+    const restricted = {
+      ...read,
+      policy: { ...read.policy, resourceScopes: ['restricted'] as const }
+    };
+    const catalog = new CapabilityCatalog([restricted]);
+
+    expect(
+      catalog.listExposed({
+        readOnly: false,
+        transport: 'stdio',
+        enabledFeatureFlags: new Set(),
+        allowedResourceScopes: new Set(['test.read'])
+      })
+    ).toEqual([]);
   });
 
   it('ships only the read-only server status capability', () => {

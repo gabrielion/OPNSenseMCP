@@ -990,24 +990,85 @@ describe('CapabilityCatalog', () => {
     );
   });
 
+  it('freezes the catalog instance after constructing its indexes', () => {
+    const catalog = new CapabilityCatalog([createReadFixture()]);
+    const all = catalog.all;
+
+    expect(Object.isFrozen(catalog)).toBe(true);
+    expect(Reflect.set(catalog, 'all', [])).toBe(false);
+    expect(catalog.all).toBe(all);
+  });
+
   it('hides writes in read-only mode and keeps direct metadata immutable', () => {
     const read = createReadFixture();
     const write = createMutationFixture();
     const catalog = new CapabilityCatalog([read, write]);
 
-    expect(
-      catalog.listExposed({
-        readOnly: true,
-        transport: 'stdio',
-        enabledFeatureFlags: new Set(),
-        allowedResourceScopes: null
-      })
-    ).toEqual([read]);
+    const exposed = catalog.listExposed({
+      readOnly: true,
+      transport: 'stdio',
+      enabledFeatureFlags: new Set(),
+      allowedResourceScopes: null
+    });
+
+    expect(exposed).toEqual([read]);
+    expect(Object.isFrozen(exposed)).toBe(true);
     expect(Object.isFrozen(catalog.all)).toBe(true);
     expect(Object.isFrozen(read)).toBe(true);
     expect(Object.isFrozen(read.annotations)).toBe(true);
     expect(Object.isFrozen(read.policy)).toBe(true);
     expect(Object.isFrozen(read.policy.resourceScopes)).toBe(true);
+  });
+
+  it('filters capabilities unavailable on the selected transport', () => {
+    const read = createReadFixture();
+    const httpOnly = { ...read, transports: ['http'] as const };
+    const catalog = new CapabilityCatalog([httpOnly]);
+
+    expect(
+      catalog.listExposed({
+        readOnly: false,
+        transport: 'stdio',
+        enabledFeatureFlags: new Set(),
+        allowedResourceScopes: null
+      })
+    ).toEqual([]);
+  });
+
+  it('filters capabilities whose feature flags are disabled', () => {
+    const read = createReadFixture();
+    const sshOnly = {
+      ...read,
+      policy: { ...read.policy, requiredFeatureFlags: ['ssh'] as const }
+    };
+    const catalog = new CapabilityCatalog([sshOnly]);
+
+    expect(
+      catalog.listExposed({
+        readOnly: false,
+        transport: 'stdio',
+        enabledFeatureFlags: new Set(),
+        allowedResourceScopes: null
+      })
+    ).toEqual([]);
+  });
+
+  it('filters capabilities outside the active resource scope allow-list', () => {
+    const read = createReadFixture();
+    const restricted = {
+      ...read,
+      policy: { ...read.policy, resourceScopes: ['restricted'] as const }
+    };
+    const catalog = new CapabilityCatalog([restricted]);
+
+    expect(
+      catalog.listExposed({
+        readOnly: false,
+        transport: 'stdio',
+        enabledFeatureFlags: new Set(),
+        allowedResourceScopes: new Set(['test.read'])
+      })
+    ).toEqual([]);
   });
 
   it('ships only the read-only server status capability', () => {
@@ -1195,6 +1256,7 @@ export class CapabilityCatalog {
       this.#byMcpName.set(definition.mcpName, definition);
     }
     this.all = Object.freeze([...definitions]);
+    Object.freeze(this);
   }
 
   getById(id: string): CapabilityDefinition | undefined {
@@ -1206,7 +1268,7 @@ export class CapabilityCatalog {
   }
 
   listExposed(context: ExposureContext): readonly CapabilityDefinition[] {
-    return this.all.filter((capability) => isExposed(capability, context));
+    return Object.freeze(this.all.filter((capability) => isExposed(capability, context)));
   }
 }
 
@@ -1291,7 +1353,9 @@ npm run typecheck
 npm run lint
 ```
 
-Expected: eleven focused tests pass; typecheck and lint exit `0`.
+Expected: fifteen focused tests pass; typecheck and lint exit `0`. The catalog instance and every
+`listExposed()` result are frozen at runtime; the focused catalog tests cover read-only, transport,
+feature-flag, and resource-scope exposure filters.
 
 - [ ] **Step 7: Commit the catalog atomically**
 
