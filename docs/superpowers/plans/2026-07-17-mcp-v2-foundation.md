@@ -20,7 +20,10 @@
 - Keep `exactOptionalPropertyTypes` enabled. When a value may be absent, omit the optional key with a conditional spread as shown in the snippets; never materialize an absent optional property with an undefined value.
 - Import no symbol from `@modelcontextprotocol/core-internal`.
 - `buildServer(application, transport): McpServer` is the only primary beta.4 MCP assembly point. The sole exception is Task 7b's isolated deprecated-SSE v1 adapter, which may import only shared catalog metadata and `dispatchCapability`; capability handlers import no MCP transport type and v1 objects never cross into the v2 server.
-- Stdio is the default executable path and uses `serveStdio`; Streamable HTTP uses `createMcpHandler` plus `toNodeHandler` and `createMcpExpressApp`.
+- Stdio is the default executable path and uses `serveStdio`; production Streamable HTTP uses
+  `createMcpHandler` plus `toNodeHandler` on a plain Express application so project Host, exact-Origin,
+  body, and authentication middleware run in the required order. `createMcpExpressApp` is reserved for the
+  isolated conformance harness because it installs its own JSON and hostname-only Origin middleware.
 - The capability catalog is closed: undeclared, hidden, disabled, transport-incompatible, and read-only-forbidden calls fail before a handler runs.
 - The foundation registers no local-write or firewall-write product capability. Mutation execution remains unavailable until strict backup and audit gates are implemented in a separately reviewed plan.
 - MCP instructions and prompts guide behavior but never authorize a change. Form elicitation is used only when the client advertises it, and missing support fails closed.
@@ -2325,12 +2328,15 @@ git commit -m "feat: assemble opaque dual-era MCP v2 application"
   middleware closure; it never returns the token or internal config.
 - startHttp(application, options?) returns { url, limits, close }. The caller owns application; runtime close
   independently settles handler and Node server.
-- HTTP is loopback-only, exact Host/Origin, authenticated, bounded, and disabled by default.
+- HTTP is loopback-only, uses an exact hostname allow-list plus an exact serialized-Origin allow-list,
+  is authenticated, bounded, and disabled by default. Host ports are intentionally ignored after strict
+  hostname parsing; Origin entries retain scheme, host, and port.
 
 Exact limits: 256 KiB JSON body, 32 concurrent requests, 16 subscriptions, 10-second body receipt,
-30-second ordinary execution, 5-minute stream lifetime, 2-minute legacy-session idle timeout, 8 legacy
-sessions, 5-second headers/keep-alive timeouts, and 100 requests per socket. Primary Streamable HTTP keeps
-2025 compatibility stateless with legacy: 'stateless'.
+30-second ordinary execution, 5-minute absolute stream lifetime, 5-second headers/keep-alive timeouts, and
+100 requests per socket. Primary Streamable HTTP keeps 2025 compatibility stateless with
+`legacy: 'stateless'` and therefore owns no legacy session store. The 2-minute idle timeout and 8-session
+cap belong exclusively to Task 7b's deprecated SSE store.
 
 - [ ] **Step 1: Write executable, HTTP, ownership, and partial-failure tests first**
 
@@ -2351,7 +2357,8 @@ tests/http/runtime.test.ts uses injected Foundation applications and covers:
 - foreign Host 403;
 - absent Origin allowed for non-browser clients, present Origin exact-match only, default browser deny;
 - scheme/host/port variants, null, opaque, malformed, and duplicate Origin headers denied before auth;
-- oversized/slow bodies, request concurrency, execution deadline, stream/subscription/session bounds;
+- oversized/slow bodies, request concurrency, the absolute ordinary/stream deadlines, subscription bounds,
+  and the absence of a primary HTTP session store;
 - validated auth reaches beta.4 createMcpHandler/toNodeHandler and receives server_status in both supported
   eras;
 - AuthInfo has token, scopes [], and the honest single-principal clientId http:local-bearer;
@@ -2376,9 +2383,9 @@ legacySseEnabled plus an authenticate RequestHandler already closed over the exp
 never a property, callback argument, serialization value, or return value. Only src/http/runtime.ts may
 import this helper; add the import allow-list to the architecture test.
 
-Create src/http/auth.ts. Compare SHA-256 digests with timingSafeEqual and set validated AuthInfo using a local
-typed Express Request & { auth?: AuthInfo } cast because Express 5 Request has no auth declaration while
-toNodeHandler reads req.auth. Do not use any or a global mutable augmentation. Set exactly:
+Create src/http/auth.ts. Compare SHA-256 digests with timingSafeEqual and set validated AuthInfo through the
+`@modelcontextprotocol/express` Request augmentation (a narrow local typed projection is also acceptable).
+Do not use any or add another global mutable augmentation. `toNodeHandler` reads this `req.auth`. Set exactly:
 
 ~~~ts
 {
@@ -2392,7 +2399,8 @@ The closure must never log/throw the token, digest, or Authorization value.
 
 Create exact Origin middleware that treats a present Origin as a single exact serialized value; reject
 duplicates and comma-joined values. Absence is allowed. Host validation uses the official adapter helper or
-an equivalently strict exact allow-list and runs first.
+an equivalently strict exact hostname allow-list and runs first; it parses Host strictly but intentionally
+does not bind the allow-list entry to a port.
 
 - [ ] **Step 3: Implement the replaceable owned default runtime and stdio**
 
@@ -2421,9 +2429,11 @@ No other production file calls createApplicationContext(loadRuntimeConfig()). Pr
 this function body rather than adding another default composition root.
 
 Create startStdio(application?). Wrap serveStdio(createServerFactory(...), { legacy: 'serve', ... }). When no
-application is supplied, create one owned runtime. Its returned handle close() uses an idempotent aggregate
-settler so server close and owned runtime close are both attempted and all failures retained. Diagnostic
-errors write only error.name to stderr.
+application is supplied, create one owned runtime. Because beta.4 `serveStdio().close()` reports individual
+server-close failures through `onerror` and resolves, wrap the factory/onerror path with a private failure
+recorder (including discovery probes) and merge recorded failures after `serveStdio.close()` with the owned
+runtime close result. Its returned handle close() uses an idempotent aggregate settler so every cleanup is
+attempted once and all failures are retained. Diagnostic errors write only error.name to stderr.
 
 main.ts starts stdio, installs once-only SIGINT/SIGTERM handlers that await handle.close(), sets a non-zero
 exit code on failure, and never writes to stdout. Do not put credentials in process arguments.
@@ -2434,8 +2444,17 @@ Create DEFAULT_HTTP_LIMITS and the documented body/concurrency/subscription/requ
 bounds. Reject invalid option overrides at construction.
 
 startHttp(application, options?) obtains buildApplicationHttpSecurity(application), refuses disabled or
-unsafe configuration, then creates the beta.4 handler and Node/Express adapter. Middleware order is exact:
-Host, Origin, body/time/size/concurrency bounds, bearer auth, then /mcp. Keep 2025 traffic stateless.
+unsafe configuration, then creates the beta.4 handler and Node adapter on plain `express()`. Do not use
+`createMcpExpressApp` here: it installs `express.json()` and hostname-only Origin validation before project
+guards. Middleware order is exact: Host, Origin, body receipt/time/size and concurrency bounds, bearer auth,
+then `/mcp`. Keep 2025 traffic stateless. An injected options port of `0` is allowed only for ephemeral test
+listeners; environment-derived configuration remains constrained to 1024..65535.
+
+The SDK has no ordinary-execution or absolute-stream deadline option. Add a project-owned per-response
+deadline wrapper around the Node adapter: start at 30 seconds, clear on `finish`/`close`, and abort/destroy the
+response on expiry. Detect an established SSE response through a narrow response/writeHead projection and
+replace that timer with one absolute 5-minute lifetime; keepalive traffic must never extend it. Socket
+inactivity and Node `requestTimeout` are not substitutes for these execution deadlines.
 
 Construction/listen is wrapped in try/finally: if any stage fails, independently close every resource already
 created. Returned close() is idempotent and independently settles handler.close() and server.close(); one
