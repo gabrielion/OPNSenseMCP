@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { ToolAnnotations } from '@modelcontextprotocol/server';
 import type * as z from 'zod/v4';
+import type { ApplicationContext } from '../app/application-context.js';
 import type { FeatureFlag } from '../config/feature-flags.js';
 
 export type TransportKind = 'stdio' | 'http';
@@ -50,6 +51,10 @@ export interface CapabilityInvocationContext {
   readonly transport: TransportKind;
   readonly signal?: AbortSignal;
   readonly principalId?: string;
+}
+
+export interface ServerContext extends CapabilityInvocationContext {
+  readonly application: ApplicationContext;
 }
 
 export interface ConfirmationChallenge {

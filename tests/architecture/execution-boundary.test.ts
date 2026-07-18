@@ -2,6 +2,8 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { createApplicationContext } from '../../src/app/application-context.js';
+import type { RuntimeConfig } from '../../src/config/runtime-config.js';
 
 async function sourceFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
@@ -15,6 +17,38 @@ async function sourceFiles(directory: string): Promise<string[]> {
 }
 
 describe('closed capability execution boundary', () => {
+  it('exposes exactly the safe catalog reference from ApplicationContext', () => {
+    const config: RuntimeConfig = {
+      readOnly: true,
+      allowedResourceScopes: null,
+      enabledFeatureFlags: new Set(),
+      requestStateKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
+      http: {
+        enabled: false,
+        host: '127.0.0.1',
+        port: 3000,
+        allowedHosts: ['localhost'],
+        allowedOrigins: [],
+        legacySseEnabled: false
+      }
+    };
+    const application = createApplicationContext(config);
+    expect(Object.getOwnPropertyNames(application)).toEqual(['catalog']);
+    expect(Object.getOwnPropertySymbols(application)).toEqual([]);
+    for (const forbidden of [
+      'config',
+      'capabilities',
+      'dispatcher',
+      'token',
+      'key',
+      'service',
+      'settlement',
+      'completion'
+    ]) {
+      expect(Reflect.get(application, forbidden)).toBeUndefined();
+    }
+  });
+
   it('keeps raw handler and confirmation authority inside the lexical kernel', async () => {
     const files = await sourceFiles('src');
     const sources = await Promise.all(
@@ -51,11 +85,71 @@ describe('closed capability execution boundary', () => {
       'createCapabilityDispatcher',
       'ConfirmationCompletion',
       'CapabilityPolicyOptions',
+      'ApplicationContext',
+      'createApplicationContext',
+      'ConfirmationState',
+      'ConfirmationStateSchema',
+      'RequestStateCodec',
+      'settleApplicationConfirmation',
       'defineCapability',
       'isKernelDefinedCapability',
       'capabilityHandlers'
     ]) {
       expect(root).not.toContain(forbidden);
+    }
+  });
+
+  it('restricts opaque application helpers to their exact adapters', async () => {
+    const files = await sourceFiles('src');
+    const sources = await Promise.all(
+      files.map(async (path) => ({
+        path: relative('.', path),
+        source: await readFile(path, 'utf8')
+      }))
+    );
+    const allowLists: Readonly<Record<string, readonly string[]>> = {
+      listApplicationCapabilities: [
+        'src/app/application-context.ts',
+        'src/mcp/register-capabilities.ts'
+      ],
+      dispatchApplicationCapability: [
+        'src/app/application-context.ts',
+        'src/capabilities/dispatch.ts'
+      ],
+      settleApplicationConfirmation: ['src/app/application-context.ts', 'src/mcp/confirmation.ts'],
+      createApplicationRequestStateCodec: [
+        'src/app/application-context.ts',
+        'src/server/build-server.ts'
+      ]
+    };
+    for (const [helper, allowed] of Object.entries(allowLists)) {
+      expect(
+        sources
+          .filter(({ source }) => source.includes(helper))
+          .map(({ path }) => path)
+          .sort()
+      ).toEqual([...allowed].sort());
+    }
+  });
+
+  it('does not duplicate kernel policy branches in MCP adapters', async () => {
+    for (const path of [
+      'src/capabilities/dispatch.ts',
+      'src/mcp/register-capabilities.ts',
+      'src/mcp/confirmation.ts',
+      'src/server/build-server.ts'
+    ]) {
+      const source = await readFile(path, 'utf8');
+      for (const forbidden of [
+        'allowedResourceScopes',
+        'enabledFeatureFlags',
+        "effect !== 'read'",
+        'FEATURE_DISABLED',
+        'RESOURCE_NOT_ALLOWED',
+        'READ_ONLY'
+      ]) {
+        expect(source, `${path} contains duplicate gate ${forbidden}`).not.toContain(forbidden);
+      }
     }
   });
 
