@@ -7,8 +7,65 @@ import {
   localArchiveInstallArguments,
   ownedTreeTerminationPlan,
   packageHarnessPlatform,
-  runBoundedCommand
+  runBoundedCommand,
+  terminateOwnedProcessTree
 } from '../support/installed-package-harness.js';
+
+function errnoCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const code = (error as { readonly code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+function validateFixturePid(value: string | number): number {
+  const pid = typeof value === 'number' ? value : Number(value);
+  if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) {
+    throw new Error('Fixture did not provide a safe owned process identifier');
+  }
+  return pid;
+}
+
+async function waitForFixturePid(path: string, signal: AbortSignal): Promise<number> {
+  while (!signal.aborted) {
+    try {
+      return validateFixturePid(await readFile(path, 'utf8'));
+    } catch (error) {
+      const code = errnoCode(error);
+      if (code !== undefined && code !== 'ENOENT') throw error;
+    }
+    await new Promise<void>((resolveWait) => {
+      const timer = setTimeout(resolveWait, 10);
+      timer.unref();
+    });
+  }
+  throw new Error('Fixture readiness wait aborted');
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (errnoCode(error) === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+async function cleanupFixtureTree(parentPid: number | undefined): Promise<void> {
+  if (parentPid === undefined) return;
+  const controller = new AbortController();
+  const deadline = setTimeout(() => {
+    controller.abort();
+  }, 2_000);
+  deadline.unref();
+  try {
+    await terminateOwnedProcessTree(process.platform, parentPid, controller.signal);
+  } catch (error) {
+    if (errnoCode(error) !== 'ESRCH') throw error;
+  } finally {
+    clearTimeout(deadline);
+  }
+}
 
 describe('installed-package harness portability', () => {
   it('makes the local archive install offline and lifecycle-script free', () => {
@@ -91,9 +148,19 @@ describe('installed-package harness portability', () => {
     }
   });
 
+  it('does not start a Windows tree killer after its cleanup deadline has expired', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(terminateOwnedProcessTree('win32', 4321, controller.signal)).rejects.toThrow(
+      'Process tree termination aborted'
+    );
+  });
+
   it('kills a real parent and descendant before rejecting the command timeout', async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-owned-tree-'));
     const pidFile = join(temporaryRoot, 'descendant.pid');
+    let parentPid: number | undefined;
     let descendantPid: number | undefined;
     const fixture = [
       "const { spawn } = require('node:child_process');",
@@ -109,40 +176,38 @@ describe('installed-package harness portability', () => {
           cwd: process.cwd(),
           environment: process.env,
           input: '',
-          timeoutMs: 100,
-          cleanupTimeoutMs: 2_000
+          timeoutMs: 50,
+          cleanupTimeoutMs: 5_000
+        },
+        {
+          terminateOwnedTree: async (pid, signal) => {
+            parentPid = validateFixturePid(pid);
+            descendantPid = await waitForFixturePid(pidFile, signal);
+            await terminateOwnedProcessTree(process.platform, parentPid, signal);
+          }
         }
       ).catch((error: unknown) => error);
-      const parsedDescendantPid = Number(await readFile(pidFile, 'utf8'));
-      descendantPid = parsedDescendantPid;
-      expect(Number.isSafeInteger(parsedDescendantPid)).toBe(true);
-      expect(() => process.kill(parsedDescendantPid, 0)).toThrow(/ESRCH/u);
+      expect(descendantPid).toBeDefined();
+      if (descendantPid === undefined) {
+        throw new Error('Fixture did not publish its descendant identifier');
+      }
+      expect(processIsAlive(descendantPid)).toBe(false);
       expect(timeout).toMatchObject({ message: 'Command timed out' });
     } finally {
-      if (descendantPid !== undefined) {
-        try {
-          process.kill(descendantPid, 'SIGKILL');
-        } catch {
-          // The GREEN path has already reaped the descendant.
-        }
+      if (descendantPid === undefined || processIsAlive(descendantPid)) {
+        await cleanupFixtureTree(parentPid);
       }
       await rm(temporaryRoot, { recursive: true, force: true });
     }
-  }, 5_000);
+  }, 10_000);
 
   it('uses a fixed bounded cleanup failure when tree termination never settles', async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-owned-tree-fallback-'));
-    const pidFile = join(temporaryRoot, 'parent.pid');
     let parentPid: number | undefined;
-    const fixture = [
-      "const { writeFileSync } = require('node:fs');",
-      'writeFileSync(process.argv[1], String(process.pid));',
-      'setInterval(() => {}, 1000);'
-    ].join('');
     try {
       await expect(
         runBoundedCommand(
-          { command: process.execPath, arguments: ['-e', fixture, pidFile] },
+          { command: process.execPath, arguments: ['-e', 'setInterval(() => {}, 1000)'] },
           {
             cwd: process.cwd(),
             environment: process.env,
@@ -150,22 +215,16 @@ describe('installed-package harness portability', () => {
             timeoutMs: 50,
             cleanupTimeoutMs: 50
           },
-          { terminateOwnedTree: () => new Promise(() => undefined) }
+          {
+            terminateOwnedTree: (pid) => {
+              parentPid = validateFixturePid(pid);
+              return new Promise(() => undefined);
+            }
+          }
         )
       ).rejects.toThrow('Command cleanup timed out');
-      parentPid = Number(await readFile(pidFile, 'utf8'));
     } finally {
-      if (parentPid !== undefined) {
-        try {
-          process.kill(-parentPid, 'SIGKILL');
-        } catch {
-          try {
-            process.kill(parentPid, 'SIGKILL');
-          } catch {
-            // The fixture is already gone.
-          }
-        }
-      }
+      await cleanupFixtureTree(parentPid);
       await rm(temporaryRoot, { recursive: true, force: true });
     }
   }, 5_000);

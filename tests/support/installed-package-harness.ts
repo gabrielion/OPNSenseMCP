@@ -95,6 +95,10 @@ function terminateWindowsTree(
   signal: AbortSignal
 ): Promise<void> {
   return new Promise((resolveTermination, rejectTermination) => {
+    if (signal.aborted) {
+      rejectTermination(new Error('Process tree termination aborted'));
+      return;
+    }
     const killer = spawn(plan.command, [...plan.arguments], {
       shell: plan.shell,
       stdio: 'ignore',
@@ -139,7 +143,131 @@ function terminateWindowsTree(
   });
 }
 
-async function terminateOwnedProcessTree(
+const PROCESS_LIST_OUTPUT_LIMIT = 4 * 1024 * 1024;
+
+function posixGroupHasLiveMembers(group: number, signal: AbortSignal): Promise<boolean> {
+  return new Promise((resolveInspection, rejectInspection) => {
+    if (signal.aborted) {
+      rejectInspection(new Error('Process tree wait aborted'));
+      return;
+    }
+    const groupId = Math.abs(group);
+    const inspector = spawn('/bin/ps', ['-axo', 'pgid=,stat='], {
+      shell: false,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    let output = '';
+    let outputBytes = 0;
+    let outputExceeded = false;
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      inspector.stdout.removeAllListeners('data');
+      callback();
+    };
+    const stopInspector = () => {
+      try {
+        inspector.kill('SIGKILL');
+      } catch {
+        // Its fixed parent cleanup deadline remains authoritative.
+      }
+    };
+    const onAbort = () => {
+      stopInspector();
+      finish(() => {
+        rejectInspection(new Error('Process tree wait aborted'));
+      });
+    };
+    inspector.stdout.on('data', (chunk: Buffer) => {
+      outputBytes += chunk.length;
+      if (outputBytes > PROCESS_LIST_OUTPUT_LIMIT) {
+        outputExceeded = true;
+        stopInspector();
+        return;
+      }
+      output += chunk.toString('utf8');
+    });
+    inspector.once('error', () => {
+      finish(() => {
+        rejectInspection(new Error('Process tree status failed'));
+      });
+    });
+    inspector.once('close', (code, terminationSignal) => {
+      if (outputExceeded || code !== 0 || terminationSignal !== null) {
+        finish(() => {
+          rejectInspection(new Error('Process tree status failed'));
+        });
+        return;
+      }
+      let hasLiveMember = false;
+      for (const line of output.split(/\r?\n/u)) {
+        const fields = line.trim().split(/\s+/u);
+        if (fields[0] !== String(groupId)) continue;
+        if (fields.length < 2 || fields[1] === undefined) {
+          finish(() => {
+            rejectInspection(new Error('Process tree status failed'));
+          });
+          return;
+        }
+        if (!fields[1].startsWith('Z')) {
+          hasLiveMember = true;
+          break;
+        }
+      }
+      finish(() => {
+        resolveInspection(hasLiveMember);
+      });
+    });
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function waitForPosixGroupExit(group: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolveExit, rejectExit) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = () => {
+      finish(() => {
+        rejectExit(new Error('Process tree wait aborted'));
+      });
+    };
+    const inspect = async () => {
+      try {
+        if (!(await posixGroupHasLiveMembers(group, signal))) {
+          finish(resolveExit);
+          return;
+        }
+        if (settled || signal.aborted) {
+          onAbort();
+          return;
+        }
+        timer = setTimeout(() => void inspect(), 25);
+        timer.unref();
+      } catch {
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        finish(() => {
+          rejectExit(new Error('Process tree status failed'));
+        });
+      }
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    void inspect();
+  });
+}
+
+export async function terminateOwnedProcessTree(
   platform: NodeJS.Platform,
   pid: number | undefined,
   signal: AbortSignal
@@ -156,6 +284,7 @@ async function terminateOwnedProcessTree(
     if (errnoCode(error) === 'ESRCH') return;
     throw new Error('Process tree termination failed');
   }
+  await waitForPosixGroupExit(plan.group, signal);
 }
 
 export function localArchiveInstallArguments(archive: string): readonly string[] {
@@ -221,6 +350,7 @@ export function runBoundedCommand(
     let childClosed = false;
     let treeSettled = false;
     let settled = false;
+    let parentExited = false;
     let cleanupDeadline: ReturnType<typeof setTimeout> | undefined;
     const terminationAbort = new AbortController();
     const finish = (callback: () => void, detach = false) => {
@@ -257,10 +387,17 @@ export function runBoundedCommand(
       let termination: Promise<void>;
       try {
         const ownedPid = validatedOwnedPid(pid, process.pid);
-        termination =
-          dependencies.terminateOwnedTree === undefined
-            ? terminateOwnedProcessTree(platform, ownedPid, terminationAbort.signal)
-            : dependencies.terminateOwnedTree(ownedPid, terminationAbort.signal);
+        if (
+          platform === 'win32' &&
+          (parentExited || child.exitCode !== null || child.signalCode !== null)
+        ) {
+          termination = Promise.reject(new Error('Process identity is no longer owned'));
+        } else {
+          termination =
+            dependencies.terminateOwnedTree === undefined
+              ? terminateOwnedProcessTree(platform, ownedPid, terminationAbort.signal)
+              : dependencies.terminateOwnedTree(ownedPid, terminationAbort.signal);
+        }
       } catch {
         termination = Promise.reject(new Error('Process tree termination failed'));
       }
@@ -282,6 +419,9 @@ export function runBoundedCommand(
     child.stdin.on('error', () => undefined);
     child.once('error', () => {
       spawnFailed = true;
+    });
+    child.once('exit', () => {
+      parentExited = true;
     });
     child.once('close', (code, signal) => {
       childClosed = true;

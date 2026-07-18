@@ -88,6 +88,23 @@ function rawRequest(port, chunks, { waitForEnd = true } = {}) {
   });
 }
 
+function waitForRawSocketClose(socket, { allowReset = false } = {}) {
+  if (socket.closed) return Promise.resolve();
+  return new Promise((resolveClose, rejectClose) => {
+    let failure;
+    const onError = (error) => {
+      if (!(allowReset && error?.code === 'ECONNRESET')) failure ??= error;
+    };
+    const onClose = () => {
+      socket.off('error', onError);
+      if (failure === undefined) resolveClose();
+      else rejectClose(failure);
+    };
+    socket.on('error', onError);
+    socket.once('close', onClose);
+  });
+}
+
 async function pollProcessGone(pid, milliseconds = 3_000) {
   const deadline = Date.now() + milliseconds;
   while (Date.now() < deadline) {
@@ -954,6 +971,28 @@ describe('strict alpha.9 report evidence', () => {
 });
 
 describe('raw streaming authentication proxy', () => {
+  it('waits for close and tolerates only explicitly allowed connection resets', async () => {
+    const reset = Object.assign(new Error('expected reset'), { code: 'ECONNRESET' });
+    const allowedSocket = Object.assign(new EventEmitter(), { closed: false });
+    let allowedSettled = false;
+    const allowedWait = waitForRawSocketClose(allowedSocket, { allowReset: true }).then(() => {
+      allowedSettled = true;
+    });
+
+    allowedSocket.emit('error', reset);
+    await Promise.resolve();
+    expect(allowedSettled).toBe(false);
+    allowedSocket.emit('close');
+    await allowedWait;
+
+    const refusedSocket = Object.assign(new EventEmitter(), { closed: false });
+    const unexpected = Object.assign(new Error('unexpected socket failure'), { code: 'EPIPE' });
+    const refusedWait = expect(waitForRawSocketClose(refusedSocket)).rejects.toBe(unexpected);
+    refusedSocket.emit('error', unexpected);
+    refusedSocket.emit('close');
+    await refusedWait;
+  });
+
   class ControlledUpstreamRequest extends EventEmitter {
     destroyed = false;
     ended = false;
@@ -1152,9 +1191,13 @@ describe('raw streaming authentication proxy', () => {
     ownedResources.add(proxy);
     const port = runner.parseExactLoopbackMcpUrl(proxy.url).port;
 
-    const declared = await rawRequest(port, [
-      'POST /mcp HTTP/1.1\r\nHost: local\r\nContent-Length: 5\r\nConnection: close\r\n\r\n'
-    ]);
+    const declaredExchange = await rawRequest(
+      port,
+      ['POST /mcp HTTP/1.1\r\nHost: local\r\nContent-Length: 5\r\nConnection: close\r\n\r\n'],
+      { waitForEnd: false }
+    );
+    await waitForRawSocketClose(declaredExchange.socket, { allowReset: true });
+    const declared = Buffer.concat(declaredExchange.received).toString('latin1');
     expect(declared).toContain('413 Payload Too Large');
     expect(declared).toContain('Connection: close');
     expect(upstreamRequests).toBe(0);
@@ -1168,8 +1211,9 @@ describe('raw streaming authentication proxy', () => {
       { waitForEnd: false }
     );
     await vi.waitFor(() => expect(upstreamRequests).toBe(1));
+    const streamedClosed = waitForRawSocketClose(streamedExchange.socket, { allowReset: true });
     streamedExchange.socket.write('3\r\ncde\r\n0\r\n\r\n');
-    await once(streamedExchange.socket, 'close');
+    await streamedClosed;
     const streamed = Buffer.concat(streamedExchange.received).toString('latin1');
     expect(streamed).toContain('413 Payload Too Large');
     await vi.waitFor(() => expect(upstreamAborts).toBe(1));
@@ -1211,8 +1255,9 @@ describe('raw streaming authentication proxy', () => {
       { waitForEnd: false }
     );
     await upstreamResponded.promise;
+    const exchangeClosed = waitForRawSocketClose(exchange.socket, { allowReset: true });
     exchange.socket.write('3\r\ncde\r\n0\r\n\r\n');
-    if (!exchange.socket.destroyed) await once(exchange.socket, 'close');
+    await exchangeClosed;
 
     const rawResponse = Buffer.concat(exchange.received).toString('latin1');
     expect(rawResponse).toContain('HTTP/1.1 413 Payload Too Large');
@@ -1267,9 +1312,10 @@ describe('raw streaming authentication proxy', () => {
       );
       await exchange.deliver(upstreamResponse);
 
+      const inboundClosed = waitForRawSocketClose(inbound.socket, { allowReset: true });
       exchange.upstreamRequest.emit('error', new Error('POISON_UPSTREAM_REQUEST'));
       expect(upstreamResponse.destroyed).toBe(true);
-      if (!inbound.socket.destroyed) await once(inbound.socket, 'close');
+      await inboundClosed;
       const body = Buffer.concat(inbound.received).toString('latin1');
       expect(body).toContain('HTTP/1.1 502 Bad Gateway');
       expect(body).not.toContain(runner.CONFORMANCE_SENTINELS.token);
@@ -1312,7 +1358,7 @@ describe('raw streaming authentication proxy', () => {
         ],
         { waitForEnd: false }
       );
-      if (!inbound.socket.destroyed) await once(inbound.socket, 'close');
+      await waitForRawSocketClose(inbound.socket, { allowReset: true });
 
       const body = Buffer.concat(inbound.received).toString('latin1');
       expect(body).toContain('HTTP/1.1 502 Bad Gateway');
@@ -1339,9 +1385,10 @@ describe('raw streaming authentication proxy', () => {
       await exchange.deliver(upstreamResponse);
       await vi.waitFor(() => expect(exchange.upstreamRequest.ended).toBe(true));
 
+      const inboundClosed = waitForRawSocketClose(inbound.socket, { allowReset: true });
       upstreamResponse.emit('error', new Error('POISON_UPSTREAM_RESPONSE'));
       expect(exchange.upstreamRequest.destroyed).toBe(true);
-      if (!inbound.socket.destroyed) await once(inbound.socket, 'close');
+      await inboundClosed;
       expect(Buffer.concat(inbound.received).toString()).not.toContain(
         runner.CONFORMANCE_SENTINELS.token
       );
