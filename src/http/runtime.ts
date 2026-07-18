@@ -269,14 +269,16 @@ export function withResponseDeadline(
   return (request, response, next) => {
     const projected = response as unknown as WritableResponseProjection;
     const originalWriteHead = projected.writeHead;
+    let terminal = false;
     let deadline = clock.set(() => {
+      if (terminal) return;
+      terminal = true;
       projected.destroy();
     }, limits.executionTimeoutMs);
-    let cleared = false;
     let streaming = false;
     const clear = () => {
-      if (cleared) return;
-      cleared = true;
+      if (terminal) return;
+      terminal = true;
       clock.clear(deadline);
     };
     projected.once('finish', clear);
@@ -284,12 +286,15 @@ export function withResponseDeadline(
     projected.writeHead = (...arguments_: unknown[]) => {
       const contentType = contentTypeFromWriteHead(arguments_);
       if (
+        !terminal &&
         !streaming &&
         contentType?.split(';', 1)[0]?.trim().toLowerCase() === 'text/event-stream'
       ) {
         streaming = true;
         clock.clear(deadline);
         deadline = clock.set(() => {
+          if (terminal) return;
+          terminal = true;
           projected.destroy();
         }, limits.streamLifetimeMs);
       }

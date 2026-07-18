@@ -180,3 +180,86 @@ One Minor evidence limitation remains for the final whole-branch review: the std
 configured `serve`/`onerror` callback seam, but does not force a real SDK discovery probe to fail
 during its close cycle. Production error capture and aggregation are covered; that particular SDK
 internal path is not.
+
+## Security follow-up cycle (2026-07-18)
+
+Status: DONE_WITH_CONCERNS
+
+Base: `56e269c9598748802b887e3115dbcc6e278f6bb1`.
+
+### RED
+
+```text
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npx vitest run \
+  tests/http/task-7-review-fixes.test.ts
+
+1 file failed; 5 tests failed; 15 tests passed
+```
+
+The raw-socket Host and Origin cases received the unchanged 403 JSON body but advertised
+`Connection: keep-alive` and left an incomplete 999,999,999-byte declared body open. The deadline
+cases proved that expiry, `finish`, and `close` each still allowed a late SSE `writeHead` to schedule
+a second 300,000 ms timer after the original 30,000 ms timer.
+
+### GREEN
+
+```text
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npx vitest run \
+  tests/http/task-7-review-fixes.test.ts
+
+1 file passed; 20 tests passed
+```
+
+```text
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm run build
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npx vitest run \
+  tests/http/runtime.test.ts \
+  tests/http/task-7-review-fixes.test.ts \
+  tests/integration/process-lifecycle.test.ts \
+  tests/mcp/stdio.test.ts \
+  tests/app/default-application.test.ts \
+  tests/architecture/execution-boundary.test.ts
+
+build: exit 0
+6 files passed; 64 tests passed
+```
+
+### Fixes
+
+- Exact Host/Origin 403 rejections retain the same JSON-RPC body, set `Connection: close`, and
+  idempotently destroy the unread request after response `finish`. Real sockets prove bounded close
+  with a 50 ms body-receipt limit while auth and adapter counters remain zero.
+- Response deadlines now enter one terminal state before timeout destruction and on `finish` or
+  `close`. A late SSE response cannot promote or arm another timer after any terminal path.
+
+### Full gates
+
+```text
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm run verify
+
+exit 0
+16 files passed; 259 tests passed
+format, lint, typecheck, license check, build, and full test suite passed
+```
+
+```text
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm audit --omit=dev
+
+exit 0
+found 0 vulnerabilities
+```
+
+```text
+git diff --check
+
+exit 0
+```
+
+The repository conformance gate was attempted again and remains unavailable because
+`scripts/run-conformance.mjs` does not exist. Adding the later-task runner remains out of scope.
+
+### Commit
+
+These security fixes, tests, and report update are one atomic
+`fix: close rejected HTTP requests safely` commit. The exact SHA is reported in the handoff because
+a Git commit cannot contain its own object ID.

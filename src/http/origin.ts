@@ -12,12 +12,20 @@ function rawHeaderValues(request: Request, name: string): string[] {
   return values;
 }
 
-function reject(response: Parameters<RequestHandler>[1]): void {
-  response.status(403).json({
-    jsonrpc: '2.0',
-    error: { code: -32_000, message: 'Forbidden' },
-    id: null
+function reject(request: Request, response: Parameters<RequestHandler>[1]): void {
+  response.once('finish', () => {
+    setImmediate(() => {
+      if (!request.destroyed) request.destroy();
+    });
   });
+  response
+    .status(403)
+    .set('Connection', 'close')
+    .json({
+      jsonrpc: '2.0',
+      error: { code: -32_000, message: 'Forbidden' },
+      id: null
+    });
 }
 
 function parsedHostname(authority: string): string | undefined {
@@ -54,7 +62,7 @@ export function exactHostValidation(allowedHosts: readonly string[]): RequestHan
     const rawHosts = rawHeaderValues(request, 'host');
     const hostname = rawHosts.length === 1 ? parsedHostname(rawHosts[0] ?? '') : undefined;
     if (hostname === undefined || !allowed.has(hostname)) {
-      reject(response);
+      reject(request, response);
       return;
     }
     next();
@@ -71,7 +79,7 @@ export function exactOriginValidation(allowedOrigins: readonly string[]): Reques
     }
     const origin = origins[0] ?? '';
     if (origins.length !== 1 || origin.includes(',') || !allowed.has(origin)) {
-      reject(response);
+      reject(request, response);
       return;
     }
     next();

@@ -26,6 +26,7 @@ import { DEFAULT_HTTP_LIMITS, resolveHttpLimits, type HttpLimits } from '../../s
 import {
   buildHttpExpressApplication,
   startHttp,
+  withResponseDeadline,
   type HttpRuntime
 } from '../../src/http/runtime.js';
 
@@ -116,6 +117,58 @@ async function rawExchange(
     if (options.end !== false) request.end();
     else request.flushHeaders();
   });
+}
+
+async function rawIncompleteRejectedPost(
+  url: URL,
+  headers: readonly string[]
+): Promise<{ readonly response: string; readonly closedWithinBound: boolean }> {
+  const socket = createConnection({ host: url.hostname, port: Number(url.port) });
+  let response = '';
+  const closed = new Promise<void>((resolve) => {
+    socket.once('close', () => {
+      resolve();
+    });
+  });
+  socket.on('data', (chunk: Buffer) => {
+    response += chunk.toString('utf8');
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('error', reject);
+    });
+    socket.on('error', () => undefined);
+    socket.write(
+      [
+        'POST /mcp HTTP/1.1',
+        ...headers,
+        `Authorization: Bearer ${TOKEN}`,
+        'Content-Type: application/json',
+        'Content-Length: 999999999',
+        'Connection: keep-alive',
+        '',
+        '{'
+      ].join('\r\n')
+    );
+    await expect
+      .poll(() => response.includes('"message":"Forbidden"'), { timeout: 1_000 })
+      .toBe(true);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const closedWithinBound = await Promise.race([
+      closed.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timeout = setTimeout(() => {
+          resolve(false);
+        }, 300);
+      })
+    ]);
+    if (timeout !== undefined) clearTimeout(timeout);
+    return { response, closedWithinBound };
+  } finally {
+    socket.destroy();
+    await closed;
+  }
 }
 
 function fakeClock() {
@@ -314,6 +367,54 @@ describe('all-method body boundary', () => {
       expect(authCalls).toBe(3);
       expect(adapterCalls).toBe(3);
       expect(parsedBodies[0]).toEqual({});
+    } finally {
+      await closeServer(running.server);
+    }
+  });
+});
+
+describe('pre-body request rejection', () => {
+  it.each([
+    ['foreign Host', (url: URL) => [`Host: foreign.example:${url.port}`]],
+    ['forbidden Origin', (url: URL) => [`Host: ${url.host}`, 'Origin: https://foreign.example']]
+  ])('closes an unread incomplete body after rejecting %s', async (_label, headers) => {
+    const original = buildApplicationHttpSecurity(createApplicationContext(config()));
+    let authCalls = 0;
+    let adapterCalls = 0;
+    const security = {
+      ...original,
+      authenticate: ((request, response, next) => {
+        authCalls += 1;
+        original.authenticate(request, response, next);
+      }) satisfies typeof original.authenticate
+    };
+    const adapter = vi.fn((_request: unknown, response: ServerResponse) => {
+      adapterCalls += 1;
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{}');
+      return Promise.resolve();
+    });
+    const running = await listen(
+      buildHttpExpressApplication(
+        security,
+        Object.freeze({ ...DEFAULT_HTTP_LIMITS, bodyReceiptTimeoutMs: 50 }),
+        adapter as never
+      )
+    );
+    try {
+      const result = await rawIncompleteRejectedPost(running.url, headers(running.url));
+      expect(result.response).toContain('HTTP/1.1 403 Forbidden');
+      expect(result.response.toLowerCase()).toContain('connection: close');
+      expect(result.response).toContain(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          error: { code: -32_000, message: 'Forbidden' },
+          id: null
+        })
+      );
+      expect(result.closedWithinBound).toBe(true);
+      expect(authCalls).toBe(0);
+      expect(adapterCalls).toBe(0);
     } finally {
       await closeServer(running.server);
     }
@@ -542,6 +643,48 @@ describe('real adapter deadline boundary', () => {
       await closeServer(running.server);
     }
   });
+
+  it.each(['expiry', 'finish', 'close'] as const)(
+    'does not promote a late SSE response after terminal %s',
+    (terminal) => {
+      const scheduled: { callback: () => void; milliseconds: number; cleared: boolean }[] = [];
+      const clock = {
+        set: (callback: () => void, milliseconds: number) => {
+          const timer = { callback, milliseconds, cleared: false };
+          scheduled.push(timer);
+          return timer as never;
+        },
+        clear: (handle: { cleared: boolean }) => {
+          handle.cleared = true;
+        }
+      };
+      class FakeResponse extends EventTarget {
+        destroyed = false;
+        writeHead(..._arguments: unknown[]): this {
+          void _arguments;
+          return this;
+        }
+        once(event: 'finish' | 'close', listener: () => void): void {
+          this.addEventListener(event, listener, { once: true });
+        }
+        destroy(): void {
+          this.destroyed = true;
+        }
+      }
+      const response = new FakeResponse();
+      withResponseDeadline(
+        (() => Promise.resolve()) as never,
+        { executionTimeoutMs: 30_000, streamLifetimeMs: 300_000 },
+        clock as never
+      )({ body: undefined } as never, response as never, vi.fn());
+
+      if (terminal === 'expiry') scheduled[0]?.callback();
+      else response.dispatchEvent(new Event(terminal));
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+
+      expect(scheduled.map(({ milliseconds }) => milliseconds)).toEqual([30_000]);
+    }
+  );
 
   it('promotes a real SSE Response once, ignores keepalives, and closes at the absolute deadline', async () => {
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
