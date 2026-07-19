@@ -57,3 +57,9 @@ elicitation, application, kernel, shutdown, and architecture suites PASS at 6 fi
 (six named scenarios) PASS with zero failed checks/warnings; and `git diff --check` PASS. Native Windows, VM,
 firewall, full agentic, publication, and release evidence were not run or claimed. Another independent re-review
 is required before Foundation acceptance or downstream Provenance execution.
+
+Product 1A: owner delegated critical auto-approval and explicitly prioritized implementation over further
+specification work. Active plan:
+`docs/superpowers/plans/2026-07-19-product-1a-read-only-vertical.md`. Clean Node 22.23.1 baseline:
+`npm ci --ignore-scripts` PASS and `npm run verify` PASS at 23 files / 631 tests. No VM, old repository,
+private bundle, environment credentials, or firewall was accessed. Task 1 is next.
