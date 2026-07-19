@@ -36,6 +36,7 @@
     "format:check": "prettier --check .",
     "license:check": "node scripts/check-license-headers.mjs",
     "release:check:legacy-sse": "node scripts/check-legacy-sse-dependency.mjs",
+    "provenance:verify": "node scripts/provenance/verify-manifest.mjs docs/provenance/migration-manifest.json",
     "test": "npm run build && vitest run",
     "test:watch": "vitest",
     "test:conformance:2025": "npm run build && node scripts/run-conformance.mjs 2025-11-25",

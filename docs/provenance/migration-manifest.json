@@ -1,0 +1,701 @@
+{
+  "schemaVersion": 1,
+  "assets": [
+    {
+      "destination": ".agents/plugins/marketplace.json",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": ".claude-plugin/marketplace.json",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "CONTRIBUTING.md",
+      "class": "rewrite",
+      "contentSha256": null,
+      "auditVerdict": "pending-independent-rewrite"
+    },
+    {
+      "destination": "README.md",
+      "class": "rewrite",
+      "contentSha256": null,
+      "auditVerdict": "pending-independent-rewrite"
+    },
+    {
+      "destination": "SECURITY.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/adding-api-modules.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/api-coverage-matrix.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/ground-truth-eval.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/production.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/release.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/ssh-features.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/superpowers/plans/2026-06-22-ssh-backed-coverage.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/superpowers/plans/2026-07-17-agentic-run1-audit.json",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/superpowers/plans/2026-07-17-agentic-run1-audit.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/superpowers/plans/2026-07-17-release-install-safety-benchmark.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/superpowers/specs/2026-06-21-cleanup-hardening-backlog.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/superpowers/specs/2026-06-22-ssh-backed-coverage-design.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/superpowers/specs/2026-07-17-release-install-safety-benchmark-design.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/testing.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "docs/tool-descriptions.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "plugins/opnsense-mcp/.claude-plugin/plugin.json",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "plugins/opnsense-mcp/.codex-plugin/plugin.json",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "plugins/opnsense-mcp/.mcp.json",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "plugins/opnsense-mcp/skills/opnsense-guide/SKILL.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "plugins/opnsense-mcp/skills/opnsense-guide/agents/openai.yaml",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "scripts/setup/bootstrap-dev.sh",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "src/cli/install.ts",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "src/cli/serve.ts",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "src/features/backup/storage.ts",
+      "class": "rewrite",
+      "contentSha256": null,
+      "auditVerdict": "pending-independent-rewrite"
+    },
+    {
+      "destination": "src/http/security.ts",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "src/security/audit-log.ts",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "src/security/operation-policy.ts",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/README.md",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/exposed-tools.txt",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/gt_assurance.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/gt_attestation.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/gt_checkpoint.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/gt_lib.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/gt_metrics.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/gt_tool_policy.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/irreversible-exclusions.json",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/requirements.txt",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/run_eval.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/semantic-contracts.json",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/setup.sh",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/test_agent_trace.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/test_attestation_adversarial.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/test_checkpoint.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/test_config_hygiene.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/test_hygiene_gate.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/test_infra_classification.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/test_metrics_adversarial.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/test_predicate_inventory.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/test_result_claims.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/deepeval/test_validate_adversarial.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/ground-truth.csv",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/model-config.json",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/run-agentic.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/temp-config-hygiene.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/verify-bridge-cleanup.test.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/agentic/verify-bridge.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/helpers/live-api-client.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/helpers/mcp-client.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/helpers/private-temp-json.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/inspect.sh",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/installer/install.test.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/integration/acme-live-test.mjs",
+      "class": "discard",
+      "contentSha256": null,
+      "auditVerdict": "discarded"
+    },
+    {
+      "destination": "tests/integration/backup-flow.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/integration/backup-id-collision.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/integration/dnsbl-live-test.mjs",
+      "class": "discard",
+      "contentSha256": null,
+      "auditVerdict": "discarded"
+    },
+    {
+      "destination": "tests/integration/guardrails.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/integration/live-script-secret-hygiene.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/integration/mcp-against-mock.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/integration/mcp-against-vm.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/integration/monit-live-test.mjs",
+      "class": "discard",
+      "contentSha256": null,
+      "auditVerdict": "discarded"
+    },
+    {
+      "destination": "tests/integration/ssh-config-sections-vm.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/integration/ssh-features-vm.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/integration/ssh-restore-vm.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/integration/ssh-system-vm.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/integration/test-auto-initialization.ts",
+      "class": "discard",
+      "contentSha256": null,
+      "auditVerdict": "discarded"
+    },
+    {
+      "destination": "tests/integration/test-iac-components.ts",
+      "class": "discard",
+      "contentSha256": null,
+      "auditVerdict": "discarded"
+    },
+    {
+      "destination": "tests/integration/transport-security.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/mock-opnsense/server.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/plugin/package.test.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/setup/bootstrap-dev.test.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/smoke/claude-doc-consistency.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/smoke/list-tools.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/smoke/log-file-mode.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/smoke/redaction.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/unit/acme-client.test.js",
+      "class": "discard",
+      "contentSha256": null,
+      "auditVerdict": "discarded"
+    },
+    {
+      "destination": "tests/unit/dnsbl-subscription.test.js",
+      "class": "discard",
+      "contentSha256": null,
+      "auditVerdict": "discarded"
+    },
+    {
+      "destination": "tests/unit/monit.test.js",
+      "class": "discard",
+      "contentSha256": null,
+      "auditVerdict": "discarded"
+    },
+    {
+      "destination": "tests/unit/ssh-config-editor.test.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/assign-wan.sh",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/bootstrap-apikey.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/build-registry-snapshot.test.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/build-registry.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/disable-pf.sh",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/enable-ssh.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/image-checksum.test.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/image-sha256.txt",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/install-extra-ca.sh",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/install-plugins.sh",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/install-plugins.test.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/introspect-api.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/provision-one-vm.test.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/provision.sh",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/registry-diff.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/registry-diff.test.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/start-vm-reproducibility.test.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/start-vm.sh",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/stop-vm.sh",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/test_bootstrap_secret_hygiene.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/vm-doctor.sh",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/vm-doctor.test.mjs",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    },
+    {
+      "destination": "tests/vm/vm-exec.py",
+      "class": "approved",
+      "contentSha256": null,
+      "auditVerdict": "approved-pending-migration"
+    }
+  ]
+}
