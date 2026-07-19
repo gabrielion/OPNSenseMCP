@@ -45,3 +45,15 @@ while forbidding `@modelcontextprotocol/express`. Node 22.23.1 evidence: combine
 tests PASS, `npm run license:check` PASS, `npm run verify` PASS, both official conformance profiles (six named
 scenarios) PASS with zero failed checks/warnings, `git diff --check` PASS, and no repository result residue.
 Independent final review of this remediation remains pending before Foundation acceptance.
+
+Foundation re-review remediation: implemented in commits `33bcab8`, `7dc78ed`, `66707ef`, and `bb0a458`.
+The low-level MCP adapter now preserves the pinned SDK's object-root JSON Schema projection for object-valued
+compositions, consumes a verified one-shot confirmation redirected to an unknown name while retaining the
+fixed unknown refusal, and keeps kernel-owned transforms/refinements as the only validation boundary. The
+owned application runtime now closes admission synchronously on its first close call while the existing phased
+aggregator continues to drain admitted work before service cleanup. Node 22.23.1 evidence: focused factory,
+elicitation, application, kernel, shutdown, and architecture suites PASS at 6 files / 210 tests;
+`npm run license:check` and `npm run verify` PASS at 22 files / 518 tests; both official conformance profiles
+(six named scenarios) PASS with zero failed checks/warnings; and `git diff --check` PASS. Native Windows, VM,
+firewall, full agentic, publication, and release evidence were not run or claimed. Another independent re-review
+is required before Foundation acceptance or downstream Provenance execution.
