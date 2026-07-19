@@ -14,6 +14,7 @@ const MODEL = 'opencode/north-mini-code-free';
 const EVIDENCE_PATH = 'tests/fixtures/opencode.product1a.json';
 const OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024;
 const EXPECTED_TOOLS = ['opn_describe', 'opn_get', 'opn_list'];
+const OPENCODE_TOOL_NAMES = new Map(EXPECTED_TOOLS.map((name) => [`opnsense_${name}`, name]));
 const API_KEY = 'product1a-opencode-key';
 const API_SECRET = 'PRODUCT_1A_OPENCODE_SECRET_SENTINEL';
 
@@ -27,31 +28,41 @@ function stableBytes(value) {
 
 function closedToolName(value) {
   if (typeof value !== 'string') return undefined;
-  return EXPECTED_TOOLS.find((name) => value === name || value.endsWith(`_${name}`));
+  return OPENCODE_TOOL_NAMES.get(value);
+}
+
+function isRecord(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isErrorBearingResult(value) {
+  if (typeof value === 'string') {
+    try {
+      return isErrorBearingResult(JSON.parse(value));
+    } catch {
+      return false;
+    }
+  }
+  return isRecord(value) && (value.isError === true || Object.hasOwn(value, 'error'));
 }
 
 export function collectToolEvidence(events) {
   const selected = new Map();
-  const visit = (value) => {
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item);
-      return;
-    }
-    if (typeof value !== 'object' || value === null) return;
-    const tool = closedToolName(value.tool ?? value.name);
-    const state = typeof value.state === 'object' && value.state !== null ? value.state : value;
-    const input = state.input ?? value.input;
-    const result = state.output ?? state.result ?? value.output ?? value.result;
-    if (tool !== undefined && input !== undefined && result !== undefined) {
-      selected.set(tool, {
-        name: tool,
-        inputSha256: sha256(stableBytes(input)),
-        resultSha256: sha256(stableBytes(result))
-      });
-    }
-    for (const child of Object.values(value)) visit(child);
-  };
-  for (const event of events) visit(event);
+  for (const event of events) {
+    if (!isRecord(event) || event.type !== 'tool_use' || !isRecord(event.part)) continue;
+    const tool = closedToolName(event.part.tool);
+    const state = event.part.state;
+    if (tool === undefined || !isRecord(state) || state.status !== 'completed') continue;
+    if (Object.hasOwn(state, 'error') || Object.hasOwn(event.part, 'error')) continue;
+    const input = state.input;
+    const result = state.output;
+    if (input === undefined || result === undefined || isErrorBearingResult(result)) continue;
+    selected.set(tool, {
+      name: tool,
+      inputSha256: sha256(stableBytes(input)),
+      resultSha256: sha256(stableBytes(result))
+    });
+  }
   return EXPECTED_TOOLS.flatMap((name) => {
     const evidence = selected.get(name);
     return evidence === undefined ? [] : [evidence];
@@ -105,6 +116,29 @@ function terminateGroup(pid) {
   }
 }
 
+const BOUNDED_COMMAND_FAILURES = new Set(['spawn', 'timeout', 'output-limit']);
+
+export class BoundedCommandFailure extends Error {
+  constructor(kind) {
+    if (!BOUNDED_COMMAND_FAILURES.has(kind)) throw new Error('Invalid bounded command failure');
+    super('Bounded command failed');
+    this.name = 'BoundedCommandFailure';
+    this.kind = kind;
+  }
+}
+
+export async function runModelCommand(execute) {
+  try {
+    const result = await execute();
+    return result.code === 0 && result.signal === null
+      ? { status: 'completed', result }
+      : { status: 'blocked' };
+  } catch (error) {
+    if (error instanceof BoundedCommandFailure) return { status: 'blocked' };
+    throw error;
+  }
+}
+
 function runBounded(command, arguments_, options) {
   return new Promise((resolveCommand, rejectCommand) => {
     const child = spawn(command, arguments_, {
@@ -128,14 +162,14 @@ function runBounded(command, arguments_, options) {
     const capture = (target, chunk) => {
       bytes += chunk.length;
       if (bytes > OUTPUT_LIMIT_BYTES) {
-        finish(() => rejectCommand(new Error('Command output limit exceeded')));
+        finish(() => rejectCommand(new BoundedCommandFailure('output-limit')));
         return;
       }
       target.push(Buffer.from(chunk));
     };
     child.stdout.on('data', (chunk) => capture(stdout, chunk));
     child.stderr.on('data', (chunk) => capture(stderr, chunk));
-    child.once('error', () => finish(() => rejectCommand(new Error('Command failed to start'))));
+    child.once('error', () => finish(() => rejectCommand(new BoundedCommandFailure('spawn'))));
     child.once('close', (code, signal) =>
       finish(() =>
         resolveCommand({
@@ -147,7 +181,7 @@ function runBounded(command, arguments_, options) {
       )
     );
     const deadline = setTimeout(() => {
-      finish(() => rejectCommand(new Error('Command timed out')));
+      finish(() => rejectCommand(new BoundedCommandFailure('timeout')));
     }, options.timeoutMs);
     deadline.unref();
     child.stdin.end(options.input ?? '');
@@ -370,21 +404,24 @@ async function run() {
       } else {
         const prompt =
           'Use only the opnsense MCP server. Call opn_describe for system.status, then opn_get for system.status, then opn_list for core.services with page 1, pageSize 10, and an empty query. Do not use shell, files, or web tools. Return one short read-only summary after all three calls succeed.';
-        const routed = await runBounded(
-          openCode,
-          ['run', '--pure', '--auto', '--model', MODEL, '--format', 'json', prompt],
-          {
-            cwd: projectRoot,
-            environment: openCodeEnvironment,
-            timeoutMs: 180_000
-          }
+        const routedOutcome = await runModelCommand(() =>
+          runBounded(
+            openCode,
+            ['run', '--pure', '--auto', '--model', MODEL, '--format', 'json', prompt],
+            {
+              cwd: projectRoot,
+              environment: openCodeEnvironment,
+              timeoutMs: 180_000
+            }
+          )
         );
-        const routedOutput = `${routed.stdout}\n${routed.stderr}`;
-        secretAbsent =
-          !routedOutput.includes(API_KEY) && !routedOutput.includes(API_SECRET) && secretAbsent;
-        if (routed.code !== 0 || routed.signal !== null) {
+        if (routedOutcome.status === 'blocked') {
           blockedReason = 'model-service-unavailable';
         } else {
+          const routed = routedOutcome.result;
+          const routedOutput = `${routed.stdout}\n${routed.stderr}`;
+          secretAbsent =
+            !routedOutput.includes(API_KEY) && !routedOutput.includes(API_SECRET) && secretAbsent;
           tools = collectToolEvidence(parseJsonLines(routed.stdout));
           const observed = mock.requests.map(({ method, path }) => `${method} ${path}`);
           expectedReadsObserved =
