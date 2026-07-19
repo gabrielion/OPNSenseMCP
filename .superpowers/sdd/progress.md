@@ -67,3 +67,8 @@ private bundle, environment credentials, or firewall was accessed. Task 1 is nex
 Product 1A Task 1: complete (commits `c4efd89..fb1c08b`; 25 files / 672 tests; initial review
 found an identifier-shaped refusal-detail leak; kernel-private reviewed vocabularies and provenance-sealed
 details fixed it; re-review spec compliant and quality approved with no findings).
+
+Product 1A Task 2: complete (commits `4de635b..e8ac934`; 28 files / 710 tests; generator now
+rejects nested refs and unsafe public schemas, binds exact resource tuples and Product 1B transport note;
+re-review approved). Final-triage Minor: deprecated legacy-SSE duplicates object-root schema projection and
+lacks a direct `opn_describe` call test; current object-only surface is not blocked.
