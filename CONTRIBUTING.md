@@ -2,6 +2,8 @@
 
 Use Node.js 22.19.0 or newer within major 22. Never test against a production firewall. This foundation has no firewall adapter; future live tests must use a disposable, explicitly selected local VM.
 
+**Platform status:** macOS and Linux are the current full contributor and VM-test hosts. Native Windows is a product runtime target, not part of current verification-host coverage. Windows package and client support remain unclaimed until the later mandatory real `windows-2025` gate passes. This Foundation snapshot does not claim Windows support.
+
 ## Install and deterministic verification
 
 From the repository root:

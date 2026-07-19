@@ -9,6 +9,9 @@ const NODE_22_PREFLIGHT = [
   'node -e "const [major, minor] = process.versions.node.split(\'.\').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&'
 ] as const;
 
+const PLATFORM_STATUS =
+  '**Platform status:** macOS and Linux are the current full contributor and VM-test hosts. Native Windows is a product runtime target, not part of current verification-host coverage. Windows package and client support remain unclaimed until the later mandatory real `windows-2025` gate passes. This Foundation snapshot does not claim Windows support.';
+
 function bashBlocks(document: string): readonly string[] {
   return [...document.matchAll(/```bash\n(?<body>[\s\S]*?)\n```/gu)].map(
     (match) => match.groups?.body ?? ''
@@ -119,5 +122,57 @@ describe('foundation documentation', () => {
     expect(readme).toContain('MCP_HTTP_TOKEN="$MCP_HTTP_TOKEN" \\');
     expect(readme).not.toContain('MCP_HTTP_TOKEN="$(');
     expect(readme).not.toContain('0123456789abcdef0123456789abcdef');
+  });
+
+  it('distinguishes current verification hosts from the unclaimed Windows runtime target', async () => {
+    const [readme, contributing] = await Promise.all([
+      readFile('README.md', 'utf8'),
+      readFile('CONTRIBUTING.md', 'utf8')
+    ]);
+    for (const document of [readme, contributing]) {
+      expect(document).toContain(PLATFORM_STATUS);
+      expect(document).not.toMatch(/Windows (?:is|currently) supported/iu);
+      expect(document).not.toContain('Windows package and client support are verified');
+    }
+  });
+
+  it('hard-stops superseded Product and Guided plans until rewrite and independent review', async () => {
+    const [index, product, guided] = await Promise.all([
+      readFile('docs/superpowers/plans/2026-07-17-rebuild-plan-index.md', 'utf8'),
+      readFile('docs/superpowers/plans/2026-07-17-opnsense-product-parity.md', 'utf8'),
+      readFile('docs/superpowers/plans/2026-07-17-guided-workflows-clients-release.md', 'utf8')
+    ]);
+    const blockedBanner = '# BLOCKED / SUPERSEDED — DO NOT EXECUTE\n';
+    expect(product.startsWith(blockedBanner)).toBe(true);
+    expect(guided.startsWith(blockedBanner)).toBe(true);
+    for (const plan of [product, guided]) {
+      expect(plan).toContain('inputs to the rewrite, not executable instructions');
+      expect(plan).toContain(
+        'docs/superpowers/specs/2026-07-19-operation-catalog-progressive-discovery-design.md'
+      );
+      expect(plan).toContain(
+        'docs/superpowers/specs/2026-07-19-supported-development-hosts-design.md'
+      );
+      expect(plan).toContain('independently reviewed');
+    }
+    expect(index).toContain('MANDATORY HARD STOP');
+    expect(index).toContain('Product Task 1 MUST NOT start');
+    expect(index).toContain('independently reviewed');
+    expect(index).toContain(
+      'docs/superpowers/specs/2026-07-19-operation-catalog-progressive-discovery-design.md'
+    );
+    expect(index).toContain(
+      'docs/superpowers/specs/2026-07-19-supported-development-hosts-design.md'
+    );
+    for (const checkpoint of [index, guided]) {
+      expect(checkpoint).toContain('windows-2025');
+      expect(checkpoint).toContain('package path containing spaces');
+      expect(checkpoint).toContain('`.cmd` launch');
+      expect(checkpoint).toContain('installer and ACL');
+      expect(checkpoint).toContain('MCP exchange');
+      expect(checkpoint).toContain('mock connectivity');
+      expect(checkpoint).toContain('exact-process exit');
+      expect(checkpoint).toContain('cleanup evidence');
+    }
   });
 });

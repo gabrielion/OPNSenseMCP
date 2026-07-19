@@ -11,6 +11,8 @@ This temporary foundation provides one local read-only `server_status` tool, ped
 
 The default is `READ_ONLY=true`. A caller cannot enable a capability by inventing its name or by passing a confirmation boolean: exposure comes from the catalog, and confirmation state is signed and checked by the server.
 
+**Platform status:** macOS and Linux are the current full contributor and VM-test hosts. Native Windows is a product runtime target, not part of current verification-host coverage. Windows package and client support remain unclaimed until the later mandatory real `windows-2025` gate passes. This Foundation snapshot does not claim Windows support.
+
 ## Run locally
 
 Requirements: Node.js 22.19.0 or newer within major 22, and npm.

@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 interface PackageDocument {
   name: string;
   license: string;
+  private: boolean;
   engines: { node: string };
   scripts: Record<string, string>;
   dependencies: Record<string, string>;
@@ -57,6 +58,7 @@ describe('package contract', () => {
 
     expect(document.name).toBe('@gabrielion/opnsense-mcp');
     expect(document.license).toBe('AGPL-3.0-or-later');
+    expect(document.private).toBe(true);
     expect(document.engines.node).toBe('>=22.19 <23');
     expect(document.scripts['license:check']).toBe('node scripts/check-license-headers.mjs');
     expect(document.dependencies).toMatchObject({
@@ -66,6 +68,8 @@ describe('package contract', () => {
       express: '5.2.1',
       zod: '4.2.0'
     });
+    expect(document.dependencies).not.toHaveProperty('@modelcontextprotocol/express');
+    expect(document.devDependencies).not.toHaveProperty('@modelcontextprotocol/express');
     expect(document.devDependencies['@modelcontextprotocol/client']).toBe('2.0.0-beta.4');
     expect(document.devDependencies['@modelcontextprotocol/conformance']).toBe('0.2.0-alpha.9');
     expect(document.scripts['test:conformance:2025']).toBe(
@@ -83,6 +87,9 @@ describe('package contract', () => {
     );
 
     const lock = JSON.parse(await readFile('package-lock.json', 'utf8')) as LockDocument;
+    expect(lock.packages['']?.dependencies).not.toHaveProperty('@modelcontextprotocol/express');
+    expect(lock.packages['']?.devDependencies).not.toHaveProperty('@modelcontextprotocol/express');
+    expect(lock.packages).not.toHaveProperty('node_modules/@modelcontextprotocol/express');
     expect(lock.packages['']?.devDependencies?.['@modelcontextprotocol/conformance']).toBe(
       '0.2.0-alpha.9'
     );

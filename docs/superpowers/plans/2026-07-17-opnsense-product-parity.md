@@ -1,3 +1,11 @@
+# BLOCKED / SUPERSEDED — DO NOT EXECUTE
+
+> **Hard stop:** This plan is superseded and must not be executed task by task. Its useful requirements are
+> inputs to the rewrite, not executable instructions. Product and Guided plans must first be rewritten
+> against `docs/superpowers/specs/2026-07-19-operation-catalog-progressive-discovery-design.md` and
+> `docs/superpowers/specs/2026-07-19-supported-development-hosts-design.md`, then independently reviewed.
+> Product Task 1 must not start until that checkpoint is complete.
+
 # OPNsense Product Contract Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
