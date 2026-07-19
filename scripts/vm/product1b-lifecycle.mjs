@@ -3,8 +3,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { constants } from 'node:fs';
 import { chmod, link, lstat, mkdir, open, rmdir, unlink } from 'node:fs/promises';
-import { createConnection } from 'node:net';
 import { join } from 'node:path';
+import { connect as connectTls } from 'node:tls';
 
 export const VM_PORTS = Object.freeze({ api: 18443 });
 
@@ -434,7 +434,7 @@ export function inspectQemuProcess(pid, nonce) {
 
 export function probeLoopbackPort(host, port) {
   return new Promise((resolve) => {
-    const socket = createConnection({ host, port });
+    const socket = connectTls({ host, port, rejectUnauthorized: false });
     let settled = false;
     const finish = (value) => {
       if (settled) return;
@@ -442,8 +442,8 @@ export function probeLoopbackPort(host, port) {
       socket.destroy();
       resolve(value);
     };
-    socket.setTimeout(250, () => finish(false));
-    socket.once('connect', () => finish(true));
+    socket.setTimeout(1000, () => finish(false));
+    socket.once('secureConnect', () => finish(true));
     socket.once('error', () => finish(false));
   });
 }

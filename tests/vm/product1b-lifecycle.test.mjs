@@ -13,6 +13,10 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { once } from 'node:events';
+import { createServer as createTcpServer } from 'node:net';
+import { createServer as createTlsServer } from 'node:tls';
+import { generate } from 'selfsigned';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -21,6 +25,7 @@ import {
   buildQemuArguments,
   formatVmFailure,
   formatVmState,
+  probeLoopbackPort,
   startDisposableVm,
   statusDisposableVm,
   stopDisposableVm
@@ -128,6 +133,43 @@ async function writeLaunchingInstance(
 }
 
 describe('Product 1B disposable VM lifecycle', () => {
+  it('requires a TLS-ready guest instead of accepting QEMU host forwarding alone', async () => {
+    const forwardedSockets = new Set();
+    const forwarded = createTcpServer((socket) => {
+      forwardedSockets.add(socket);
+      socket.once('close', () => forwardedSockets.delete(socket));
+    });
+    forwarded.listen(0, '127.0.0.1');
+    await once(forwarded, 'listening');
+    const forwardedAddress = forwarded.address();
+    if (forwardedAddress === null || typeof forwardedAddress === 'string') {
+      throw new Error('TCP fixture did not bind');
+    }
+    await expect(probeLoopbackPort('127.0.0.1', forwardedAddress.port)).resolves.toBe(false);
+    for (const socket of forwardedSockets) socket.destroy();
+    await new Promise((resolve) => forwarded.close(resolve));
+
+    const certificate = await generate([{ name: 'commonName', value: 'localhost' }], {
+      algorithm: 'sha256',
+      keyType: 'ec'
+    });
+    const webGui = createTlsServer({ key: certificate.private, cert: certificate.cert });
+    const webGuiSockets = new Set();
+    webGui.on('connection', (socket) => {
+      webGuiSockets.add(socket);
+      socket.once('close', () => webGuiSockets.delete(socket));
+    });
+    webGui.listen(0, '127.0.0.1');
+    await once(webGui, 'listening');
+    const webGuiAddress = webGui.address();
+    if (webGuiAddress === null || typeof webGuiAddress === 'string') {
+      throw new Error('TLS fixture did not bind');
+    }
+    await expect(probeLoopbackPort('127.0.0.1', webGuiAddress.port)).resolves.toBe(true);
+    for (const socket of webGuiSockets) socket.destroy();
+    await new Promise((resolve) => webGui.close(resolve));
+  });
+
   it('wires explicit start, status, and stop package commands', async () => {
     const packageJson = JSON.parse(
       await readFile(new URL('../../package.json', import.meta.url), 'utf8')
