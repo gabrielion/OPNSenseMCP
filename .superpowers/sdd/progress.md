@@ -29,9 +29,19 @@ disappearance, and contains no Windows descendant-containment path. Windows `.cm
 `cmd.exe` projections remain unit-only design checks; native Windows evidence remains the final product-specific
 release smoke, so no Job Object or extra installation prerequisite is introduced.
 
-Final clean Foundation gate after platform-boundary remediation: Node 22.23.1; `npm run license:check`,
-`npm run verify`, both applicable conformance profiles, and `git diff --check` all PASS. Foundation is accepted;
-Provenance Task 1 is the next executable task. Native Windows support remains unclaimed until its final real
-package, installer, runtime, ACL, client-isolation, mock-connectivity, and cleanup gate passes.
+The earlier Foundation acceptance statement after platform-boundary remediation is superseded. Final review
+identified additional tool-schema, hidden-handler ownership, conformance-child ownership/environment, plan
+routing, platform-evidence, and package-phase contract findings; Foundation was not accepted at that point.
+Provenance execution remains pending completion and independent review of the remediation below.
 
 POSIX harness plan Task 1: complete (commit 7a9d6c2; review clean after TDD remediation; focused controller recheck 18/18).
+
+Foundation final-review remediation: implemented in commits `9285bb1`, `553ec9f`, `db61267`, and `e363440`.
+The v2 adapter now uses low-level tools handlers so the kernel is the sole schema parser; lifecycle ownership
+retains abort-ignoring read settlement; spawned conformance children remain owned through termination errors
+and receive only a frozen allow-listed environment; superseded Product/Guided plans are hard-blocked pending
+rewrite/review; Windows support remains unclaimed; and the non-release package contract requires `private: true`
+while forbidding `@modelcontextprotocol/express`. Node 22.23.1 evidence: combined focused suite 8 files / 362
+tests PASS, `npm run license:check` PASS, `npm run verify` PASS, both official conformance profiles (six named
+scenarios) PASS with zero failed checks/warnings, `git diff --check` PASS, and no repository result residue.
+Independent final review of this remediation remains pending before Foundation acceptance.
