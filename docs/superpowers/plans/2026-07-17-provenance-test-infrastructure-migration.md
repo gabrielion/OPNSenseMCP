@@ -6,8 +6,9 @@
 agentic evaluation, safety tests, and integration helpers into the new implementation without
 publishing private provenance evidence or carrying uncertain implementation text forward.
 
-**Architecture:** The repository contains one minimal public manifest and the code that validates it.
-Private source mappings and audit evidence live only in an external, untracked baseline selected by
+**Architecture:** Task 1 establishes only one minimal public manifest, its immutable public inventory, and
+the code that validates both. It does not read private evidence or build a release manifest. Later private
+source mappings and audit evidence live only in an external, untracked baseline selected by
 `OPNSENSE_PROVENANCE_BASELINE`; approved input bytes come only from the prepared external source selected
 by `OPNSENSE_MIGRATION_SOURCE`. That source is an immutable private composition of the verified history
 bundle and an explicitly reviewed, allow-listed snapshot of newer owner-authored working-tree assets.
@@ -15,8 +16,9 @@ Copying is fail-closed, rewrite-class files are authored independently, discard-
 and every release is scanned both as public source and against the private baseline before it can be
 declared publishable.
 
-**Tech Stack:** Node.js 22.19 or newer within major 22, strict TypeScript ESM, Node test runner, shell and Python harnesses already
-listed in the inventory, JSON manifests, SHA-256, Git, AGPL-3.0-or-later.
+**Tech Stack:** Node.js 22.19 or newer within major 22, strict TypeScript ESM, Vitest for the integrated
+Task 1 test, shell and Python harnesses already listed in the later inventory, JSON manifests, SHA-256,
+Git, AGPL-3.0-or-later.
 
 ---
 
@@ -42,8 +44,8 @@ Each asset has exactly these keys:
 {
   "destination": "path/inside/repository",
   "class": "approved",
-  "contentSha256": "a lowercase 64-character digest",
-  "auditVerdict": "approved"
+  "contentSha256": null,
+  "auditVerdict": "approved-pending-migration"
 }
 ```
 
@@ -58,8 +60,13 @@ Lifecycle rules:
   review; afterward, the replacement digest and verdict `independently-rewritten`.
 - `discard`: the digest is always `null`, the verdict is `discarded`, and the destination must be absent.
 
-No other public field is allowed. The immutable inventory is 116 rows: 105 `approved`, 3 `rewrite`, and
-8 `discard`.
+For a sealed row, `contentSha256` is the SHA-256 of the exact stage-0 Git index blob, not of checkout bytes.
+The verifier also requires the worktree path to be clean relative to that index entry. This keeps the public
+digest stable when Windows `core.autocrlf` changes checkout line endings while still refusing unstaged drift.
+
+No other public field is allowed. The immutable inventory is the exact destination-to-class mapping in
+Appendices A-C: 105 `approved`, 3 `rewrite`, and 8 `discard`. Counts alone never establish inventory
+identity.
 
 `npm run provenance:scan` works in a clean clone; an optional baseline adds private checks. Its report
 exposes only aggregate counts, verdicts, and `externalBaselineUsed`; it accepts explicitly pending approved
@@ -79,13 +86,16 @@ License checks must reject conflicting package, plugin, generated, and documenta
 This plan is intentionally interleaved with the product-parity plan so a migrated test is never committed
 as a permanently red standalone task:
 
-1. execute Tasks 1–4 after the MCP foundation;
-2. execute Task 6 as the RED half of product-parity Task 5 and commit both together;
-3. execute Task 7 inside product-parity Task 11 and commit the adapted harness with the green full surface;
-4. execute Task 5 after product-parity Task 11, when catalog and dispatch imports exist;
-5. execute product-parity Task 12, then provenance Tasks 8–9;
-6. satisfy the Task 10 ownership map throughout foundation/product work, then run its absence gate;
-7. execute Task 11 only after every approved destination is present and adapted; final destination review
+1. execute Task 1 after the MCP foundation;
+2. rewrite and independently review Task 2 against the versioned Task 1 contract before executing it;
+3. do not execute Tasks 3–11 or private checkpoint P0 until Task 2 and P0 have separately passed that
+   preflight;
+4. execute Task 6 as the RED half of product-parity Task 5 and commit both together;
+5. execute Task 7 inside product-parity Task 11 and commit the adapted harness with the green full surface;
+6. execute Task 5 after product-parity Task 11, when catalog and dispatch imports exist;
+7. execute product-parity Task 12, then provenance Tasks 8–9;
+8. satisfy the Task 10 ownership map throughout foundation/product work, then run its absence gate;
+9. execute Task 11 only after every approved destination is present and adapted; final destination review
    and sealing occur in guided-workflows Task 9 after all non-evidence edits.
 
 No task may run `npm test` or `provenance:scan:migration` while its stated architecture dependencies are
@@ -140,15 +150,15 @@ Task 3; no private value may appear in terminal output or shell history.
 **Files:**
 
 - Create: `docs/provenance/migration-manifest.json`
-- Create: `scripts/provenance/build-manifest.mjs`
+- Create: `scripts/provenance/inventory.mjs`
 - Create: `scripts/provenance/verify-manifest.mjs`
-- Create: `tests/provenance/migration-manifest.test.mjs`
+- Create: `tests/provenance/migration-manifest.test.ts`
 - Modify: `package.json`
 - Modify: `.gitignore`
 
 ### Step 1: Write the failing manifest tests
 
-Create tests that load the committed JSON and assert:
+Create one Vitest suite that loads the committed JSON and asserts:
 
 ```js
 assert.equal(manifest.schemaVersion, 1);
@@ -168,29 +178,67 @@ for (const asset of manifest.assets) {
 ```
 
 Also assert that destinations are unique, repository-relative, slash-normalized, non-empty, and cannot
-escape the repository. At Task 1, approved rows need digest `null` and verdict
-`approved-pending-migration`; pending rewrite and discard rows also need `null`. Discard rows need verdict
-`discarded`. Tests must separately cover the valid sealed approved state: a lowercase 64-character digest
-with verdict `approved-migrated`.
+escape the repository. The test-owned expected inventory must repeat all 116 exact destination-to-class
+mappings from Appendices A-C as literals; it must not import the production inventory or derive expectations
+from the committed manifest. Assert exact bytewise UTF-8 destination order with `Buffer.compare`, not only
+counts and never locale-sensitive order.
 
-Add a recursive key-name test that rejects any extra public provenance property. It should use an exact
-allow-list rather than a list of known bad keys.
+At Task 1, all approved rows have digest `null` and verdict `approved-pending-migration`; all rewrite rows
+have digest `null` and verdict `pending-independent-rewrite`; discard rows have digest `null` and verdict
+`discarded`. Exercise the complete lifecycle matrix in synthetic manifests:
 
-In the same RED suite, exercise the release builder itself in synthetic temporary repositories by spawning
-the real CLI with each fixture root as `cwd`; the production command still accepts no destination-root
-argument. Generate complete synthetic 105/3/8 inventories and private baselines with sentinel authors,
-reviewers, and destination bytes. Prove that the builder refuses a missing review, self-review, a non-final
-review verdict, and any expected-versus-actual destination digest mismatch. Snapshot the baseline before and
-after every case to prove it is never mutated. For a successful case, assert that the generated public rows
-contain exactly the four allowed fields in stable destination order. For a late-row failure, seed a valid
-manifest and prove its bytes remain unchanged, no partial/temp output remains, and the process exits
-non-zero. These tests must fail because `build-manifest.mjs` does not yet exist; they may not replace the CLI
-with a pure test double.
+| Class | Pending state | Sealed state |
+| --- | --- | --- |
+| `approved` | `null` + `approved-pending-migration` | lowercase Git-blob SHA-256 + `approved-migrated` |
+| `rewrite` | `null` + `pending-independent-rewrite` | lowercase Git-blob SHA-256 + `independently-rewritten` |
+| `discard` | `null` + `discarded` | none; every other combination is invalid |
+
+Reject every other class, verdict, digest type/case/length, and class-state combination. Assert exact
+top-level and asset key allow-lists. Require one canonical JSON serialization: two-space indentation, one
+terminal newline, stable top-level/asset key order, and stable asset order. Comparing the parsed and
+validated value with this canonical serialization must also reject duplicate JSON member names and
+noncanonical encodings without adding a permissive JSON dependency. Cap the manifest at 256 KiB.
+
+Exercise the real validator CLI in initialized temporary Git repositories by spawning its absolute script
+path while each fixture repository is `cwd`. Every valid public-manifest fixture contains the full exact 116-row
+inventory. Lifecycle tests mutate only state, filesystem, or Git-index conditions; inventory and path tests
+mutate only the row needed to prove that the exact mapping fails closed. Cover:
+
+- zero, two, unknown, absolute, or noncanonical manifest arguments; exactly one argument equal to
+  `docs/provenance/migration-manifest.json` is accepted;
+- a `cwd` that is not the real Git worktree root;
+- NUL, backslash, POSIX-absolute, drive-qualified, UNC-like, empty, `.`, `..`, `.git` (case-insensitive),
+  duplicate-separator, trailing-separator, non-NFC, Windows-invalid-character, trailing-dot/space, and
+  Windows-reserved-device destination forms;
+- byte-distinct destinations that collide after Unicode normalization or case folding, and a present entry
+  whose real directory-entry case differs from the manifest even on a case-insensitive filesystem;
+- a pending destination that is absent, present as a regular file, present as a directory, or reached
+  through a symlinked path component;
+- pending rewrite files that are already present and tracked, matching the current `README.md` and
+  `CONTRIBUTING.md` state;
+- sealed approved and rewrite rows with a stage-0 regular-file index entry, matching or mismatching Git-blob
+  digest, missing/unmerged/symlink index modes, and clean or dirty worktree bytes;
+- a symlinked manifest, a symlinked destination leaf, and non-regular destination types supported by the
+  host fixture;
+- every discard destination absent from both the current filesystem and the Git index, including a staged
+  path deleted only from the worktree;
+- duplicate destinations, a count-preserving class swap, extra fields, oversize input, malformed JSON, and
+  the full invalid lifecycle cross-product.
+
+Symlink fixtures run on hosts that support creating them; the final native-Windows gate must exercise the
+same refusal with a junction or symlink available to the runner. A platform that cannot create the fixture
+may skip only that fixture with the operating-system error recorded, never the production check.
+
+The CLI exposes only fixed error codes, the known repository-relative destination when safe, and aggregate
+success counts. It never echoes malformed values, absolute paths, environment values, or file contents.
+Exit `0` means valid, `1` means a manifest/content violation, and `2` means invocation or repository
+preflight failure. Set private-baseline environment variables to sentinels in a test and prove Task 1 neither
+reads nor prints them.
 
 Run:
 
 ```bash
-node --test tests/provenance/migration-manifest.test.mjs
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npx vitest run tests/provenance/migration-manifest.test.ts
 ```
 
 ### Step 2: Add private-input ignore rules
@@ -202,28 +250,36 @@ Add these patterns without weakening existing ignores:
 *.provenance-baseline.json
 ```
 
-Add a test that fails if either pattern disappears. Also test that the external baseline path resolves
-outside the repository and is a regular file before any private check begins.
+Test both file text and `git check-ignore`: the two exact sentinel paths must be ignored by these rules,
+while `.migration-private-sibling/sentinel` and `sentinel.provenance-baseline.json.extra` remain visible. Do not
+weaken or reinterpret unrelated existing ignore rules. Task 1 has no external-baseline path and must not
+introduce one.
 
 ### Step 3: Implement the minimal public validator
 
-`verify-manifest.mjs` must validate shape, class counts, lifecycle states, destination safety, sort order,
-and destination bytes for every sealed row. A pending approved destination may be absent or present, but it
-is reported pending and never contributes to migration eligibility. The validator must never infer or
-request a private source path.
+`inventory.mjs` exports a deeply frozen, bytewise UTF-8 sorted array containing the exact 116 public
+destination-to-class mappings in Appendices A-C and the fixed class counts. It contains no source mapping,
+review identity, private digest, group label, or environment lookup. Inventory construction rejects
+nonportable destinations, non-NFC strings, and normalization/case-fold collisions before exporting.
 
-`build-manifest.mjs` is a release-only builder allowed to read the external baseline, but it may project only
-the four public asset fields. For all 105 approved and all 3 rewrite files it requires an explicit independent
-final-destination review verdict and expected digest already present in the private baseline, computes the
-actual destination digest, refuses any mismatch, and only then projects that reviewed digest. It must never
-write a computed digest back into the baseline or treat computation as review. Discard rows remain
-digest-free. There is deliberately no interim builder that freezes destinations before guided work.
+`verify-manifest.mjs` validates the bounded canonical bytes, exact schema, exact immutable inventory,
+lifecycle matrix, destination safety, stable order, Git-index absence for discard rows, and destination
+bytes for every sealed row. It first proves that `cwd` is the real Git worktree root. It performs path checks
+with slash/segment rules independent of host path normalization, then walks every existing component with
+`lstat` and exact directory-entry-name comparison; a present pending or sealed leaf must be a regular
+non-symlink file. A pending approved or rewrite destination may be absent or present but is always reported
+pending. Every discard destination must be absent from both filesystem and index.
 
-The builder writes atomically in the destination directory with a unique mode-`0600` temporary file. Only
-after every row validates, it changes the completed public artifact to mode `0644`, fsyncs the file, renames
-it atomically, and fsyncs the containing directory. It cleans that exact temporary file on failure, uses
-stable destination ordering, and refuses to run if it would change the required 105/3/8 classification
-counts.
+For a sealed row, invoke Git only with an argv array: read the exact stage-0 entry and mode, obtain its blob
+without passing content through a shell, hash those canonical blob bytes with SHA-256, and require the
+worktree path to be clean relative to that index entry. Reject missing, unmerged, symlink, submodule, or
+case-mismatched index entries. Never log Git object IDs. The validator never infers, requests, or reads a
+private source or baseline.
+
+Task 1 deliberately has no builder. A release builder may be specified only after Task 2 versions one
+private-baseline schema and parser shared by preparation, copy, scan, and build commands. That later builder
+must consume independently recorded expected destination digests; it may never turn a digest it computed
+itself into review evidence.
 
 ### Step 4: Register focused scripts
 
@@ -232,7 +288,6 @@ Add:
 ```json
 {
   "scripts": {
-    "provenance:build:release": "node scripts/provenance/build-manifest.mjs --release",
     "provenance:verify": "node scripts/provenance/verify-manifest.mjs docs/provenance/migration-manifest.json"
   }
 }
@@ -245,8 +300,11 @@ Merge these entries into the existing scripts object; do not replace other scrip
 Run:
 
 ```bash
-node --test tests/provenance/migration-manifest.test.mjs
-npm run provenance:verify
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npx vitest run tests/provenance/migration-manifest.test.ts
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm run provenance:verify
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm run license:check
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm run verify
+PATH=/opt/homebrew/opt/node@22/bin:$PATH npm run test:conformance
 git diff --check
 ```
 
@@ -255,6 +313,17 @@ git diff --check
 ---
 
 ## Task 2: Build the fail-closed copier and scanners
+
+> **BLOCKED / REQUIRES A NEW PREFLIGHT — DO NOT EXECUTE THIS TASK AS WRITTEN.** The remainder of this task
+> is retained as design input only. After Task 1, rewrite it to version one minimal private-baseline schema
+> and shared parser before any preparation, copier, scanner, or release builder consumes private evidence.
+> Move `build-manifest.mjs` and `provenance:build:release` into that reviewed rewrite, convert its focused
+> JavaScript tests to the repository's integrated Vitest convention, and obtain an independent readiness
+> review. Do not inspect the owner bundle or run checkpoint P0 before that approval.
+>
+> This execution block also covers Tasks 3–11 below. They remain useful design sketches, but their stale
+> filenames and commands are not implementation instructions until the Task 2 rewrite updates their shared
+> contract or a later preflight explicitly approves them.
 
 **Files:**
 
@@ -1145,10 +1214,11 @@ These eight destinations retain class `discard`, digest `null`, verdict `discard
 Before Task 1, confirm the destination and preserve unrelated changes with `git status --short --branch`
 and `git log -5 --oneline`.
 
-Before copying, validate both external inputs without displaying values. After each task, run focused tests,
-`npm run provenance:verify`, `npm run provenance:scan`, and `git diff --check`. The handoff separately lists
-deterministic, public-scan, private-release, VM, and agentic results; external limitations; and created files
-and commits.
+Before copying, validate both external inputs without displaying values. Task 1 runs exactly its Step 5 gates;
+it must not call the not-yet-implemented `provenance:scan`. After the separately preflighted Task 2 creates
+that command, later tasks run their focused tests, `npm run provenance:verify`, `npm run provenance:scan`,
+and `git diff --check`. The handoff separately lists deterministic, public-scan, private-release, VM, and
+agentic results; external limitations; and created files and commits.
 
 No completion claim is allowed from counts alone. Completion requires the independently rewritten assets,
 recreated behavioral coverage, full redacted local release audit, and all applicable test layers on the final
