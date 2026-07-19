@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-19
 
-**Status:** Approved design; written specification awaiting owner review
+**Status:** Approved for implementation
 
 ## Context
 
