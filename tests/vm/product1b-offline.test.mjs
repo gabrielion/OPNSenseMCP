@@ -542,6 +542,37 @@ describe('Product 1B immutable image cache', () => {
     expect(download).not.toHaveBeenCalled();
   });
 
+  it('preserves a cached archive when cancellation interrupts its streaming verification', async () => {
+    const cacheRoot = await temporaryRoot();
+    const archive = Buffer.from('fixture archive', 'utf8');
+    const spec = fixtureSpec(archive);
+    const archivePath = join(cacheRoot, spec.archiveName);
+    const download = vi.fn();
+    let abortChecks = 0;
+    const signal = {
+      get aborted() {
+        abortChecks += 1;
+        return abortChecks >= 4;
+      }
+    };
+    await writeFile(archivePath, archive);
+
+    await expectImageError(
+      prepareImage({
+        cacheRoot,
+        spec,
+        download,
+        decompress: vi.fn(),
+        signal
+      }),
+      'CANCELLED'
+    );
+
+    expect(download).not.toHaveBeenCalled();
+    expect(await readFile(archivePath)).toEqual(archive);
+    expect(await readdir(cacheRoot)).toEqual([spec.archiveName]);
+  });
+
   it('rehashes the immutable raw base against its archive-bound integrity proof before reuse', async () => {
     const cacheRoot = await temporaryRoot();
     const archive = Buffer.from('fixture archive', 'utf8');

@@ -639,7 +639,14 @@ async function ensureArchive({ cacheRoot, spec, download, owner, signal }) {
     const existing = await hashArchive(archivePath, spec, signal);
     if (existing.state === 'valid') return { path: archivePath, state: 'reused' };
   } catch (error) {
-    if (!(error instanceof Product1bImageError) || error.code === 'UNSAFE_CACHE_ENTRY') throw error;
+    if (
+      !(error instanceof Product1bImageError) ||
+      (error.code !== 'ARCHIVE_TOO_LARGE' &&
+        error.code !== 'ARCHIVE_SIZE_MISMATCH' &&
+        error.code !== 'ARCHIVE_DIGEST_MISMATCH')
+    ) {
+      throw error;
+    }
     await unlink(archivePath);
   }
 
