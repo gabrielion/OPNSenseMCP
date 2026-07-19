@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { readdir, readFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ElicitResult } from '@modelcontextprotocol/client';
 import * as z from 'zod/v4';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createDefaultApplicationRuntime,
   createOwnedApplicationRuntime
@@ -19,6 +20,15 @@ import { defineCapability } from '../../src/capabilities/kernel.js';
 import type { RuntimeConfig } from '../../src/config/runtime-config.js';
 import { createMutationFixture, createReadFixture } from '../fixtures/capabilities.js';
 import { connectLegacy } from '../helpers/connect.js';
+import { startSyntheticOPNsenseTarget } from '../support/https-opnsense-mock.js';
+
+beforeEach(() => {
+  vi.stubEnv('OPNSENSE_CONFIG_FILE', undefined);
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 function writableConfig(): RuntimeConfig {
   return {
@@ -46,21 +56,23 @@ function deferred() {
 }
 
 describe('default application composition seam', () => {
-  it('constructs the replaceable partial Task 2 runtime', async () => {
+  it('constructs the final four-tool Product 1A runtime without target credentials', async () => {
     const runtime = createDefaultApplicationRuntime();
     const connection = await connectLegacy(runtime.application);
     try {
       expect(
         listApplicationCapabilities(runtime.application, 'stdio').map(({ mcpName }) => mcpName)
-      ).toEqual(['server_status', 'opn_describe']);
+      ).toEqual(['server_status', 'opn_describe', 'opn_get', 'opn_list']);
       expect(
         listApplicationCapabilities(runtime.application, 'http').map(({ mcpName }) => mcpName)
-      ).toEqual(['server_status', 'opn_describe']);
+      ).toEqual(['server_status', 'opn_describe', 'opn_get', 'opn_list']);
       expect(Object.getOwnPropertyNames(runtime)).toEqual(['application', 'close']);
       expect(Object.isFrozen(runtime)).toBe(true);
       expect((await connection.client.listTools()).tools.map(({ name }) => name)).toEqual([
         'server_status',
-        'opn_describe'
+        'opn_describe',
+        'opn_get',
+        'opn_list'
       ]);
     } finally {
       await connection.close();
@@ -72,6 +84,87 @@ describe('default application composition seam', () => {
     const runtime = createDefaultApplicationRuntime();
     await Promise.all([runtime.close(), runtime.close(), runtime.close()]);
     await runtime.close();
+  });
+
+  it('fails startup with one sanitized error when the explicit private config is invalid', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'opnsense-invalid-startup-'));
+    const path = join(directory, 'config-SENTINEL_SECRET.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        url: 'http://SENTINEL_INVALID_URL',
+        apiKey: 'SENTINEL_KEY',
+        apiSecret: 'SENTINEL_SECRET'
+      }),
+      { mode: 0o600 }
+    );
+    vi.stubEnv('OPNSENSE_CONFIG_FILE', path);
+    try {
+      expect(() => createDefaultApplicationRuntime()).toThrow(
+        /^Invalid OPNsense configuration\.$/u
+      );
+      try {
+        createDefaultApplicationRuntime();
+      } catch (error) {
+        expect(String(error)).not.toContain('SENTINEL');
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('drains a real admitted HTTPS read before closing the product client', async () => {
+    const started = deferred();
+    const target = await startSyntheticOPNsenseTarget(() => {
+      started.resolve();
+      return { delayMs: 40, body: JSON.stringify({ status: 'ok' }) };
+    });
+    const directory = await mkdtemp(join(tmpdir(), 'opnsense-runtime-drain-'));
+    const caFile = join(directory, 'ca.pem');
+    const configFile = join(directory, 'config.json');
+    await writeFile(caFile, target.ca, { mode: 0o600 });
+    await writeFile(
+      configFile,
+      JSON.stringify({
+        url: target.url,
+        apiKey: 'test-key',
+        apiSecret: 'test-secret',
+        caFile
+      }),
+      { mode: 0o600 }
+    );
+    vi.stubEnv('OPNSENSE_CONFIG_FILE', configFile);
+    const runtime = createDefaultApplicationRuntime();
+    try {
+      const execution = dispatchCapability(
+        { name: 'opn_get', arguments: { resource: 'system.status' } },
+        { application: runtime.application, transport: 'stdio' }
+      );
+      await started.promise;
+      const shutdown = runtime.close();
+      let shutdownSettled = false;
+      void shutdown.finally(() => {
+        shutdownSettled = true;
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(shutdownSettled).toBe(false);
+      await expect(execution).resolves.toEqual({
+        kind: 'success',
+        output: { item: { status: 'ok' } }
+      });
+      await shutdown;
+      expect(shutdownSettled).toBe(true);
+      await expect(
+        dispatchCapability(
+          { name: 'opn_get', arguments: { resource: 'system.status' } },
+          { application: runtime.application, transport: 'stdio' }
+        )
+      ).rejects.toThrow(/^Application is closing$/u);
+    } finally {
+      await runtime.close().catch(() => undefined);
+      await target.close();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it.each(['read', 'write'] as const)(
@@ -318,9 +411,11 @@ describe('default application composition seam', () => {
       readFile('src/entrypoints/http.ts', 'utf8')
     ]);
 
-    expect(factory).toContain('createApplicationContext(loadRuntimeConfig())');
+    expect(factory).toContain('const config = loadRuntimeConfig()');
     expect(factory).toContain('createOwnedApplicationRuntime');
-    expect(factory).toContain('Product Task 5 must replace this function body');
+    expect(factory).toContain('loadOPNsenseConnectionConfig');
+    expect(factory).toContain('createProductCapabilityCatalog(adapter)');
+    expect(factory).toContain('client?.close()');
     expect(main).toContain('startStdio');
     expect(httpEntrypoint).toContain('createDefaultApplicationRuntime');
     expect(main).not.toContain('createApplicationContext');
@@ -340,7 +435,9 @@ describe('default application composition seam', () => {
     const matches: string[] = [];
     for (const path of await sourceFiles('src')) {
       if (
-        (await readFile(path, 'utf8')).includes('createApplicationContext(loadRuntimeConfig())')
+        (await readFile(path, 'utf8')).includes(
+          'createApplicationContext(config, createProductCapabilityCatalog(adapter))'
+        )
       ) {
         matches.push(path);
       }

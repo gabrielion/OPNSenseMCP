@@ -42,7 +42,8 @@ const EnvironmentSchema = z
     MCP_HTTP_TOKEN: z.string().min(32).optional(),
     MCP_ALLOWED_HOSTS: CsvSchema.prefault('127.0.0.1,localhost,[::1]'),
     MCP_ALLOWED_ORIGINS: OriginCsvSchema.prefault(''),
-    MCP_REQUEST_STATE_SECRET: z.string().min(32).optional()
+    MCP_REQUEST_STATE_SECRET: z.string().min(32).optional(),
+    OPNSENSE_CONFIG_FILE: z.string().min(1).optional()
   })
   .superRefine((value, context) => {
     if (value.MCP_HTTP_ENABLED && value.MCP_HTTP_TOKEN === undefined) {
@@ -77,6 +78,7 @@ export interface RuntimeConfig {
   readonly allowedResourceScopes: ReadonlySet<string> | null;
   readonly enabledFeatureFlags: ReadonlySet<FeatureFlag>;
   readonly requestStateKey: Uint8Array;
+  readonly opnsenseConfigFile?: string;
   readonly http: {
     readonly enabled: boolean;
     readonly host: '127.0.0.1' | 'localhost';
@@ -112,6 +114,9 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
       parsed.data.ALLOWED_RESOURCES.length === 0 ? null : new Set(parsed.data.ALLOWED_RESOURCES),
     enabledFeatureFlags: new Set<FeatureFlag>(featureFlags),
     requestStateKey,
+    ...(parsed.data.OPNSENSE_CONFIG_FILE === undefined
+      ? {}
+      : { opnsenseConfigFile: parsed.data.OPNSENSE_CONFIG_FILE }),
     http: {
       enabled: parsed.data.MCP_HTTP_ENABLED,
       host: parsed.data.MCP_HTTP_HOST,

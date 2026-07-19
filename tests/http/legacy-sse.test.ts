@@ -295,7 +295,9 @@ describe('isolated legacy SSE compatibility', () => {
     await client.connect(transport);
     expect((await client.listTools()).tools.map(({ name }) => name)).toEqual([
       'server_status',
-      'opn_describe'
+      'opn_describe',
+      'opn_get',
+      'opn_list'
     ]);
   });
 
@@ -321,11 +323,15 @@ describe('isolated legacy SSE compatibility', () => {
     await betaClient.connect(betaTransport);
     expect((await client.listTools()).tools.map(({ name }) => name)).toEqual([
       'server_status',
-      'opn_describe'
+      'opn_describe',
+      'opn_get',
+      'opn_list'
     ]);
     expect((await betaClient.listTools()).tools.map(({ name }) => name)).toEqual([
       'server_status',
-      'opn_describe'
+      'opn_describe',
+      'opn_get',
+      'opn_list'
     ]);
     expect((await client.callTool({ name: 'server_status', arguments: {} })).isError).not.toBe(
       true

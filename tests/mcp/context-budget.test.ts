@@ -7,15 +7,15 @@ import type { RuntimeConfig } from '../../src/config/runtime-config.js';
 import { canonicalJson } from '../../src/security/canonical-json.js';
 import { MCP_ERAS } from '../helpers/connect.js';
 
-const FIXTURE_PATH = 'tests/fixtures/context-budget.product1a-task2.json';
+const FIXTURE_PATH = 'tests/fixtures/context-budget.product1a.json';
 const TOTAL_LIMIT = 131_072;
 const TOOL_LIMIT = 16_384;
 
 interface ContextEvidence {
   readonly schemaVersion: 1;
-  readonly scope: 'product-1a-task-2-partial';
-  readonly tools: readonly ['opn_describe', 'server_status'];
-  readonly toolCount: 2;
+  readonly scope: 'product-1a-final';
+  readonly tools: readonly ['opn_describe', 'opn_get', 'opn_list', 'server_status'];
+  readonly toolCount: 4;
   readonly totalBytes: number;
   readonly largestTool: { readonly name: string; readonly bytes: number };
   readonly limits: { readonly totalBytes: 131072; readonly perToolBytes: 16384 };
@@ -38,8 +38,8 @@ function config(): RuntimeConfig {
   };
 }
 
-describe.each(MCP_ERAS)('$label partial Product 1A Task 2 context budget', ({ connect }) => {
-  it('records the canonical two-tool listing within the fixed limits', async () => {
+describe.each(MCP_ERAS)('$label final Product 1A context budget', ({ connect }) => {
+  it('records the canonical four-tool listing within the fixed limits', async () => {
     expect(existsSync(FIXTURE_PATH)).toBe(true);
     if (!existsSync(FIXTURE_PATH)) return;
     const evidence = JSON.parse(readFileSync(FIXTURE_PATH, 'utf8')) as ContextEvidence;
@@ -55,15 +55,20 @@ describe.each(MCP_ERAS)('$label partial Product 1A Task 2 context budget', ({ co
       const totalBytes = Buffer.byteLength(canonicalJson(tools), 'utf8');
       const largestTool = [...measurements].sort((left, right) => right.bytes - left.bytes)[0];
 
-      expect(tools.map(({ name }) => name)).toEqual(['opn_describe', 'server_status']);
+      expect(tools.map(({ name }) => name)).toEqual([
+        'opn_describe',
+        'opn_get',
+        'opn_list',
+        'server_status'
+      ]);
       expect(totalBytes).toBeLessThanOrEqual(TOTAL_LIMIT);
       expect(measurements.every(({ bytes }) => bytes <= TOOL_LIMIT)).toBe(true);
       expect(canonicalJson(tools)).not.toContain('/api/');
       expect(evidence).toEqual({
         schemaVersion: 1,
-        scope: 'product-1a-task-2-partial',
-        tools: ['opn_describe', 'server_status'],
-        toolCount: 2,
+        scope: 'product-1a-final',
+        tools: ['opn_describe', 'opn_get', 'opn_list', 'server_status'],
+        toolCount: 4,
         totalBytes,
         largestTool,
         limits: { totalBytes: TOTAL_LIMIT, perToolBytes: TOOL_LIMIT }

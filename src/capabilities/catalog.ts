@@ -2,6 +2,12 @@
 import type { CapabilityDefinition, ExposureContext } from './types.js';
 import { serverStatusCapability } from './foundation/server-status.js';
 import { opnDescribeCapability } from './opnsense/describe.js';
+import { createOPNsenseGetCapability } from './opnsense/get.js';
+import { createOPNsenseListCapability } from './opnsense/list.js';
+import {
+  UNAVAILABLE_OPNSENSE_READ_ADAPTER,
+  type OPNsenseReadAdapter
+} from '../opnsense/read-adapter.js';
 import { hasVisibleResourceScopes, isKernelDefinedCapability } from './kernel.js';
 
 function isExposed(capability: CapabilityDefinition, context: ExposureContext): boolean {
@@ -54,10 +60,18 @@ export class CapabilityCatalog {
   }
 }
 
-export const CAPABILITY_CATALOG = new CapabilityCatalog([
-  serverStatusCapability,
-  opnDescribeCapability
-]);
+export function createProductCapabilityCatalog(
+  adapter: OPNsenseReadAdapter = UNAVAILABLE_OPNSENSE_READ_ADAPTER
+): CapabilityCatalog {
+  return new CapabilityCatalog([
+    serverStatusCapability,
+    opnDescribeCapability,
+    createOPNsenseGetCapability(adapter),
+    createOPNsenseListCapability(adapter)
+  ]);
+}
+
+export const CAPABILITY_CATALOG = createProductCapabilityCatalog();
 
 export function getCapability(name: string): CapabilityDefinition | undefined {
   return CAPABILITY_CATALOG.getByMcpName(name);

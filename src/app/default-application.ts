@@ -6,6 +6,13 @@ import {
 } from './application-context.js';
 import { createPhasedClose, type CloseOperation } from './shutdown.js';
 import { loadRuntimeConfig } from '../config/runtime-config.js';
+import { createProductCapabilityCatalog } from '../capabilities/catalog.js';
+import { loadOPNsenseConnectionConfig } from '../opnsense/config.js';
+import { createOPNsenseHttpsClient, type OPNsenseHttpsClient } from '../opnsense/https-client.js';
+import {
+  createOPNsenseReadAdapter,
+  UNAVAILABLE_OPNSENSE_READ_ADAPTER
+} from '../opnsense/read-adapter.js';
 
 export interface OwnedApplicationRuntime {
   readonly application: ApplicationContext;
@@ -44,10 +51,32 @@ export function createOwnedApplicationRuntime(
   });
 }
 
-// Product Task 5 must replace this function body, not add a parallel composition root. It must pass
-// product-owned OPNsense, audit, backup, lock, and limiter service closers to the shared runtime so
-// the application barrier drains admitted handlers before any service close begins.
 export function createDefaultApplicationRuntime(): OwnedApplicationRuntime {
-  const application = createApplicationContext(loadRuntimeConfig());
-  return createOwnedApplicationRuntime(application);
+  const config = loadRuntimeConfig();
+  let client: OPNsenseHttpsClient | undefined;
+  try {
+    const adapter =
+      config.opnsenseConfigFile === undefined
+        ? UNAVAILABLE_OPNSENSE_READ_ADAPTER
+        : (() => {
+            client = createOPNsenseHttpsClient(
+              loadOPNsenseConnectionConfig(config.opnsenseConfigFile)
+            );
+            return createOPNsenseReadAdapter(client);
+          })();
+    const application = createApplicationContext(config, createProductCapabilityCatalog(adapter));
+    return createOwnedApplicationRuntime(
+      application,
+      client === undefined
+        ? []
+        : [
+            () => {
+              client?.close();
+            }
+          ]
+    );
+  } catch (error) {
+    client?.close();
+    throw error;
+  }
 }

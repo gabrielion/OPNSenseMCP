@@ -217,7 +217,14 @@ describe('installed npm executable', () => {
           result: { protocolVersion: '2025-11-25' }
         });
         expect(responses.find((response) => response.id === 2)).toMatchObject({
-          result: { tools: [{ name: 'server_status' }, { name: 'opn_describe' }] }
+          result: {
+            tools: [
+              { name: 'server_status' },
+              { name: 'opn_describe' },
+              { name: 'opn_get' },
+              { name: 'opn_list' }
+            ]
+          }
         });
         expect(responses.find((response) => response.id === 3)).toHaveProperty('result');
         expect(positive.stdout).not.toContain('INSTALLED_PACKAGE_SENTINEL_0123456789');

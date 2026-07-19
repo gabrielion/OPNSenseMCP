@@ -24,5 +24,30 @@ export interface OperationDescriptor {
   readonly requiredFeatures: readonly string[];
   readonly operations: readonly PublicOperationDescriptor[];
   readonly contractDigest: string;
-  readonly runtime: Readonly<Record<string, unknown>>;
+  readonly runtime: OperationRuntimeDescriptor;
+}
+
+export interface OperationCommand {
+  readonly method: 'GET' | 'POST';
+  readonly path: string;
+}
+
+export interface OperationLimits {
+  readonly maxInputBytes: number;
+  readonly maxOutputBytes: number;
+  readonly maxItems: number;
+}
+
+export interface RuntimeOperationDescriptor {
+  readonly name: string;
+  readonly effect: OperationEffect;
+  readonly command: OperationCommand;
+  readonly resourceScope: string;
+  readonly capabilityId: string;
+  readonly limits: OperationLimits;
+}
+
+export interface OperationRuntimeDescriptor {
+  readonly operations: readonly RuntimeOperationDescriptor[];
+  readonly [key: string]: unknown;
 }

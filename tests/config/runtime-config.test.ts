@@ -15,6 +15,7 @@ describe('loadRuntimeConfig', () => {
     expect(config.requestStateKey).toHaveLength(32);
     expect(config.allowedResourceScopes).toBeNull();
     expect(config.enabledFeatureFlags.size).toBe(0);
+    expect(config.opnsenseConfigFile).toBeUndefined();
   });
 
   it('parses explicit policy lists and a supplied request-state key', () => {
@@ -23,7 +24,8 @@ describe('loadRuntimeConfig', () => {
       ALLOWED_RESOURCES: 'firewall.rule, dns.host,firewall.rule',
       ENABLED_FEATURE_FLAGS: 'advanced-api,ssh',
       MCP_ALLOWED_ORIGINS: 'https://console.example:8443',
-      MCP_REQUEST_STATE_SECRET: '0123456789abcdef0123456789abcdef'
+      MCP_REQUEST_STATE_SECRET: '0123456789abcdef0123456789abcdef',
+      OPNSENSE_CONFIG_FILE: '/private/opnsense-config.json'
     });
 
     expect(config.readOnly).toBe(false);
@@ -33,6 +35,7 @@ describe('loadRuntimeConfig', () => {
     expect(new TextDecoder().decode(config.requestStateKey)).toBe(
       '0123456789abcdef0123456789abcdef'
     );
+    expect(config.opnsenseConfigFile).toBe('/private/opnsense-config.json');
   });
 
   it('requires authentication whenever HTTP is enabled', () => {

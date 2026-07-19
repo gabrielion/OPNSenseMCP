@@ -546,7 +546,7 @@ describe.each([
   ['2025 stateless compatibility', 'legacy' as const],
   ['2026-07-28', { pin: '2026-07-28' as const }]
 ])('HTTP MCP adapter: %s', (_label, mode) => {
-  it('authenticates through createMcpHandler/toNodeHandler and lists the partial Task 2 tools', async () => {
+  it('authenticates through createMcpHandler/toNodeHandler and lists the Product 1A tools', async () => {
     const runtime = await start();
     const transport = new StreamableHTTPClientTransport(new URL(runtime.url), {
       fetch: (input, init) => {
@@ -563,7 +563,9 @@ describe.each([
       await client.connect(transport);
       expect((await client.listTools()).tools.map(({ name }) => name)).toEqual([
         'server_status',
-        'opn_describe'
+        'opn_describe',
+        'opn_get',
+        'opn_list'
       ]);
     } finally {
       await Promise.allSettled([client.close(), transport.close()]);
