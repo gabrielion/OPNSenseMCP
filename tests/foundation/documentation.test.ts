@@ -10,7 +10,7 @@ const NODE_22_PREFLIGHT = [
 ] as const;
 
 const PLATFORM_STATUS =
-  '**Platform status:** macOS and Linux are the current full contributor and VM-test hosts. Native Windows is a product runtime target, not part of current verification-host coverage. Windows package and client support remain unclaimed until the later mandatory real `windows-2025` gate passes. This Foundation snapshot does not claim Windows support.';
+  '**Platform status:** macOS and Linux are the currently verified development hosts. Native Windows remains a required product target, but package and client support are not claimed until the later `windows-2025` gate passes.';
 
 function bashBlocks(document: string): readonly string[] {
   return [...document.matchAll(/```bash\n(?<body>[\s\S]*?)\n```/gu)].map(
@@ -48,33 +48,36 @@ function logicalCommandsAfterPreflight(block: string): readonly string[] {
   return commands;
 }
 
-describe('foundation documentation', () => {
-  it('states the implemented safety and protocol evidence boundaries', async () => {
-    const [readme, design, foundationPlan] = await Promise.all([
+describe('product documentation', () => {
+  it('states the useful Product 1A surface, evidence, and explicit non-claims', async () => {
+    const [readme, evidence] = await Promise.all([
       readFile('README.md', 'utf8'),
-      readFile('docs/superpowers/specs/2026-07-17-independent-mcp-v2-rebuild-design.md', 'utf8'),
-      readFile('docs/superpowers/plans/2026-07-17-mcp-v2-foundation.md', 'utf8')
+      readFile('tests/fixtures/opencode.product1a.json', 'utf8')
     ]);
-    expect(readme).toContain('Foundation development snapshot');
-    expect(readme).toContain('does not connect to or administer OPNsense');
-    expect(readme).toContain('not the complete OPNsense MCP product');
-    expect(readme).toContain('No firewall mutation capability is registered');
-    expect(readme).toContain('2025-11-25');
-    expect(readme).toContain('2026-07-28');
-    expect(readme).toContain('http-header-validation');
-    expect(readme).toContain('2.0.0-beta.4');
-    expect(readme).toContain('six public-script invocations');
-    expect(readme).toContain('twelve official child invocations');
-    expect(readme).toContain('stderr remains empty');
-    expect(readme).toContain('only `SUCCESS` or `INFO`');
-    expect(readme).toContain('repinned to one stable MCP v2 release');
-    expect(readme).toContain('AGPL-3.0-or-later');
-    expect(readme).toContain('exact serialized origin');
-    expect(readme).toContain('Deprecated SSE compatibility is disabled by default');
-    for (const publication of [readme, design, foundationPlan]) {
-      expect(publication).toContain('shutdown admission gate');
+    expect(readme).toContain('Product 1A preview');
+    for (const tool of ['`server_status`', '`opn_describe`', '`opn_get`', '`opn_list`']) {
+      expect(readme).toContain(tool);
     }
-    expect(foundationPlan).not.toContain('`server.close()` first stops admission');
+    for (const resource of ['`system.status`', '`core.services`']) {
+      expect(readme).toContain(resource);
+    }
+    expect(readme).toContain('No mutation tool is registered');
+    expect(readme).toContain('verified backup and audit');
+    expect(readme).toContain('Product 1B');
+    expect(readme).toContain('GET/POST');
+    for (const nonClaim of ['public DNS, ACME, or HAProxy', 'Windows', 'agentic benchmark'])
+      expect(readme).toContain(nonClaim);
+    expect(readme).toContain('OpenCode 1.18.3');
+    expect(readme).toContain('opencode/north-mini-code-free');
+    expect(readme).toContain('AGPL-3.0-or-later');
+    expect(readme).toContain('not affiliated with, sponsored by, or endorsed by');
+    expect(readme).not.toContain('Foundation development snapshot');
+    expect(JSON.parse(evidence)).toMatchObject({
+      status: 'passed',
+      client: { name: 'OpenCode', version: '1.18.3' },
+      model: 'opencode/north-mini-code-free',
+      checks: { cleanupConfirmed: true, secretAbsent: true }
+    });
   });
 
   it('publishes exact guarded contributor commands', async () => {
@@ -91,6 +94,7 @@ describe('foundation documentation', () => {
     expect(installLines).toEqual(['npm ci --ignore-scripts', 'npm ci --ignore-scripts']);
     for (const exactCommand of [
       'npm ci --ignore-scripts',
+      'npm run test:product1a',
       'npm run verify',
       'npm run test:conformance:2025',
       'npm run test:conformance:2026',
@@ -110,21 +114,16 @@ describe('foundation documentation', () => {
         expect(command).toMatch(/ &&$/u);
       }
     }
-    expect(readmeLines).toContain('node dist/main.js');
+    expect(readmeLines.some((line) => line.endsWith('node dist/main.js'))).toBe(true);
     expect(readmeLines).not.toContain('npm start');
     expect(stdioTest).toContain("spawn(process.execPath, ['dist/main.js']");
-    expect(readme).toContain('the same random 32-or-more-character value');
-    expect(readme).toContain('local secret manager');
-    expect(readme).toContain(': "${MCP_HTTP_TOKEN:?Set MCP_HTTP_TOKEN in the server shell}" &&');
-    expect(readme).toContain(
-      `MCP_HTTP_TOKEN="$MCP_HTTP_TOKEN" node -e 'process.exit(process.env.MCP_HTTP_TOKEN?.length >= 32 ? 0 : 1)' &&`
-    );
-    expect(readme).toContain('MCP_HTTP_TOKEN="$MCP_HTTP_TOKEN" \\');
-    expect(readme).not.toContain('MCP_HTTP_TOKEN="$(');
-    expect(readme).not.toContain('0123456789abcdef0123456789abcdef');
+    expect(readme).toContain('"type": "local"');
+    expect(readme).toContain('"command": [');
+    expect(readme).toContain('"OPNSENSE_CONFIG_FILE"');
+    expect(readme).not.toContain('PRODUCT_1A_OPENCODE_SECRET_SENTINEL');
   });
 
-  it('distinguishes current verification hosts from the unclaimed Windows runtime target', async () => {
+  it('distinguishes current verification hosts from the unclaimed Windows target', async () => {
     const [readme, contributing] = await Promise.all([
       readFile('README.md', 'utf8'),
       readFile('CONTRIBUTING.md', 'utf8')

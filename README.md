@@ -1,21 +1,26 @@
 # OPNsense MCP
 
-> **Foundation development snapshot:** This is not the complete OPNsense MCP product, is not
-> release-ready, and does not connect to or administer OPNsense.
+> **Product 1A preview:** a small, useful, read-only MCP server that lets an AI assistant inspect an
+> OPNsense system without changing it.
 
-A safety-first Model Context Protocol and policy foundation for future guided OPNsense administration.
+Ask in everyday language. The server tells the agent to start with facts, explain networking terms, ask one
+useful clarification at a time, and clearly separate observations from hypotheses.
 
-## Current scope
+## What works now
 
-This temporary foundation provides one local read-only `server_status` tool, pedagogical prompts, a closed capability catalog, centralized policy checks, dual-era stdio, primary opt-in Streamable HTTP, and isolated deprecated-SSE compatibility. It has no OPNsense API or SSH adapter, so it performs no firewall reads and no firewall writes. No firewall mutation capability is registered. Firewall access is added only after its independent adapters, backup rules, audit rules, VM tests, and recovery checks exist.
+The installed server exposes exactly four read-only tools:
 
-The default is `READ_ONLY=true`. A caller cannot enable a capability by inventing its name or by passing a confirmation boolean: exposure comes from the catalog, and confirmation state is signed and checked by the server.
+- `server_status` checks the MCP process and its read-only state.
+- `opn_describe` explains a visible resource before the agent uses it.
+- `opn_get` reads the singleton resource `system.status`.
+- `opn_list` pages the collection resource `core.services`.
 
-**Platform status:** macOS and Linux are the current full contributor and VM-test hosts. Native Windows is a product runtime target, not part of current verification-host coverage. Windows package and client support remain unclaimed until the later mandatory real `windows-2025` gate passes. This Foundation snapshot does not claim Windows support.
+`READ_ONLY=true` is the default. No mutation tool is registered, so this preview cannot change firewall
+configuration. Future writes will be added only behind a verified backup and audit safety envelope.
 
-## Run locally
+## Quick local proof
 
-Requirements: Node.js 22.19.0 or newer within major 22, and npm.
+Requirements: Node.js 22.19 or newer within major 22, npm, macOS or Linux.
 
 ```bash
 if test -x /opt/homebrew/opt/node@22/bin/node; then
@@ -23,81 +28,106 @@ if test -x /opt/homebrew/opt/node@22/bin/node; then
 fi
 node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&
 npm ci --ignore-scripts &&
-npm run build &&
-node dist/main.js
+npm run test:product1a &&
+npm run build
 ```
 
-`node dist/main.js` is a protocol-clean stdio MCP process. Configure an MCP client to run that exact
-command with this repository as its working directory. The server instructions ask the agent to explain
-concepts in plain language, clarify ambiguity, investigate read-only first, and obtain exact confirmation
-before any future mutation.
+`npm run test:product1a` creates a clean npm tarball, installs it in an isolated consumer project, connects
+it to a separately owned synthetic HTTPS OPNsense target, calls all three OPNsense tools through raw MCP
+stdio, checks that secrets never appear, closes on EOF, and removes every fixture.
 
-HTTP is an explicit local-development option:
+## Connect your OPNsense instance
+
+Create a JSON file outside the repository and protect it with mode `0600`:
+
+```json
+{
+  "url": "https://192.0.2.1",
+  "apiKey": "your-dedicated-read-only-api-key",
+  "apiSecret": "your-api-secret",
+  "caFile": "/absolute/path/to/your-ca.pem"
+}
+```
+
+The file must be a regular, non-symlink file owned by the current user. `url` must be one exact HTTPS
+origin. `caFile` is optional when the firewall certificate already chains to a trusted CA. Use a dedicated
+OPNsense key with the least privileges needed for these reads; do not paste credentials into chat or command
+arguments.
+
+To run the protocol-clean stdio server directly:
 
 ```bash
 if test -x /opt/homebrew/opt/node@22/bin/node; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
 node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&
-: "${MCP_HTTP_TOKEN:?Set MCP_HTTP_TOKEN in the server shell}" &&
-MCP_HTTP_TOKEN="$MCP_HTTP_TOKEN" node -e 'process.exit(process.env.MCP_HTTP_TOKEN?.length >= 32 ? 0 : 1)' &&
-MCP_HTTP_ENABLED=true \
-MCP_HTTP_TOKEN="$MCP_HTTP_TOKEN" \
-node dist/entrypoints/http.js
+OPNSENSE_CONFIG_FILE="/absolute/path/to/opnsense.json" READ_ONLY=true node dist/main.js
 ```
 
-Set `MCP_HTTP_TOKEN` to the same random 32-or-more-character value in the server shell and the client
-configuration, preferably through a local secret manager. The command refuses a missing or short value and
-does not print it. HTTP binds to loopback, validates Host, applies finite body/request/stream/session limits,
-and requires that bearer. Non-browser clients may omit Origin. Browser Origin access is denied by default;
-`MCP_ALLOWED_ORIGINS` accepts only comma-separated exact serialized origin values including scheme, host,
-and port, for example `https://console.example:8443`. A same-host value with another scheme or port is not
-equivalent. This is not a remote deployment endpoint.
+Never point development or tests at a production firewall. Product 1B will provide the disposable-VM path.
 
-Deprecated SSE compatibility is disabled by default. `MCP_LEGACY_SSE_ENABLED=true` adds authenticated `GET /sse` and `POST /messages` on the same hardened loopback listener without replacing Streamable HTTP at `/mcp`. It exists only for migration and must be re-reviewed or removed before release.
+## OpenCode
 
-## Discoverable prompts
+Add a project-level `opencode.json` (replace both absolute paths):
 
-- `diagnose_network_problem`: turn a simple symptom into a read-only investigation.
-- `publish_internal_service`: clarify and prepare an internal DNS, certificate, and HAProxy plan without applying it.
-- `block_domain_for_device`: clarify and prepare a device-scoped DNS block without broadening it to the whole network.
-
-Prompts guide an MCP client; they are not authorization and they do not bypass policy.
-
-## Tested evidence
-
-```bash
-if test -x /opt/homebrew/opt/node@22/bin/node; then
-  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
-fi
-node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&
-npm run verify &&
-npm run test:conformance
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "opnsense": {
+      "type": "local",
+      "command": ["node", "/absolute/path/to/OPNSenseMCP/dist/main.js"],
+      "environment": {
+        "READ_ONLY": "true",
+        "OPNSENSE_CONFIG_FILE": "/absolute/path/to/opnsense.json"
+      }
+    }
+  }
+}
 ```
 
-`npm run verify` runs formatting, lint, strict TypeScript, the JavaScript/TypeScript AGPL header gate,
-build, and deterministic Vitest tests. Its real subprocess test makes six official child invocations,
-captured inside Vitest. The public `npm run test:conformance` command runs the same six scenario/version
-tuples again: `server-initialize`, `ping`, and `tools-list` at `2025-11-25`, then `tools-list`,
-`input-required-result-unsupported-methods`, and `http-header-validation` at draft `2026-07-28`.
-Consequently the combined gate makes six public-script invocations and twelve official child invocations.
-For both protocol versions stderr remains empty, including the five expected negative header probes, and
-accepted `checks.json` records contain only `SUCCESS` or `INFO`. There is no expected-failure baseline.
-This is targeted interoperability evidence, not full-suite conformance.
+Then run `opencode mcp list`; `opnsense` should be connected. The committed smoke evidence covers only
+OpenCode 1.18.3 with `opencode/north-mini-code-free` against the installed tarball and synthetic HTTPS
+target. It records tool/result digests, not firewall data or credentials. See the
+[machine-readable evidence](tests/fixtures/opencode.product1a.json).
 
-The three MCP v2 packages `@modelcontextprotocol/server`, `@modelcontextprotocol/client`, and
-`@modelcontextprotocol/node` are deliberately pinned to `2.0.0-beta.4` for this foundation. Before public
-package publication, all three must be repinned to one stable MCP v2 release together and every
-deterministic and conformance gate must pass again. The optional `@modelcontextprotocol/express` helper
-package is intentionally not installed: direct Express integration preserves the project-owned guard
-order of exact Host -> exact serialized Origin -> shutdown admission gate -> bounded body receipt ->
-authentication. During shutdown the gate closes synchronously, so a later request on an already-active
-connection receives a fixed sanitized 503 response and cannot reach MCP dispatch.
+Other MCP clients can launch the same stdio command, but no client-specific support claim is made until its
+own versioned smoke passes.
 
-Separately, the isolated deprecated-SSE adapter pins the legacy `@modelcontextprotocol/sdk@1.29.0`
-exactly. Before release run `npm run release:check:legacy-sse` and `npm audit --omit=dev`, then decide
-explicitly whether compatibility can be removed.
+## How this preview is tested
 
-## License
+- Strict TypeScript, formatting, lint, license headers, and deterministic unit/integration tests.
+- Clean npm pack/install plus TLS, Basic authentication, response validation, secret redaction, shutdown,
+  and cleanup against a synthetic target.
+- Targeted MCP interoperability checks for protocol versions `2025-11-25` and draft `2026-07-28`.
+- One real OpenCode 1.18.3 routing smoke using `opencode/north-mini-code-free`.
 
-AGPL-3.0-or-later. See `LICENSE`.
+These checks prove the package and synthetic read path. They do **not** yet prove:
+
+- Product 1B's disposable OPNsense 26 VM or the real firmware's service-search GET/POST behavior;
+- public DNS, ACME, or HAProxy exposure on the Internet;
+- mutations, verified backups, restore, or audit behavior;
+- native Windows installation or client operation;
+- a full agentic benchmark or a benchmark score.
+
+## Product roadmap and example requests
+
+The next milestone is Product 1B: run this exact installed package against a disposable OPNsense 26 VM,
+observe the real API transport, and turn VM setup into a newcomer-friendly command.
+
+Later guided workflows are deliberately user-level goals, for example:
+
+- “My laptop loses Internet every evening. Can you investigate and explain what you find?”
+- “Block TikTok only for my child's tablet, without affecting the other devices.”
+- “Publish this service internally with a friendly DNS name, an internal certificate, and a reverse proxy.”
+
+Those three workflows are roadmap examples, not Product 1A claims. Internet-facing publication with public
+DNS, Let's Encrypt, and HAProxy is a longer-term lab milestone after safe writes and private-VM coverage.
+
+**Platform status:** macOS and Linux are the currently verified development hosts. Native Windows remains a required product target, but package and client support are not claimed until the later `windows-2025` gate passes.
+
+## License and trademark
+
+Licensed under AGPL-3.0-or-later; see [LICENSE](LICENSE). The AGPL permits commercial use while requiring
+covered source availability, including for network use. OPNsense is a trademark of Deciso B.V. This
+independent project is not affiliated with, sponsored by, or endorsed by Deciso B.V. or the OPNsense project.

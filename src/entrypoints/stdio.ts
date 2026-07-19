@@ -43,7 +43,7 @@ export function createStdioAggregateClose(
   recordedFailures: () => readonly Error[]
 ): () => Promise<void> {
   return createPhasedClose(
-    [[serverClose], ...(runtimeClose === undefined ? [] : [[runtimeClose]])],
+    [...(runtimeClose === undefined ? [] : [[runtimeClose]]), [serverClose]],
     recordedFailures,
     'Stdio cleanup failed'
   );

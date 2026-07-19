@@ -1,10 +1,11 @@
 # Contributing
 
-Use Node.js 22.19.0 or newer within major 22. Never test against a production firewall. This foundation has no firewall adapter; future live tests must use a disposable, explicitly selected local VM.
+Use Node.js 22.19 or newer within major 22. Never develop or test against a production firewall. Product 1A
+uses only synthetic HTTPS fixtures; Product 1B will own the disposable OPNsense 26 VM workflow.
 
-**Platform status:** macOS and Linux are the current full contributor and VM-test hosts. Native Windows is a product runtime target, not part of current verification-host coverage. Windows package and client support remain unclaimed until the later mandatory real `windows-2025` gate passes. This Foundation snapshot does not claim Windows support.
+**Platform status:** macOS and Linux are the currently verified development hosts. Native Windows remains a required product target, but package and client support are not claimed until the later `windows-2025` gate passes.
 
-## Install and deterministic verification
+## One-command development gate
 
 From the repository root:
 
@@ -15,13 +16,18 @@ fi
 node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&
 node --version &&
 npm ci --ignore-scripts &&
+npm run test:product1a &&
 npm run verify &&
 git diff --check
 ```
 
-The Node version must satisfy `>=22.19 <23` and every command must exit `0`.
+`test:product1a` is the fast product proof: clean pack, isolated install, synthetic TLS target, all Product
+1A reads, secret redaction, EOF shutdown, and residue cleanup. `verify` runs the complete deterministic
+offline suite. Both must exit `0`.
 
-## Protocol verification
+## Protocol gates
+
+Run these after any server, schema, prompt, or transport change:
 
 ```bash
 if test -x /opt/homebrew/opt/node@22/bin/node; then
@@ -32,22 +38,32 @@ npm run test:conformance:2025 &&
 npm run test:conformance:2026
 ```
 
-The first command runs targeted `server-initialize`, `ping`, and `tools-list` scenarios at `2025-11-25`.
-The second runs targeted `tools-list`, `input-required-result-unsupported-methods`, and
-`http-header-validation` at draft `2026-07-28`. These are six public-script invocations. If they follow
-`npm run verify`, the combined gate has twelve official child invocations because Vitest already ran the
-same six tuples. Both versions keep stderr empty, including expected negative header probes, and accepted
-reports contain only `SUCCESS` or `INFO`. Do not introduce an expected-failure baseline or describe these
-six public invocations as a full suite.
+These are targeted interoperability scenarios, not a claim of complete protocol conformance.
+
+## Optional OpenCode smoke
+
+With OpenCode installed, run:
+
+```bash
+if test -x /opt/homebrew/opt/node@22/bin/node; then
+  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+fi
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&
+npm run smoke:opencode
+```
+
+The runner uses an isolated project, installed tarball, synthetic HTTPS target, and the free
+`opencode/north-mini-code-free` model. It writes sanitized evidence to
+`tests/fixtures/opencode.product1a.json`: only versions, SHA-256 digests, narrow checks, and cleanup status.
+External model or capacity failure exits `3` and records `blocked`; it never becomes a false success.
 
 ## Change discipline
 
-1. Add a focused failing test for the behavior.
+1. Add a focused failing test and observe the expected failure.
 2. Make the smallest implementation change that passes it.
-3. Run the focused test, then `npm run verify`.
-4. Run protocol conformance for any server, schema, prompt, or transport change.
-5. Commit one coherent change with no generated output, secret, or local result directory.
+3. Run the focused test, then the deterministic gate above.
+4. Keep one coherent local commit; do not push unless asked.
 
-Every JavaScript and TypeScript source begins with `// SPDX-License-Identifier: AGPL-3.0-or-later`.
-
-`npm run license:check` enforces those source headers. The later provenance workflow owns the broader release-tree and history scan; do not treat the source-header check as provenance evidence.
+Every JavaScript and TypeScript source starts with
+`// SPDX-License-Identifier: AGPL-3.0-or-later`. `npm run license:check` enforces this. Keep secrets,
+temporary MCP configuration, generated tarballs, and raw client output out of the repository.

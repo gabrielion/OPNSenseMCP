@@ -1,7 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  access,
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile
+} from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   COMMAND_SUPERVISOR_STARTUP_TIMEOUT_MS,
@@ -11,6 +22,7 @@ import {
   type CommandInvocation,
   type CommandResult
 } from '../support/installed-package-harness.js';
+import { startSyntheticOPNsenseTarget } from '../support/https-opnsense-mock.js';
 
 const PACKAGE_INPUTS = [
   'package.json',
@@ -40,6 +52,7 @@ if (WORST_CASE_PACKAGE_TEST_MS >= PACKAGE_TEST_TIMEOUT_MS) {
 }
 
 interface InstalledPackage {
+  readonly archiveSha256: string;
   readonly command: CommandInvocation;
   readonly target: string;
 }
@@ -104,6 +117,9 @@ async function withInstalledPackage(
     const archiveName = archives[0];
     if (archiveName === undefined) throw new Error('npm pack did not produce an archive');
     const archive = join(packageCopy, archiveName);
+    const archiveSha256 = createHash('sha256')
+      .update(await readFile(archive))
+      .digest('hex');
 
     await writeFile(
       join(consumer, 'package.json'),
@@ -126,7 +142,7 @@ async function withInstalledPackage(
     requireSuccessfulCommand(installed, 'npm install');
 
     await assertion(
-      { command: harness.installedCommand, target: harness.installedTarget },
+      { archiveSha256, command: harness.installedCommand, target: harness.installedTarget },
       packageCopy
     );
   } finally {
@@ -137,14 +153,16 @@ async function withInstalledPackage(
 function runInstalledCommand(
   installedCommand: CommandInvocation,
   readOnly: string,
-  input: string
+  input: string,
+  opnsenseConfigFile?: string
 ): Promise<CommandResult> {
   return runBoundedCommand(installedCommand, {
     cwd: resolve('.'),
     environment: {
       PATH: process.env.PATH ?? '',
       READ_ONLY: readOnly,
-      MCP_REQUEST_STATE_SECRET: 'INSTALLED_PACKAGE_SENTINEL_0123456789'
+      MCP_REQUEST_STATE_SECRET: 'INSTALLED_PACKAGE_SENTINEL_0123456789',
+      ...(opnsenseConfigFile === undefined ? {} : { OPNSENSE_CONFIG_FILE: opnsenseConfigFile })
     },
     input,
     timeoutMs: MCP_COMMAND_TIMEOUT_MS,
@@ -176,59 +194,174 @@ describe('installed npm executable', () => {
   );
 
   it(
-    'rejects invalid configuration and completes the 2025 protocol through the installed bin',
-    () =>
-      withInstalledPackage(async ({ command }) => {
-        const negative = await runInstalledCommand(command, 'invalid', '');
-        const requests = [
-          {
-            jsonrpc: '2.0',
-            id: 1,
-            method: 'initialize',
-            params: {
-              protocolVersion: '2025-11-25',
-              capabilities: {},
-              clientInfo: { name: 'installed-package-test', version: '0.1.0' }
-            }
-          },
-          { jsonrpc: '2.0', method: 'notifications/initialized', params: {} },
-          { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
-          {
-            jsonrpc: '2.0',
-            id: 3,
-            method: 'tools/call',
-            params: { name: 'server_status', arguments: {} }
-          }
-        ];
-        const positive = await runInstalledCommand(
-          command,
-          'true',
-          `${requests.map((request) => JSON.stringify(request)).join('\n')}\n`
-        );
-        const responses = protocolLines(positive.stdout);
-
-        expect(negative.code).not.toBe(0);
-        expect(negative.signal).toBeNull();
-        expect(negative.stdout).toBe('');
-        expect(negative.stderr).toBe('Error\n');
-        expect(positive).toMatchObject({ code: 0, signal: null, stderr: '' });
-        expect(responses.every((response) => response.jsonrpc === '2.0')).toBe(true);
-        expect(responses.find((response) => response.id === 1)).toMatchObject({
-          result: { protocolVersion: '2025-11-25' }
-        });
-        expect(responses.find((response) => response.id === 2)).toMatchObject({
-          result: {
-            tools: [
-              { name: 'server_status' },
-              { name: 'opn_describe' },
-              { name: 'opn_get' },
-              { name: 'opn_list' }
+    'executes the closed Product 1A read surface from an installed tarball and cleans every fixture',
+    async () => {
+      const apiKey = 'product1a-package-key';
+      const apiSecret = 'PRODUCT_1A_PACKAGE_SECRET_SENTINEL';
+      const target = await startSyntheticOPNsenseTarget((request) => {
+        if (request.path === '/api/core/system/status') {
+          return { body: JSON.stringify({ status: 'ok', ignored: 'not-public' }) };
+        }
+        return {
+          body: JSON.stringify({
+            total: 1,
+            rowCount: 10,
+            current: 1,
+            rows: [
+              {
+                id: 'svc-1',
+                name: 'dnsmasq',
+                description: 'DNS forwarder',
+                status: 'running',
+                ignored: 'not-public'
+              }
             ]
-          }
+          })
+        };
+      });
+      const fixtureRoot = await mkdtemp(join(tmpdir(), 'mcp-product1a-fixture-'));
+      const caFile = join(fixtureRoot, 'ca.pem');
+      const configFile = join(fixtureRoot, 'opnsense.json');
+      const evidence = JSON.parse(
+        await readFile('tests/fixtures/opencode.product1a.json', 'utf8')
+      ) as { readonly package?: { readonly sha256?: unknown } };
+      let packageRoot: string | undefined;
+      await writeFile(caFile, target.ca, { mode: 0o600 });
+      await writeFile(
+        configFile,
+        `${JSON.stringify({ url: target.url, apiKey, apiSecret, caFile })}\n`,
+        { mode: 0o600 }
+      );
+      try {
+        await withInstalledPackage(async ({ archiveSha256, command }, packageCopy) => {
+          packageRoot = dirname(packageCopy);
+          expect(evidence.package?.sha256).toBe(archiveSha256);
+          const negative = await runInstalledCommand(command, 'invalid', '');
+          const requests = [
+            {
+              jsonrpc: '2.0',
+              id: 1,
+              method: 'initialize',
+              params: {
+                protocolVersion: '2025-11-25',
+                capabilities: {},
+                clientInfo: { name: 'installed-package-test', version: '0.1.0' }
+              }
+            },
+            { jsonrpc: '2.0', method: 'notifications/initialized', params: {} },
+            { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+            {
+              jsonrpc: '2.0',
+              id: 3,
+              method: 'tools/call',
+              params: {
+                name: 'opn_describe',
+                arguments: { resource: 'system.status' }
+              }
+            },
+            {
+              jsonrpc: '2.0',
+              id: 4,
+              method: 'tools/call',
+              params: { name: 'opn_get', arguments: { resource: 'system.status' } }
+            },
+            {
+              jsonrpc: '2.0',
+              id: 5,
+              method: 'tools/call',
+              params: {
+                name: 'opn_list',
+                arguments: {
+                  resource: 'core.services',
+                  page: 1,
+                  pageSize: 10,
+                  query: ''
+                }
+              }
+            }
+          ];
+          const positive = await runInstalledCommand(
+            command,
+            'true',
+            `${requests.map((request) => JSON.stringify(request)).join('\n')}\n`,
+            configFile
+          );
+          const responses = protocolLines(positive.stdout);
+
+          expect(negative.code).not.toBe(0);
+          expect(negative.signal).toBeNull();
+          expect(negative.stdout).toBe('');
+          expect(negative.stderr).toBe('Error\n');
+          expect(positive).toMatchObject({ code: 0, signal: null, stderr: '' });
+          expect(responses.every((response) => response.jsonrpc === '2.0')).toBe(true);
+          expect(
+            responses
+              .map(({ id }) => id)
+              .filter((id): id is number => typeof id === 'number')
+              .sort((left, right) => left - right)
+          ).toEqual([1, 2, 3, 4, 5]);
+          expect(responses.find((response) => response.id === 1)).toMatchObject({
+            result: { protocolVersion: '2025-11-25' }
+          });
+          expect(responses.find((response) => response.id === 2)).toMatchObject({
+            result: {
+              tools: [
+                { name: 'server_status', annotations: { readOnlyHint: true } },
+                { name: 'opn_describe', annotations: { readOnlyHint: true } },
+                { name: 'opn_get', annotations: { readOnlyHint: true } },
+                { name: 'opn_list', annotations: { readOnlyHint: true } }
+              ]
+            }
+          });
+          expect(responses.find((response) => response.id === 3)).toMatchObject({
+            result: {
+              structuredContent: {
+                mode: 'resource',
+                resource: { key: 'system.status', operations: [{ name: 'get', effect: 'read' }] }
+              }
+            }
+          });
+          expect(responses.find((response) => response.id === 4)).toMatchObject({
+            result: { structuredContent: { item: { status: 'ok' } } }
+          });
+          expect(responses.find((response) => response.id === 5)).toMatchObject({
+            result: {
+              structuredContent: {
+                page: 1,
+                pageSize: 10,
+                total: 1,
+                items: [
+                  {
+                    id: 'svc-1',
+                    name: 'dnsmasq',
+                    description: 'DNS forwarder',
+                    status: 'running'
+                  }
+                ]
+              }
+            }
+          });
+          expect(target.requests.map(({ method, path }) => `${method} ${path}`)).toEqual([
+            'GET /api/core/system/status',
+            'POST /api/core/service/search'
+          ]);
+          expect(target.requests[1]?.body).toBe(
+            JSON.stringify({ current: 1, rowCount: 10, sort: {}, searchPhrase: '' })
+          );
+          expect(positive.stdout).not.toContain('INSTALLED_PACKAGE_SENTINEL_0123456789');
+          expect(positive.stdout).not.toContain(apiKey);
+          expect(positive.stdout).not.toContain(apiSecret);
+          expect(positive.stderr).not.toContain(apiKey);
+          expect(positive.stderr).not.toContain(apiSecret);
         });
-        expect(responses.find((response) => response.id === 3)).toHaveProperty('result');
-        expect(positive.stdout).not.toContain('INSTALLED_PACKAGE_SENTINEL_0123456789');
-      }),
+      } finally {
+        await target.close();
+        await rm(fixtureRoot, { recursive: true, force: true });
+      }
+      if (packageRoot === undefined) throw new Error('Package fixture was not created');
+      await expect(access(packageRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(access(fixtureRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+    },
     PACKAGE_TEST_TIMEOUT_MS
   );
 });

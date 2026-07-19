@@ -291,19 +291,19 @@ it('closes owned stdio on stdin EOF and exits with protocol-clean output', async
   expect(stderr).not.toContain(SENTINEL);
 });
 
-it('aggregates recorded probe/server failures with runtime failure and closes each owner once', async () => {
+it('drains the owned runtime before closing stdio and aggregates every failure', async () => {
   const probeFailure = new Error('probe-close');
   const serverFailure = new Error('server-close');
   const runtimeFailure = new Error('runtime-close');
   const synchronousServerFailure = new Error('synchronous-server-close');
-  let rejectServer: ((error: Error) => void) | undefined;
-  const serverClose = vi.fn(
+  let rejectRuntime: ((error: Error) => void) | undefined;
+  const runtimeClose = vi.fn(
     () =>
       new Promise<void>((_resolve, reject) => {
-        rejectServer = reject;
+        rejectRuntime = reject;
       })
   );
-  const runtimeClose = vi.fn(() => Promise.reject(runtimeFailure));
+  const serverClose = vi.fn(() => Promise.reject(synchronousServerFailure));
   const close = createStdioAggregateClose(serverClose, runtimeClose, () => [
     probeFailure,
     serverFailure
@@ -311,16 +311,16 @@ it('aggregates recorded probe/server failures with runtime failure and closes ea
   const first = close();
   const second = close();
   expect(first).toBe(second);
-  await expect.poll(() => serverClose.mock.calls.length).toBe(1);
-  expect(runtimeClose).not.toHaveBeenCalled();
-  rejectServer?.(synchronousServerFailure);
+  await expect.poll(() => runtimeClose.mock.calls.length).toBe(1);
+  expect(serverClose).not.toHaveBeenCalled();
+  rejectRuntime?.(runtimeFailure);
   const error = await first.catch((reason: unknown) => reason);
   expect(error).toBeInstanceOf(AggregateError);
   expect((error as AggregateError).errors).toEqual([
     probeFailure,
     serverFailure,
-    synchronousServerFailure,
-    runtimeFailure
+    runtimeFailure,
+    synchronousServerFailure
   ]);
   expect(serverClose).toHaveBeenCalledTimes(1);
   expect(runtimeClose).toHaveBeenCalledTimes(1);

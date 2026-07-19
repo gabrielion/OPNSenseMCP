@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "claim": "This evidence covers only OpenCode 1.18.3 with opencode/north-mini-code-free selecting the three Product 1A reads from the installed package against a synthetic HTTPS OPNsense target.",
+  "client": {
+    "name": "OpenCode",
+    "version": "1.18.3"
+  },
+  "model": "opencode/north-mini-code-free",
+  "package": {
+    "name": "@gabrielion/opnsense-mcp",
+    "version": "0.1.0",
+    "sha256": "ebd69dddc1b17f26ddcd9f0099a003eb0e53f1dee90e480ea5648aedb40c265f"
+  },
+  "tools": [
+    {
+      "name": "opn_describe",
+      "inputSha256": "d91c301e703349bfe7de35983fba180bbde21a6fdf347d62c324618acf274cb1",
+      "resultSha256": "a0b9301b44e34ba446a9d4c671fb7abd15452ce25cb218c67896003e5028f535"
+    },
+    {
+      "name": "opn_get",
+      "inputSha256": "d91c301e703349bfe7de35983fba180bbde21a6fdf347d62c324618acf274cb1",
+      "resultSha256": "a0356a826614f2af5e020ed9a2e670f40e8f6c139004cccd91bfb363dce48b1f"
+    },
+    {
+      "name": "opn_list",
+      "inputSha256": "aac6f4a46e201e91a8c3896bb6b18d18312574c893b1c9b84383878d7c52c3e7",
+      "resultSha256": "e85b2a523390d051d034f2f1013aba72c7c6847b7ca38f3ddb29cae496f6a393"
+    }
+  ],
+  "checks": {
+    "mcpConnected": true,
+    "expectedReadsObserved": true,
+    "secretAbsent": true,
+    "cleanupConfirmed": true
+  },
+  "blockedReason": null,
+  "limitations": [
+    "Synthetic HTTPS target only; no real OPNsense VM was used.",
+    "This is not evidence for public DNS, ACME, HAProxy, mutations, backups, Windows, or the agentic benchmark."
+  ]
+}
