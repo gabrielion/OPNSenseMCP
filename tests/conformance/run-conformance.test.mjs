@@ -248,6 +248,30 @@ function assertOfficialStdoutContract(stdout, version, dedicatedTmp, poison) {
 }
 
 describe('exact conformance command contract', () => {
+  const childEnvironmentNames = Object.freeze([
+    'PATH',
+    'LANG',
+    'LANGUAGE',
+    'LC_ALL',
+    'LC_CTYPE',
+    'TMPDIR',
+    'TMP',
+    'TEMP',
+    'SystemRoot',
+    'ComSpec',
+    'PATHEXT',
+    'USERPROFILE'
+  ]);
+
+  function expectedChildEnvironment() {
+    return Object.fromEntries(
+      childEnvironmentNames.flatMap((name) => {
+        const value = process.env[name];
+        return value === undefined ? [] : [[name, value]];
+      })
+    );
+  }
+
   it('publishes the exact versions, scenarios, sentinels, and report bound', () => {
     expect(runner.SCENARIOS_BY_VERSION).toEqual({
       '2025-11-25': ['server-initialize', 'ping', 'tools-list'],
@@ -309,7 +333,10 @@ describe('exact conformance command contract', () => {
     child.kill = vi.fn();
     child.unref = vi.fn();
     const spawnProcess = vi.fn(() => {
-      queueMicrotask(() => child.emit('close', 0, null));
+      queueMicrotask(() => {
+        child.emit('spawn');
+        child.emit('close', 0, null);
+      });
       return child;
     });
     const input = {
@@ -330,8 +357,62 @@ describe('exact conformance command contract', () => {
         input.scenario,
         input.stateDirectory
       ),
-      { stdio: 'inherit', env: process.env }
+      { stdio: 'inherit', env: expectedChildEnvironment() }
     );
+  });
+
+  it('projects only an immutable runtime environment without parent secrets', async () => {
+    const sentinels = {
+      OPNSENSE_API_SECRET: 'SENTINEL_OPNSENSE_SECRET',
+      MCP_HTTP_TOKEN: 'SENTINEL_MCP_TOKEN',
+      GITHUB_TOKEN: 'SENTINEL_GITHUB_TOKEN',
+      NODE_OPTIONS: '--require=SENTINEL_NODE_OPTIONS',
+      UNRELATED_DEVELOPER_SECRET: 'SENTINEL_UNRELATED_SECRET'
+    };
+    const originals = new Map(
+      Object.keys(sentinels).map((name) => [
+        name,
+        { present: Object.hasOwn(process.env, name), value: process.env[name] }
+      ])
+    );
+    let childEnvironment;
+    try {
+      Object.assign(process.env, sentinels);
+      const child = new EventEmitter();
+      child.kill = vi.fn();
+      child.unref = vi.fn();
+      await runner.runConformanceChild(
+        {
+          executable: '/official/index.js',
+          proxyUrl: 'http://127.0.0.1:45678/mcp',
+          version: '2025-11-25',
+          scenario: 'ping',
+          stateDirectory: '/private/state'
+        },
+        {
+          spawnProcess: (_program, _argv, options) => {
+            childEnvironment = options.env;
+            queueMicrotask(() => {
+              child.emit('spawn');
+              child.emit('close', 0, null);
+            });
+            return child;
+          }
+        }
+      );
+
+      expect(childEnvironment).toEqual(expectedChildEnvironment());
+      expect(Object.isFrozen(childEnvironment)).toBe(true);
+      for (const [name, value] of Object.entries(sentinels)) {
+        expect(childEnvironment).not.toHaveProperty(name);
+        expect(JSON.stringify(childEnvironment)).not.toContain(value);
+      }
+    } finally {
+      for (const [name, original] of originals) {
+        if (original.present) process.env[name] = original.value;
+        else Reflect.deleteProperty(process.env, name);
+      }
+    }
   });
 });
 
@@ -1753,10 +1834,11 @@ describe('raw streaming authentication proxy', () => {
 });
 
 describe('child deadline and process ownership', () => {
-  function fakeChild() {
+  function fakeChild({ emitSpawn = true } = {}) {
     const child = new EventEmitter();
     child.kill = vi.fn(() => true);
     child.unref = vi.fn();
+    if (emitSpawn) queueMicrotask(() => child.emit('spawn'));
     return child;
   }
 
@@ -1813,6 +1895,55 @@ describe('child deadline and process ownership', () => {
     await vi.advanceTimersByTimeAsync(64_000);
     await rejection;
     expect(child.unref).toHaveBeenCalledOnce();
+  });
+
+  it('retains escalation ownership when the child emits error during SIGTERM grace', async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    const promise = runner.runConformanceChild(
+      {
+        executable: '/official/index.js',
+        proxyUrl: 'http://127.0.0.1:1234/mcp',
+        version: '2025-11-25',
+        scenario: 'ping',
+        stateDirectory: '/private/state'
+      },
+      { spawnProcess: () => child }
+    );
+    const outcome = promise.catch((error) => error);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(child.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+    child.emit('error', new Error('POISON_TERMINATION_ERROR'));
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    child.emit('close', null, 'SIGKILL');
+
+    await expect(outcome).resolves.toMatchObject({ name: 'ConformanceChildTimeoutError' });
+  });
+
+  it('retains final bounded detach ownership when the child emits error after SIGKILL', async () => {
+    vi.useFakeTimers();
+    const child = fakeChild();
+    const promise = runner.runConformanceChild(
+      {
+        executable: '/official/index.js',
+        proxyUrl: 'http://127.0.0.1:1234/mcp',
+        version: '2025-11-25',
+        scenario: 'ping',
+        stateDirectory: '/private/state'
+      },
+      { spawnProcess: () => child }
+    );
+    const outcome = promise.catch((error) => error);
+
+    await vi.advanceTimersByTimeAsync(62_000);
+    expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+    child.emit('error', new Error('POISON_KILL_ERROR'));
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(child.unref).toHaveBeenCalledOnce();
+    await expect(outcome).resolves.toMatchObject({ name: 'ConformanceChildTimeoutError' });
   });
 
   it('does not arm a grace timer after SIGTERM synchronously emits close', async () => {
@@ -1874,8 +2005,8 @@ describe('child deadline and process ownership', () => {
     await expect(promise).rejects.toBeDefined();
   });
 
-  it('rejects spawn errors without retaining their message', async () => {
-    const child = fakeChild();
+  it('rejects a true pre-spawn error without retaining its message', async () => {
+    const child = fakeChild({ emitSpawn: false });
     const promise = runner.runConformanceChild(
       {
         executable: '/official/index.js',

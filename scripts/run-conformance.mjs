@@ -59,6 +59,20 @@ const OWNED_ENVIRONMENT_EXACT = Object.freeze([
   'AUDIT_LOG_STRICT',
   'BACKUP_PATH'
 ]);
+const CONFORMANCE_CHILD_ENVIRONMENT_NAMES = Object.freeze([
+  'PATH',
+  'LANG',
+  'LANGUAGE',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'SystemRoot',
+  'ComSpec',
+  'PATHEXT',
+  'USERPROFILE'
+]);
 
 const SYSTEM_TIMER = Object.freeze({
   set: setTimeout,
@@ -88,6 +102,15 @@ function isOwnedEnvironmentName(name) {
     OWNED_ENVIRONMENT_EXACT.includes(name) ||
     OWNED_ENVIRONMENT_PREFIXES.some((prefix) => name.startsWith(prefix))
   );
+}
+
+function conformanceChildEnvironment() {
+  const environment = {};
+  for (const name of CONFORMANCE_CHILD_ENVIRONMENT_NAMES) {
+    const value = process.env[name];
+    if (value !== undefined) environment[name] = value;
+  }
+  return Object.freeze(environment);
 }
 
 export function installConformanceEnvironment(stateDirectory, environment = process.env) {
@@ -797,7 +820,7 @@ export function runConformanceChild(input, overrides = {}) {
         input.scenario,
         input.stateDirectory
       ),
-      { stdio: 'inherit', env: process.env }
+      { stdio: 'inherit', env: conformanceChildEnvironment() }
     );
   } catch {
     return Promise.reject(
@@ -808,6 +831,7 @@ export function runConformanceChild(input, overrides = {}) {
   return new Promise((resolveChild, rejectChild) => {
     let settled = false;
     let timedOut = false;
+    let phase = 'pre-spawn';
     const handles = new Set();
     const clock = { set: dependencies.setTimer, clear: dependencies.clearTimer };
     const clearHandles = () => {
@@ -818,6 +842,7 @@ export function runConformanceChild(input, overrides = {}) {
       if (settled) return;
       settled = true;
       clearHandles();
+      child.off('spawn', onSpawn);
       child.off('close', onClose);
       child.off('error', onError);
       callback(value);
@@ -829,6 +854,9 @@ export function runConformanceChild(input, overrides = {}) {
     };
     const timeoutError = () =>
       conformanceChildError('timeout', input.version, input.scenario, null, 'SIGKILL');
+    const onSpawn = () => {
+      if (!settled && phase === 'pre-spawn') phase = 'running';
+    };
     const onClose = (code, signal) => {
       if (timedOut) {
         finish(rejectChild, timeoutError());
@@ -842,15 +870,19 @@ export function runConformanceChild(input, overrides = {}) {
       }
     };
     const onError = () => {
-      finish(
-        rejectChild,
-        conformanceChildError('spawn', input.version, input.scenario, null, null)
-      );
+      if (phase === 'pre-spawn') {
+        finish(
+          rejectChild,
+          conformanceChildError('spawn', input.version, input.scenario, null, null)
+        );
+      }
     };
+    child.once('spawn', onSpawn);
     child.once('close', onClose);
-    child.once('error', onError);
+    child.on('error', onError);
     schedule(() => {
       timedOut = true;
+      phase = 'terminating-sigterm';
       try {
         child.kill('SIGTERM');
       } catch {
@@ -858,6 +890,7 @@ export function runConformanceChild(input, overrides = {}) {
       }
       if (settled) return;
       schedule(() => {
+        phase = 'terminating-sigkill';
         try {
           child.kill('SIGKILL');
         } catch {
@@ -865,7 +898,12 @@ export function runConformanceChild(input, overrides = {}) {
         }
         if (settled) return;
         schedule(() => {
-          child.unref();
+          phase = 'detached';
+          try {
+            child.unref();
+          } catch {
+            // The final bounded detach still relinquishes local ownership.
+          }
           finish(rejectChild, timeoutError());
         }, CHILD_KILL_CONFIRM_MS);
       }, CHILD_KILL_GRACE_MS);
