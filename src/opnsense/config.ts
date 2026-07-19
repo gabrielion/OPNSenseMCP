@@ -11,6 +11,8 @@ const MAX_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const INVALID_CONFIGURATION_MESSAGE = 'Invalid OPNsense configuration.';
+const BASIC_KEY = /^[\x20-\x39\x3b-\x7e]+$/u;
+const BASIC_SECRET = /^[\x20-\x7e]+$/u;
 
 function isHttpsOrigin(value: string): boolean {
   try {
@@ -31,8 +33,8 @@ function isHttpsOrigin(value: string): boolean {
 const PrivateConfigurationSchema = z
   .object({
     url: z.string().refine(isHttpsOrigin),
-    apiKey: z.string().min(1).max(1024),
-    apiSecret: z.string().min(1).max(1024),
+    apiKey: z.string().min(1).max(1024).regex(BASIC_KEY),
+    apiSecret: z.string().min(1).max(1024).regex(BASIC_SECRET),
     caFile: z.string().refine(isAbsolute).optional(),
     timeoutMs: z.number().int().min(1).max(MAX_TIMEOUT_MS).optional(),
     maxResponseBytes: z.number().int().min(1).max(MAX_RESPONSE_BYTES).optional()

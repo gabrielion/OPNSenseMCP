@@ -35,28 +35,15 @@ describe('reviewed OPNsense read adapter', () => {
       total: 1,
       items: [{ id: 'svc-1', name: 'unbound', description: 'Resolver', status: 'running' }]
     });
-    expect(request).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({
-        method: 'GET',
-        path: '/api/core/system/status',
-        maxInputBytes: 256,
-        maxResponseBytes: 4096,
-        signal
-      })
-    );
-    expect(request.mock.calls[0]?.[0]).not.toHaveProperty('body');
-    expect(request).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        method: 'POST',
-        path: '/api/core/service/search',
-        body: { current: 2, rowCount: 25, sort: {}, searchPhrase: 'dns' },
-        maxInputBytes: 2048,
-        maxResponseBytes: 131072,
-        signal
-      })
-    );
+    expect(request).toHaveBeenNthCalledWith(1, {
+      operation: 'system.status/get',
+      signal
+    });
+    expect(request).toHaveBeenNthCalledWith(2, {
+      operation: 'core.services/list',
+      payload: { current: 2, rowCount: 25, sort: {}, searchPhrase: 'dns' },
+      signal
+    });
   });
 
   it.each([

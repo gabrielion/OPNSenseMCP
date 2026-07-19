@@ -47,6 +47,49 @@ describe('private OPNsense configuration', () => {
     });
   });
 
+  it('accepts an unambiguous printable Basic credential pair including colons in the secret', async () => {
+    const path = await privateFile(
+      'config.json',
+      JSON.stringify({
+        url: 'https://firewall.example',
+        apiKey: 'printable key',
+        apiSecret: 'secret:with:colons'
+      })
+    );
+
+    expect(loadOPNsenseConnectionConfig(path)).toMatchObject({
+      apiKey: 'printable key',
+      apiSecret: 'secret:with:colons'
+    });
+  });
+
+  it.each([
+    ['colon in key', 'key:forged', 'secret'],
+    ['newline in key', 'key\nforged', 'secret'],
+    ['tab in key', 'key\tforged', 'secret'],
+    ['DEL in key', 'key\u007fforged', 'secret'],
+    ['non-ASCII key', 'k\u00e9y', 'secret'],
+    ['newline in secret', 'key', 'secret\nforged'],
+    ['tab in secret', 'key', 'secret\tforged'],
+    ['NUL in secret', 'key', 'secret\u0000forged'],
+    ['DEL in secret', 'key', 'secret\u007fforged'],
+    ['non-ASCII secret', 'key', 'secr\u00e8t']
+  ])('rejects %s with the fixed configuration error', async (_label, apiKey, apiSecret) => {
+    const path = await privateFile(
+      'config.json',
+      JSON.stringify({ url: 'https://firewall.example', apiKey, apiSecret })
+    );
+
+    expect(() => loadOPNsenseConnectionConfig(path)).toThrow(INVALID);
+    try {
+      loadOPNsenseConnectionConfig(path);
+    } catch (error) {
+      expect(String(error)).toBe('Error: Invalid OPNsense configuration.');
+      expect(String(error)).not.toContain(apiKey);
+      expect(String(error)).not.toContain(apiSecret);
+    }
+  });
+
   it.each([
     ['relative config path', () => 'relative-config.json'],
     [
