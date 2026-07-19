@@ -63,3 +63,7 @@ specification work. Active plan:
 `docs/superpowers/plans/2026-07-19-product-1a-read-only-vertical.md`. Clean Node 22.23.1 baseline:
 `npm ci --ignore-scripts` PASS and `npm run verify` PASS at 23 files / 631 tests. No VM, old repository,
 private bundle, environment credentials, or firewall was accessed. Task 1 is next.
+
+Product 1A Task 1: complete (commits `c4efd89..fb1c08b`; 25 files / 672 tests; initial review
+found an identifier-shaped refusal-detail leak; kernel-private reviewed vocabularies and provenance-sealed
+details fixed it; re-review spec compliant and quality approved with no findings).
