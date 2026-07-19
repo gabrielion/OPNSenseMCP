@@ -7,6 +7,14 @@ import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  Product1bVmError,
+  formatVmFailure,
+  formatVmState,
+  startDisposableVm,
+  statusDisposableVm,
+  stopDisposableVm
+} from './product1b-lifecycle.mjs';
 
 export const IMAGE_SPEC = Object.freeze({
   release: '26.1.6',
@@ -764,6 +772,10 @@ function userCacheRoot() {
     : join(homedir(), '.cache', 'opnsense-mcp', 'product1b');
 }
 
+function userInstanceRoot() {
+  return join(userCacheRoot(), 'instance');
+}
+
 export async function runPrepareImageCli({
   cacheRoot = userCacheRoot(),
   spec = IMAGE_SPEC,
@@ -793,6 +805,18 @@ export async function runPrepareImageCli({
   }
 }
 
+async function runVmStartCli() {
+  const report = doctorHost();
+  if (!report.ready) throw new Product1bVmError('VM_HOST_UNAVAILABLE');
+  const cacheRoot = userCacheRoot();
+  return startDisposableVm({
+    instanceRoot: userInstanceRoot(),
+    rawPath: join(cacheRoot, IMAGE_SPEC.rawName),
+    accelerator: report.accelerator,
+    prepareBase: () => prepareImage({ cacheRoot })
+  });
+}
+
 async function main() {
   const command = process.argv[2];
   if (command === 'doctor') {
@@ -805,7 +829,23 @@ async function main() {
     process.exitCode = await runPrepareImageCli();
     return;
   }
-  process.stderr.write('Usage: product1b.mjs doctor|prepare-image\n');
+  if (command === 'start' || command === 'status' || command === 'stop') {
+    try {
+      const result =
+        command === 'start'
+          ? await runVmStartCli()
+          : command === 'status'
+            ? await statusDisposableVm({ instanceRoot: userInstanceRoot() })
+            : await stopDisposableVm({ instanceRoot: userInstanceRoot() });
+      process.stdout.write(formatVmState(result));
+      process.exitCode = command === 'status' && result.state === 'stopped' ? 2 : 0;
+    } catch (error) {
+      process.stderr.write(formatVmFailure(error));
+      process.exitCode = 2;
+    }
+    return;
+  }
+  process.stderr.write('Usage: product1b.mjs doctor|prepare-image|start|status|stop\n');
   process.exitCode = 2;
 }
 
