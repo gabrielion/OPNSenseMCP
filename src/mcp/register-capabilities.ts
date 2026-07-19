@@ -46,14 +46,53 @@ function freezeJson<T>(value: T): T {
   return value;
 }
 
+function isJsonSchemaObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isProvablyObjectShapedRoot(schema: Readonly<Record<string, unknown>>): boolean {
+  if (
+    'properties' in schema ||
+    'patternProperties' in schema ||
+    'additionalProperties' in schema ||
+    'required' in schema
+  ) {
+    return true;
+  }
+  for (const keyword of ['oneOf', 'anyOf', 'allOf'] as const) {
+    const members = schema[keyword];
+    if (Array.isArray(members) && members.length > 0) {
+      return members.every(
+        (member) =>
+          isJsonSchemaObject(member) &&
+          (member.type === 'object' || isProvablyObjectShapedRoot(member))
+      );
+    }
+  }
+  return false;
+}
+
 function discoverySchema(schema: z.ZodType, io: 'input' | 'output'): JsonSchemaType {
-  return freezeJson(z.toJSONSchema(schema, { io })) as unknown as JsonSchemaType;
+  const converted = z.toJSONSchema(schema, { target: 'draft-2020-12', io }) as Readonly<
+    Record<string, unknown>
+  >;
+  if (io === 'input') {
+    if (converted.type !== undefined && converted.type !== 'object') {
+      throw new Error('Capability input schema is not representable');
+    }
+    return freezeJson(
+      converted.type === undefined ? { ...converted, type: 'object' } : converted
+    ) as JsonSchemaType;
+  }
+  return freezeJson(
+    converted.type === undefined && isProvablyObjectShapedRoot(converted)
+      ? { ...converted, type: 'object' }
+      : converted
+  ) as JsonSchemaType;
 }
 
 function inputDiscoverySchema(schema: z.ZodType): Tool['inputSchema'] {
-  const converted = discoverySchema(schema, 'input');
-  if (converted.type !== 'object') throw new Error('Capability input schema is not representable');
-  return converted as Tool['inputSchema'];
+  return discoverySchema(schema, 'input') as Tool['inputSchema'];
 }
 
 export function registerCapabilities(

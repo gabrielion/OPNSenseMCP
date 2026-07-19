@@ -170,6 +170,117 @@ describe.each(MCP_ERAS)('$label MCP server factory', ({ connect }) => {
       await connection.close();
     }
   });
+
+  it('normalizes an object-valued discriminated-union input root without parsing outside the kernel', async () => {
+    let receivedInput: unknown;
+    const unionInput = defineCapability({
+      id: 'test.union.input',
+      mcpName: 'union_input_read',
+      title: 'Union input read',
+      description: 'Exercise object-valued discriminated-union input discovery.',
+      inputSchema: z.discriminatedUnion('kind', [
+        z
+          .object({
+            kind: z.literal('port'),
+            port: z.string().transform((value) => Number(value))
+          })
+          .strict(),
+        z.object({ kind: z.literal('name'), name: z.string() }).strict()
+      ]),
+      outputSchema: z.object({ accepted: z.string() }).strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      },
+      transports: ['stdio', 'http'],
+      policy: {
+        effect: 'read',
+        resourceScopes: ['test.union.input'],
+        requiredFeatureFlags: [],
+        backup: 'none',
+        audit: 'none',
+        confirmation: 'none',
+        timeoutMs: 1000,
+        redactFields: []
+      },
+      handler: (input) => {
+        receivedInput = input;
+        return Promise.resolve({ accepted: input.kind });
+      }
+    });
+    const connection = await connect(
+      createApplicationContext(config(), new CapabilityCatalog([unionInput]))
+    );
+    try {
+      const listed = await connection.client.listTools();
+      expect(listed.tools[0]?.inputSchema).toMatchObject({
+        type: 'object',
+        oneOf: expect.any(Array)
+      });
+
+      const result = await connection.client.callTool({
+        name: unionInput.mcpName,
+        arguments: { kind: 'port', port: '443' }
+      });
+      expect(receivedInput).toEqual({ kind: 'port', port: 443 });
+      expect(result.structuredContent).toEqual({ accepted: 'port' });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it('advertises and projects a union-of-object output as an object root', async () => {
+    const unionOutput = defineCapability({
+      id: 'test.union.output',
+      mcpName: 'union_output_read',
+      title: 'Union output read',
+      description: 'Exercise union-of-object output discovery and projection.',
+      inputSchema: z.object({ port: z.number() }).strict(),
+      outputSchema: z.union([
+        z.object({ kind: z.literal('port'), port: z.number() }).strict(),
+        z.object({ kind: z.literal('name'), name: z.string() }).strict()
+      ]),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      },
+      transports: ['stdio', 'http'],
+      policy: {
+        effect: 'read',
+        resourceScopes: ['test.union.output'],
+        requiredFeatureFlags: [],
+        backup: 'none',
+        audit: 'none',
+        confirmation: 'none',
+        timeoutMs: 1000,
+        redactFields: []
+      },
+      handler: ({ port }) => Promise.resolve({ kind: 'port' as const, port })
+    });
+    const connection = await connect(
+      createApplicationContext(config(), new CapabilityCatalog([unionOutput]))
+    );
+    try {
+      const listed = await connection.client.listTools();
+      expect(listed.tools[0]?.outputSchema).toMatchObject({
+        type: 'object',
+        anyOf: expect.any(Array)
+      });
+
+      const result = await connection.client.callTool({
+        name: unionOutput.mcpName,
+        arguments: { port: 443 }
+      });
+      expect(result.structuredContent).toEqual({ kind: 'port', port: 443 });
+      expect(result.structuredContent).not.toHaveProperty('result');
+    } finally {
+      await connection.close();
+    }
+  });
 });
 
 it('does not create process-global listeners while connecting or closing', async () => {
