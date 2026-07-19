@@ -72,3 +72,17 @@ Product 1A Task 2: complete (commits `4de635b..e8ac934`; 28 files / 710 tests; g
 rejects nested refs and unsafe public schemas, binds exact resource tuples and Product 1B transport note;
 re-review approved). Final-triage Minor: deprecated legacy-SSE duplicates object-root schema projection and
 lacks a direct `opn_describe` call test; current object-only surface is not blocked.
+
+Product 1A Task 3: complete (commits `d9d9221`, `60116f7`; 33 files / 772 tests; exact descriptor-owned
+HTTPS commands, strict credential/config loading, bounded TLS reads, two-resource adapter and application
+composition; re-review approved with no findings).
+
+Product 1A Task 4: complete (commits `6cccd5e`, `a1d6bda`; 34 files / 782 tests; clean pack/install to
+synthetic HTTPS reads, EOF drain-order regression fixed, OpenCode 1.18.3 smoke with final tarball SHA,
+Product 1A README/CONTRIBUTING; re-review approved). Final-triage Minor: a blocked non-zero model result is
+sanitized but its discarded stderr is not included in the `secretAbsent` observation; no passing evidence is
+affected.
+
+Fresh Product 1A exit gate on `a1d6bda`: `npm run license:check`, `npm run verify` (34 files / 782 tests),
+both targeted conformance profiles, `npm run provenance:verify`, `git diff --check`, and clean status all
+PASS under Node 22.23.1. No VM, real firewall, benchmark, release, or push was run or claimed.
