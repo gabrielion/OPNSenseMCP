@@ -10,7 +10,7 @@
   "package": {
     "name": "@gabrielion/opnsense-mcp",
     "version": "0.1.0",
-    "sha256": "bc6d1d9ab618f9aa4cec6f0da2eb082ea6572dbae6082397192c31975adccdec"
+    "sha256": "4caf3e888d1cb51d95c009afb3a02abdaad6a6508e56e9ce5e5f49fcd68d9aa9"
   },
   "tools": [
     {
