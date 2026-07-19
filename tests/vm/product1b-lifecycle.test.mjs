@@ -8,7 +8,8 @@ import {
   writeFile,
   chmod,
   mkdir,
-  lstat
+  lstat,
+  unlink
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -58,9 +59,9 @@ async function fixturePaths() {
   return { root, instanceRoot, rawPath };
 }
 
-function happyDependencies({ alive = true } = {}) {
+function happyDependencies({ alive = true, childPid = 4242 } = {}) {
   const calls = { image: [], vm: [], probes: [], kills: [] };
-  const child = { pid: 4242, unref: vi.fn() };
+  const child = { pid: childPid, unref: vi.fn() };
   return {
     calls,
     child,
@@ -74,7 +75,7 @@ function happyDependencies({ alive = true } = {}) {
       calls.vm.push([command, arguments_]);
       return child;
     }),
-    inspectProcess: vi.fn(async (pid, nonce) => alive && pid === 4242 && nonce === NONCE),
+    inspectProcess: vi.fn(async (pid, nonce) => alive && pid === childPid && nonce === NONCE),
     processAlive: vi.fn((pid) => pid === 111),
     probePort: vi.fn(async (host, port) => {
       calls.probes.push([host, port]);
@@ -96,13 +97,34 @@ async function writeRunningInstance(instanceRoot, { pid = 4242, nonce = NONCE } 
       state: 'running',
       pid,
       nonce,
-      sshPort: VM_PORTS.ssh,
       apiPort: VM_PORTS.api
     })}\n`,
     { mode: 0o600 }
   );
   await writeFile(join(instanceRoot, 'overlay.qcow2'), 'overlay', { mode: 0o600 });
-  await writeFile(join(instanceRoot, 'serial.log'), 'serial', { mode: 0o600 });
+  await writeFile(join(instanceRoot, 'console.sock'), 'socket', { mode: 0o600 });
+  await writeFile(join(instanceRoot, 'qemu.pid'), `${pid}\n`, { mode: 0o600 });
+}
+
+async function writeLaunchingInstance(
+  instanceRoot,
+  { launcherPid = 31337, qemuPid = 4242, nonce = 'fedcba9876543210' } = {}
+) {
+  await mkdir(instanceRoot, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(instanceRoot, 'owner.json'),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      state: 'starting',
+      phase: 'launching',
+      pid: launcherPid,
+      nonce
+    })}\n`,
+    { mode: 0o600 }
+  );
+  await writeFile(join(instanceRoot, 'overlay.qcow2'), 'orphan overlay', { mode: 0o600 });
+  await writeFile(join(instanceRoot, 'console.sock'), 'orphan socket', { mode: 0o600 });
+  await writeFile(join(instanceRoot, 'qemu.pid'), `${qemuPid}\n`, { mode: 0o600 });
 }
 
 describe('Product 1B disposable VM lifecycle', () => {
@@ -131,7 +153,6 @@ describe('Product 1B disposable VM lifecycle', () => {
 
     expect(result).toEqual({
       state: 'running',
-      ssh: { host: '127.0.0.1', port: 2222 },
       api: { host: '127.0.0.1', port: 18443 }
     });
     expect(dependencies.prepareBase).toHaveBeenCalledOnce();
@@ -146,8 +167,8 @@ describe('Product 1B disposable VM lifecycle', () => {
         'qemu-system-x86_64',
         buildQemuArguments({
           overlayPath: join(instanceRoot, 'overlay.qcow2'),
-          serialPath: join(instanceRoot, 'serial.log'),
           consolePath: join(instanceRoot, 'console.sock'),
+          pidPath: join(instanceRoot, 'qemu.pid'),
           accelerator: 'tcg',
           nonce: NONCE
         })
@@ -157,16 +178,14 @@ describe('Product 1B disposable VM lifecycle', () => {
     expect(qemuArguments).toContain('tcg,thread=multi');
     expect(qemuArguments).toContain('4096');
     expect(qemuArguments).toContain(
-      'socket,id=serial0,path=' +
-        join(instanceRoot, 'console.sock') +
-        ',server=on,wait=off,logfile=' +
-        join(instanceRoot, 'serial.log') +
-        ',logappend=on'
+      'socket,id=serial0,path=' + join(instanceRoot, 'console.sock') + ',server=on,wait=off'
     );
     expect(qemuArguments).toContain('chardev:serial0');
+    expect(qemuArguments).toContain(join(instanceRoot, 'qemu.pid'));
+    expect(qemuArguments.join(' ')).not.toContain('logfile=');
     expect(qemuArguments.join(' ')).not.toContain('-serial file:');
     expect(qemuArguments).toContain(
-      'user,id=lan,restrict=on,net=192.168.1.0/24,host=192.168.1.254,dhcpstart=192.168.1.100,hostfwd=tcp:127.0.0.1:2222-192.168.1.1:22,hostfwd=tcp:127.0.0.1:18443-192.168.1.1:443'
+      'user,id=lan,restrict=on,net=192.168.1.0/24,host=192.168.1.254,dhcpstart=192.168.1.100,hostfwd=tcp:127.0.0.1:18443-192.168.1.1:443'
     );
     expect(qemuArguments).toContain('user,id=wan,restrict=on');
     expect(qemuArguments).toContain('virtio-net-pci,netdev=lan,mac=52:54:00:12:34:01');
@@ -180,14 +199,10 @@ describe('Product 1B disposable VM lifecycle', () => {
       state: 'running',
       pid: 4242,
       nonce: NONCE,
-      sshPort: 2222,
       apiPort: 18443
     });
     expect((await lstat(join(instanceRoot, 'owner.json'))).mode & 0o077).toBe(0);
-    expect((await lstat(join(instanceRoot, 'serial.log'))).mode & 0o077).toBe(0);
-    expect(formatVmState(result)).toBe(
-      'Product 1B VM: RUNNING; SSH 127.0.0.1:2222; API https://127.0.0.1:18443\n'
-    );
+    expect(formatVmState(result)).toBe('Product 1B VM: RUNNING; API https://127.0.0.1:18443\n');
   });
 
   it('refuses a concurrent start while the first owner is still preparing the base', async () => {
@@ -264,12 +279,78 @@ describe('Product 1B disposable VM lifecycle', () => {
     await expect(readdir(instanceRoot)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
-  it('recovers a dead owner without deleting unrelated state, then starts one fresh instance', async () => {
+  it('serializes two starts recovering one dead owner without deleting the new instance', async () => {
     const { instanceRoot, rawPath } = await fixturePaths();
     await writeRunningInstance(instanceRoot, { pid: 31337, nonce: 'fedcba9876543210' });
     await writeFile(join(instanceRoot, 'keep.me'), 'unrelated sentinel');
-    const dependencies = happyDependencies();
-    dependencies.inspectProcess = vi.fn(async (pid, nonce) => pid === 4242 && nonce === NONCE);
+    let releasePreparation;
+    let announcePreparation;
+    const preparationStarted = new Promise((resolve) => {
+      announcePreparation = resolve;
+    });
+    const firstDependencies = happyDependencies();
+    firstDependencies.prepareBase = async () => {
+      announcePreparation();
+      await new Promise((resolve) => {
+        releasePreparation = resolve;
+      });
+    };
+    firstDependencies.inspectProcess = vi.fn(async (pid, nonce) => pid === 4242 && nonce === NONCE);
+
+    const first = startDisposableVm({
+      instanceRoot,
+      rawPath,
+      accelerator: 'tcg',
+      ...firstDependencies,
+      readinessAttempts: 1,
+      readinessDelayMs: 0
+    });
+    await preparationStarted;
+    await expect(lstat(join(instanceRoot, '.operation.lock'))).resolves.toMatchObject({
+      mode: expect.any(Number)
+    });
+
+    const second = await expectVmError(
+      startDisposableVm({
+        instanceRoot,
+        rawPath,
+        accelerator: 'tcg',
+        ...happyDependencies({ childPid: 5000 }),
+        readinessAttempts: 1,
+        readinessDelayMs: 0
+      }),
+      'VM_BUSY'
+    );
+    expect(formatVmFailure(second)).toContain('another lifecycle operation');
+
+    releasePreparation();
+    await expect(first).resolves.toMatchObject({ state: 'running' });
+
+    expect(await readFile(join(instanceRoot, 'keep.me'), 'utf8')).toBe('unrelated sentinel');
+    expect(await readFile(join(instanceRoot, 'overlay.qcow2'), 'utf8')).toBe('qcow2 overlay');
+    await expect(lstat(join(instanceRoot, 'owner.json'))).resolves.toMatchObject({
+      mode: expect.any(Number)
+    });
+    await expect(lstat(join(instanceRoot, '.operation.lock'))).rejects.toMatchObject({
+      code: 'ENOENT'
+    });
+    expect(firstDependencies.killProcess).not.toHaveBeenCalled();
+  });
+
+  it('stops a pidfile-identified orphan left between spawn and owner promotion before restarting', async () => {
+    const { instanceRoot, rawPath } = await fixturePaths();
+    const orphanNonce = 'fedcba9876543210';
+    await writeLaunchingInstance(instanceRoot, { qemuPid: 4242, nonce: orphanNonce });
+    const dependencies = happyDependencies({ childPid: 5000 });
+    const live = new Map([
+      [4242, orphanNonce],
+      [5000, NONCE]
+    ]);
+    dependencies.inspectProcess = vi.fn(async (pid, nonce) => live.get(pid) === nonce);
+    dependencies.killProcess = vi.fn((pid, signal) => {
+      dependencies.calls.kills.push([pid, signal]);
+      live.delete(pid);
+    });
 
     await expect(
       startDisposableVm({
@@ -278,12 +359,42 @@ describe('Product 1B disposable VM lifecycle', () => {
         accelerator: 'tcg',
         ...dependencies,
         readinessAttempts: 1,
-        readinessDelayMs: 0
+        readinessDelayMs: 0,
+        stopAttempts: 1,
+        stopDelayMs: 0
       })
     ).resolves.toMatchObject({ state: 'running' });
 
-    expect(await readFile(join(instanceRoot, 'keep.me'), 'utf8')).toBe('unrelated sentinel');
+    expect(dependencies.calls.kills).toContainEqual([4242, 'SIGTERM']);
+    const owner = JSON.parse(await readFile(join(instanceRoot, 'owner.json'), 'utf8'));
+    expect(owner).toMatchObject({ state: 'running', pid: 5000, nonce: NONCE });
+    expect(await readFile(join(instanceRoot, 'overlay.qcow2'), 'utf8')).toBe('qcow2 overlay');
+  });
+
+  it('keeps an ambiguous launching instance when QEMU has not published its pidfile yet', async () => {
+    const { instanceRoot, rawPath } = await fixturePaths();
+    await writeLaunchingInstance(instanceRoot);
+    await unlink(join(instanceRoot, 'qemu.pid'));
+    const dependencies = happyDependencies({ childPid: 5000 });
+
+    await expectVmError(
+      startDisposableVm({
+        instanceRoot,
+        rawPath,
+        accelerator: 'tcg',
+        ...dependencies,
+        readinessAttempts: 1,
+        readinessDelayMs: 0
+      }),
+      'VM_BUSY'
+    );
+
+    expect(dependencies.spawnVm).not.toHaveBeenCalled();
     expect(dependencies.killProcess).not.toHaveBeenCalled();
+    expect(await readFile(join(instanceRoot, 'overlay.qcow2'), 'utf8')).toBe('orphan overlay');
+    await expect(lstat(join(instanceRoot, 'owner.json'))).resolves.toMatchObject({
+      mode: expect.any(Number)
+    });
   });
 
   it('never signals a reused or forged PID whose QEMU identity marker does not match', async () => {
@@ -318,7 +429,6 @@ describe('Product 1B disposable VM lifecycle', () => {
 
     await expect(statusDisposableVm({ instanceRoot, inspectProcess })).resolves.toEqual({
       state: 'running',
-      ssh: { host: '127.0.0.1', port: 2222 },
       api: { host: '127.0.0.1', port: 18443 }
     });
     await expect(
