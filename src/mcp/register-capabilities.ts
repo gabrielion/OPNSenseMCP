@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type {
+  CallToolResult,
+  InputRequiredResult,
+  JsonSchemaType,
   McpServer,
   RequestStateCodec,
-  ServerContext as McpServerContext
+  ServerContext as McpServerContext,
+  Tool
 } from '@modelcontextprotocol/server';
+import { isInputRequiredResult } from '@modelcontextprotocol/server';
+import * as z from 'zod/v4';
 import {
   listApplicationCapabilities,
   type ApplicationContext
@@ -26,38 +32,87 @@ function requestCarriesContinuation(context: McpServerContext): boolean {
   );
 }
 
+interface PreparedTool {
+  readonly definition: ReturnType<typeof listApplicationCapabilities>[number];
+  readonly listed: Tool;
+  readonly advertisedOutputSchema: Readonly<Record<string, unknown>>;
+}
+
+function freezeJson<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const nested of Object.values(value)) freezeJson(nested);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function discoverySchema(schema: z.ZodType, io: 'input' | 'output'): JsonSchemaType {
+  return freezeJson(z.toJSONSchema(schema, { io })) as unknown as JsonSchemaType;
+}
+
+function inputDiscoverySchema(schema: z.ZodType): Tool['inputSchema'] {
+  const converted = discoverySchema(schema, 'input');
+  if (converted.type !== 'object') throw new Error('Capability input schema is not representable');
+  return converted as Tool['inputSchema'];
+}
+
 export function registerCapabilities(
   server: McpServer,
   application: ApplicationContext,
   transport: TransportKind,
   codec: RequestStateCodec<ConfirmationState>
 ): void {
-  for (const definition of listApplicationCapabilities(application, transport)) {
-    server.registerTool(
-      definition.mcpName,
-      {
+  const prepared = Object.freeze(
+    listApplicationCapabilities(application, transport).map((definition): PreparedTool => {
+      const inputSchema = inputDiscoverySchema(definition.inputSchema);
+      const advertisedOutputSchema = discoverySchema(definition.outputSchema, 'output');
+      const listed: Tool = Object.freeze({
+        name: definition.mcpName,
         title: definition.title,
         description: definition.description,
-        inputSchema: definition.inputSchema,
-        outputSchema: definition.outputSchema,
+        inputSchema,
+        outputSchema: advertisedOutputSchema,
         annotations: definition.annotations
-      },
-      async (argumentsValue, mcpContext) => {
-        const request: CapabilityRequest = {
-          name: definition.mcpName,
-          arguments: argumentsValue
-        };
-        if (requestCarriesContinuation(mcpContext) || definitionUsesElicitation(definition)) {
-          return handleConfirmationCall(server, application, request, transport, codec, mcpContext);
-        }
-        const context: ServerContext = {
-          application,
-          transport,
-          signal: mcpContext.mcpReq.signal,
-          principalId: principalForRequest(transport, mcpContext)
-        };
-        return formatCapabilityResult(await dispatchCapability(request, context));
-      }
-    );
-  }
+      });
+      return Object.freeze({ definition, listed, advertisedOutputSchema });
+    })
+  );
+  const byName = new Map(prepared.map((entry) => [entry.definition.mcpName, entry] as const));
+
+  server.server.registerCapabilities({ tools: {} });
+  server.server.setRequestHandler('tools/list', () =>
+    Promise.resolve({ tools: prepared.map(({ listed }) => listed) })
+  );
+  server.server.setRequestHandler('tools/call', async (wireRequest, mcpContext) => {
+    const entry = byName.get(wireRequest.params.name);
+    const request: CapabilityRequest = {
+      name: wireRequest.params.name,
+      arguments: wireRequest.params.arguments ?? {}
+    };
+    let result: CallToolResult | InputRequiredResult;
+    if (
+      entry !== undefined &&
+      (requestCarriesContinuation(mcpContext) || definitionUsesElicitation(entry.definition))
+    ) {
+      result = await handleConfirmationCall(
+        server,
+        application,
+        request,
+        transport,
+        codec,
+        mcpContext
+      );
+    } else {
+      const context: ServerContext = {
+        application,
+        transport,
+        signal: mcpContext.mcpReq.signal,
+        principalId: principalForRequest(transport, mcpContext)
+      };
+      result = formatCapabilityResult(await dispatchCapability(request, context));
+    }
+    return isInputRequiredResult(result)
+      ? result
+      : server.server.projectCallToolResult(result, entry?.advertisedOutputSchema);
+  });
 }

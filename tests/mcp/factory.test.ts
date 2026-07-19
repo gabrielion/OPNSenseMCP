@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
+import * as z from 'zod/v4';
 import { createApplicationContext } from '../../src/app/application-context.js';
 import { CapabilityCatalog } from '../../src/capabilities/catalog.js';
+import { defineCapability } from '../../src/capabilities/kernel.js';
 import type { RuntimeConfig } from '../../src/config/runtime-config.js';
 import { SERVER_INSTRUCTIONS } from '../../src/mcp/instructions.js';
 import { PROMPT_NAMES } from '../../src/mcp/prompts.js';
@@ -77,14 +79,93 @@ describe.each(MCP_ERAS)('$label MCP server factory', ({ connect }) => {
 
       const invalid = await connection.client.callTool({
         name: 'server_status',
-        arguments: { sentinelSecret: 'DO_NOT_LEAK' }
+        arguments: { SENTINEL_SECRET_PROPERTY: 'DO_NOT_LEAK' }
       });
       expect(invalid.isError).toBe(true);
       expect(JSON.stringify(invalid)).not.toContain('DO_NOT_LEAK');
+      expect(JSON.stringify(invalid)).not.toContain('SENTINEL_SECRET_PROPERTY');
 
       await expect(
         connection.client.callTool({ name: 'forged_cached_tool', arguments: {} })
-      ).rejects.toThrow();
+      ).resolves.toEqual({
+        isError: true,
+        content: [{ type: 'text', text: 'Capability is not available.' }],
+        structuredContent: { code: 'UNKNOWN_CAPABILITY' }
+      });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it('executes capability input transforms and refinements exactly once at the kernel boundary', async () => {
+    const counters = { inputRefine: 0, inputTransform: 0, outputRefine: 0, handler: 0 };
+    let receivedPort: number | undefined;
+    const transformed = defineCapability({
+      id: 'test.transformed',
+      mcpName: 'transformed_read',
+      title: 'Transformed read',
+      description: 'Prove the capability kernel owns schema execution.',
+      inputSchema: z
+        .object({
+          port: z
+            .string()
+            .refine((value) => {
+              counters.inputRefine += 1;
+              return /^\d+$/u.test(value);
+            })
+            .transform((value) => {
+              counters.inputTransform += 1;
+              return Number(value);
+            })
+        })
+        .strict(),
+      outputSchema: z
+        .object({
+          port: z.number().refine((value) => {
+            counters.outputRefine += 1;
+            return Number.isInteger(value);
+          })
+        })
+        .strict(),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      },
+      transports: ['stdio', 'http'],
+      policy: {
+        effect: 'read',
+        resourceScopes: ['test.transformed'],
+        requiredFeatureFlags: [],
+        backup: 'none',
+        audit: 'none',
+        confirmation: 'none',
+        timeoutMs: 1000,
+        redactFields: []
+      },
+      handler: ({ port }) => {
+        counters.handler += 1;
+        receivedPort = port;
+        return Promise.resolve({ port });
+      }
+    });
+    const application = createApplicationContext(config(), new CapabilityCatalog([transformed]));
+    const connection = await connect(application);
+    try {
+      await expect(
+        connection.client.callTool({
+          name: transformed.mcpName,
+          arguments: { port: '443' }
+        })
+      ).resolves.toMatchObject({ structuredContent: { port: 443 } });
+      expect(receivedPort).toBe(443);
+      expect(counters).toEqual({
+        inputRefine: 1,
+        inputTransform: 1,
+        outputRefine: 1,
+        handler: 1
+      });
     } finally {
       await connection.close();
     }
