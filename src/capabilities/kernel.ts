@@ -128,6 +128,10 @@ export interface CapabilityKernelRuntime {
   readonly ledgerCapacity?: number;
 }
 
+interface CapabilityKernelInternalHooks {
+  readonly retain?: (settlement: Promise<unknown>) => void;
+}
+
 export type ConfirmationDecision = 'accept' | 'decline';
 
 export interface ConfirmationClaims {
@@ -538,6 +542,7 @@ async function runOperation(
   effect: CapabilityEffect,
   timeoutMs: number,
   callerSignal: AbortSignal | undefined,
+  retain: CapabilityKernelInternalHooks['retain'],
   thunk: (signal: AbortSignal) => Promise<Record<string, unknown>>
 ): Promise<OperationResult> {
   const isCallerAborted = () => callerSignal?.aborted === true;
@@ -604,7 +609,13 @@ async function runOperation(
 
   if (effect === 'read') {
     cleanup();
-    void settlement.then(() => undefined);
+    if (retain !== undefined) {
+      try {
+        retain(settlement);
+      } catch {
+        await settlement;
+      }
+    }
     return { kind: 'aborted-read', cause: first.cause };
   }
 
@@ -616,7 +627,8 @@ async function runOperation(
 async function executeAuthorized(
   authorization: AuthorizedRequest,
   options: SealedPolicyOptions,
-  context: CapabilityInvocationContext
+  context: CapabilityInvocationContext,
+  internalHooks: CapabilityKernelInternalHooks
 ): Promise<CapabilityResult> {
   const executionContext: CapabilityExecutionContext = Object.freeze({
     signal: new AbortController().signal,
@@ -628,6 +640,7 @@ async function executeAuthorized(
     authorization.capability.policy.effect,
     authorization.capability.policy.timeoutMs,
     context.signal,
+    internalHooks.retain,
     (signal) =>
       invokeHandler(
         authorization.capability,
@@ -697,7 +710,8 @@ export function createCapabilityDispatcher(
   catalog: CapabilityCatalogView,
   sourceOptions: CapabilityPolicyOptions,
   installCompletion?: (completion: ConfirmationCompletion) => void,
-  testRuntime: CapabilityKernelRuntime = {}
+  testRuntime: CapabilityKernelRuntime = {},
+  internalHooks: CapabilityKernelInternalHooks = {}
 ): CapabilityDispatcher {
   const options: SealedPolicyOptions = Object.freeze({
     readOnly: sourceOptions.readOnly,
@@ -708,6 +722,10 @@ export function createCapabilityDispatcher(
     enabledFeatureFlags: new Set(sourceOptions.enabledFeatureFlags)
   });
   const runtime = validateRuntime(testRuntime);
+  const retain = internalHooks.retain;
+  const sealedInternalHooks: CapabilityKernelInternalHooks = Object.freeze(
+    retain === undefined ? {} : { retain }
+  );
   const pendingConfirmations = new Map<string, PendingConfirmation>();
 
   const currentTime = (): number | undefined => {
@@ -780,7 +798,7 @@ export function createCapabilityDispatcher(
     if (decision === 'decline') {
       return Promise.resolve(refusal('CONFIRMATION_DECLINED'));
     }
-    return executeAuthorized(authorization.authorization, options, context);
+    return executeAuthorized(authorization.authorization, options, context, sealedInternalHooks);
   };
 
   const completionInstalled = installCompletion !== undefined;
@@ -801,7 +819,12 @@ export function createCapabilityDispatcher(
       const authorization = authorizeRequest(catalog, options, requestValue, context);
       if (authorization.kind === 'refused') return Promise.resolve(authorization.result);
       if (authorization.authorization.capability.policy.confirmation !== 'elicitation') {
-        return executeAuthorized(authorization.authorization, options, context);
+        return executeAuthorized(
+          authorization.authorization,
+          options,
+          context,
+          sealedInternalHooks
+        );
       }
       if (!completionInstalled) {
         return Promise.resolve(refusal('CONFIRMATION_UNAVAILABLE'));

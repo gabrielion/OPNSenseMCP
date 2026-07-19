@@ -56,6 +56,7 @@ interface ApplicationInternals {
 
 interface ApplicationLifecycle {
   admit<T>(operation: () => Promise<T>): Promise<T>;
+  retain(settlement: Promise<unknown>): void;
   close(): Promise<void>;
 }
 
@@ -125,6 +126,21 @@ function createApplicationLifecycle(): ApplicationLifecycle {
       void settlement.then(release, release);
       return settlement;
     },
+    retain(settlement: Promise<unknown>): void {
+      active += 1;
+      let retained = true;
+      const releaseRetained = () => {
+        if (!retained) return;
+        retained = false;
+        release();
+      };
+      try {
+        void settlement.then(releaseRetained, releaseRetained);
+      } catch (error) {
+        releaseRetained();
+        throw error;
+      }
+    },
     close(): Promise<void> {
       closeSettlement ??= (() => {
         closing = true;
@@ -165,6 +181,7 @@ export function createApplicationContext(
   catalog: CapabilityCatalog = CAPABILITY_CATALOG
 ): ApplicationContext {
   const snapshot = snapshotConfig(config);
+  const lifecycle = createApplicationLifecycle();
   let completion: ConfirmationCompletion | undefined;
   const dispatcher = createCapabilityDispatcher(
     catalog,
@@ -176,6 +193,12 @@ export function createApplicationContext(
     },
     (installed) => {
       completion = installed;
+    },
+    {},
+    {
+      retain: (settlement) => {
+        lifecycle.retain(settlement);
+      }
     }
   );
   if (completion === undefined) throw new Error(INVALID_APPLICATION_MESSAGE);
@@ -183,7 +206,7 @@ export function createApplicationContext(
   const application: ApplicationContext = Object.freeze({ catalog });
   applicationInternals.set(
     application,
-    Object.freeze({ snapshot, dispatcher, completion, lifecycle: createApplicationLifecycle() })
+    Object.freeze({ snapshot, dispatcher, completion, lifecycle })
   );
   return application;
 }

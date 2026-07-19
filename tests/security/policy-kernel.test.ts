@@ -948,6 +948,90 @@ describe('effect-aware cancellation and timeout handling', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('awaits an ignored-signal read when the injected settlement retainer fails', async () => {
+    const controller = new AbortController();
+    const started = deferred<undefined>();
+    const release = deferred<undefined>();
+    const retain = vi.fn(() => {
+      throw new Error('SENTINEL-RETAINER-FAILURE');
+    });
+    const capability = createKernelFixture({
+      handler: async () => {
+        started.resolve(undefined);
+        await release.promise;
+        return { echoed: 'late-success' };
+      }
+    });
+    const dispatcher = Reflect.apply(createCapabilityDispatcher, undefined, [
+      new CapabilityCatalog([capability]),
+      policyOptions(),
+      undefined,
+      {},
+      { retain }
+    ]);
+    const execution = dispatcher.dispatch(request(), stdioContext({ signal: controller.signal }));
+
+    try {
+      await started.promise;
+      controller.abort();
+      let dispatchSettled = false;
+      void execution.finally(() => {
+        dispatchSettled = true;
+      });
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+
+      expect(retain).toHaveBeenCalledOnce();
+      expect(dispatchSettled).toBe(false);
+
+      release.resolve(undefined);
+      expectRefusal(await execution, 'CANCELLED');
+    } finally {
+      release.resolve(undefined);
+      await execution;
+    }
+  });
+
+  it('snapshots the internal settlement retainer at dispatcher construction', async () => {
+    const controller = new AbortController();
+    const started = deferred<undefined>();
+    const release = deferred<undefined>();
+    const initialRetain = vi.fn((settlement: Promise<unknown>) => {
+      void settlement.then(() => undefined);
+    });
+    const replacementRetain = vi.fn((settlement: Promise<unknown>) => {
+      void settlement.then(() => undefined);
+    });
+    const hooks = { retain: initialRetain };
+    const capability = createKernelFixture({
+      handler: async () => {
+        started.resolve(undefined);
+        await release.promise;
+        return { echoed: 'late-success' };
+      }
+    });
+    const dispatcher = Reflect.apply(createCapabilityDispatcher, undefined, [
+      new CapabilityCatalog([capability]),
+      policyOptions(),
+      undefined,
+      {},
+      hooks
+    ]);
+    hooks.retain = replacementRetain;
+
+    try {
+      const execution = dispatcher.dispatch(request(), stdioContext({ signal: controller.signal }));
+      await started.promise;
+      controller.abort();
+      expectRefusal(await execution, 'CANCELLED');
+      expect(initialRetain).toHaveBeenCalledOnce();
+      expect(replacementRetain).not.toHaveBeenCalled();
+    } finally {
+      release.resolve(undefined);
+    }
+  });
+
   it('cleans listeners and timers on success, synchronous throw, and rejection', async () => {
     vi.useFakeTimers();
     const controller = new AbortController();

@@ -107,6 +107,58 @@ describe('default application composition seam', () => {
     expect(serviceOpen).toBe(false);
   });
 
+  it('retains an abort-ignoring read until its hidden handler settlement before service close', async () => {
+    const started = deferred();
+    const release = deferred();
+    const controller = new AbortController();
+    let serviceOpen = true;
+    const read = createReadFixture({
+      handler: async ({ value }) => {
+        started.resolve();
+        await release.promise;
+        return { echoed: serviceOpen ? value : 'service-closed-too-early' };
+      }
+    });
+    const application = createApplicationContext(writableConfig(), new CapabilityCatalog([read]));
+    const closeService = vi.fn(() => {
+      serviceOpen = false;
+      return Promise.resolve();
+    });
+    const runtime = createOwnedApplicationRuntime(application, [closeService]);
+
+    try {
+      const execution = dispatchCapability(
+        { name: read.mcpName, arguments: { value: 'safe' } },
+        { application, transport: 'stdio', signal: controller.signal }
+      );
+      await started.promise;
+      controller.abort();
+      await expect(execution).resolves.toMatchObject({ kind: 'refused', code: 'CANCELLED' });
+
+      const shutdown = runtime.close();
+      let shutdownSettled = false;
+      void shutdown.finally(() => {
+        shutdownSettled = true;
+      });
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+
+      expect(serviceOpen).toBe(true);
+      expect(closeService).not.toHaveBeenCalled();
+      expect(shutdownSettled).toBe(false);
+
+      release.resolve();
+      await shutdown;
+      expect(shutdownSettled).toBe(true);
+      expect(closeService).toHaveBeenCalledTimes(1);
+      expect(serviceOpen).toBe(false);
+    } finally {
+      release.resolve();
+      await runtime.close().catch(() => undefined);
+    }
+  });
+
   it('keeps an owned service open until a real delayed confirmed local write settles', async () => {
     const started = deferred();
     const release = deferred();
