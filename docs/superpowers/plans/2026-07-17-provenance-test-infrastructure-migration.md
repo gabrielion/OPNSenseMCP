@@ -1,6 +1,12 @@
 # Provenance-Gated Test Infrastructure Migration Implementation Plan
 
-> **For Codex:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task by task.
+> **NORMATIVE STATUS (2026-07-19):** Public Task 1 is complete. The former private checkpoint P0, Task 2,
+> and Tasks 3-11 below are retained only as historical design input and **must not execute as written**.
+> Task 2A is replaced by
+> `docs/superpowers/plans/2026-07-19-private-provenance-contract-preflight.md`. Task 2B preparation/activation,
+> the real operator checkpoint, Task 2C copying, and Task 2D scanning/release projection each require their own
+> owner-approved plan and independent review. Clean-room product implementation may continue independently,
+> but no approved legacy asset may cross the private boundary until the replacement sequence authorizes it.
 
 **Goal:** Migrate the provenance-approved installer, client plugins, documentation, VM harness,
 agentic evaluation, safety tests, and integration helpers into the new implementation without
@@ -22,7 +28,7 @@ Git, AGPL-3.0-or-later.
 
 ---
 
-## Scope and invariants
+## Historical scope and invariants (not executable)
 
 All commands use the repository root (`process.cwd()`) as destination; tools accept no destination-root
 argument. `OPNSENSE_MIGRATION_SOURCE` selects the audited external working tree and
@@ -86,25 +92,28 @@ License checks must reject conflicting package, plugin, generated, and documenta
 This plan is intentionally interleaved with the product-parity plan so a migrated test is never committed
 as a permanently red standalone task:
 
-1. execute Task 1 after the MCP foundation;
-2. rewrite and independently review Task 2 against the versioned Task 1 contract before executing it;
-3. do not execute Tasks 3–11 or private checkpoint P0 until Task 2 and P0 have separately passed that
-   preflight;
-4. execute Task 6 as the RED half of product-parity Task 5 and commit both together;
-5. execute Task 7 inside product-parity Task 11 and commit the adapted harness with the green full surface;
-6. execute Task 5 after product-parity Task 11, when catalog and dispatch imports exist;
-7. execute product-parity Task 12, then provenance Tasks 8–9;
-8. satisfy the Task 10 ownership map throughout foundation/product work, then run its absence gate;
-9. execute Task 11 only after every approved destination is present and adapted; final destination review
-   and sealing occur in guided-workflows Task 9 after all non-evidence edits.
+1. public Task 1 is complete and remains the immutable public-contract baseline;
+2. current private work follows only the Task 2A routing index and each independently reviewed Task 2A1 and
+   Task 2A2 implementation plan;
+3. future Task 2B, 2C, and 2D plans must preserve this normative order: synthetic
+   contract/review; synthetic preparation/review; real draft; independent source/snapshot review; separately
+   supplied baseline digest; activation; accepted-context preflight; copier review; then group copying;
+4. do not execute historical Tasks 3–11 or P0 text below directly; later replacement plans must explicitly
+   reactivate each applicable product migration step;
+5. treat the former Tasks 5–10 only as historical dependency notes: agentic infrastructure depended on a live
+   catalogue, safety and shared tests depended on the corresponding product slices, documentation followed
+   implemented behavior, and discard coverage remained continuous;
+6. reactivate the former Task 11 closure only through a reviewed replacement after every applicable approved
+   destination is present and adapted; final destination review and sealing remain a later release concern.
 
 No task may run `npm test` or `provenance:scan:migration` while its stated architecture dependencies are
 absent. Focused RED commands belong to the owning implementation task and must become green before that
 atomic commit.
 
-## Private checkpoint P0: Prepare the owner-supplied bundle
+## Historical private checkpoint P0: superseded, do not execute
 
-Execute this checkpoint after public Tasks 1–2 and before the first copy in Task 3. It creates no tracked
+The following description is retained only to explain earlier design decisions. Do not execute it. It formerly
+placed this checkpoint after public Tasks 1–2 and before the first copy in Task 3. It creates no tracked
 file and has no commit. The operator supplies five values outside Git:
 
 - `OPNSENSE_HISTORY_BUNDLE`: the owner-supplied complete Git bundle;
@@ -139,9 +148,9 @@ reviewed interactively and recorded only in the private baseline. If any of thes
 migration is blocked explicitly; normal foundation/product development may continue clean-room, but no
 approved asset copy or release provenance claim may proceed.
 
-After Task 2 implements the command, execute `npm run provenance:prepare-private`, then source the exact
-operator-selected environment file without displaying it. Run the copier preflight in dry-run mode before
-Task 3; no private value may appear in terminal output or shell history.
+Historically, the superseded flow would have invoked `npm run provenance:prepare-private` and sourced a
+two-variable environment file. That command and recipe are invalid for the current three-variable,
+separately digest-bound contract and must not be used.
 
 ---
 
@@ -312,18 +321,17 @@ git diff --check
 
 ---
 
-## Task 2: Build the fail-closed copier and scanners
+## Historical Task 2: superseded, do not execute
 
 > **BLOCKED / REQUIRES A NEW PREFLIGHT — DO NOT EXECUTE THIS TASK AS WRITTEN.** The remainder of this task
-> is retained as design input only. After Task 1, rewrite it to version one minimal private-baseline schema
-> and shared parser before any preparation, copier, scanner, or release builder consumes private evidence.
-> Move `build-manifest.mjs` and `provenance:build:release` into that reviewed rewrite, convert its focused
-> JavaScript tests to the repository's integrated Vitest convention, and obtain an independent readiness
-> review. Do not inspect the owner bundle or run checkpoint P0 before that approval.
+> is retained as design input only. The active Task 2A index now routes separately reviewed Task 2A1 and Task
+> 2A2 plans; Task 2B preparation, Task 2C copying, and Task 2D scanning/release projection remain blocked behind
+> their own future contracts. Do not inspect the owner bundle or run checkpoint P0 through this historical
+> sequence.
 >
 > This execution block also covers Tasks 3–11 below. They remain useful design sketches, but their stale
-> filenames and commands are not implementation instructions until the Task 2 rewrite updates their shared
-> contract or a later preflight explicitly approves them.
+> filenames and commands are not implementation instructions unless a later reviewed replacement explicitly
+> reactivates the applicable work.
 
 **Files:**
 
@@ -481,7 +489,7 @@ git diff --check
 
 ---
 
-## Task 3: Migrate installer and client plugins
+## Historical Task 3: Migrate installer and client plugins — superseded, do not execute
 
 **Files:** The 11 `installer-plugin` approved destinations in Appendix A.
 
@@ -519,7 +527,7 @@ git diff --check
 
 ---
 
-## Task 4: Migrate developer bootstrap and VM harness
+## Historical Task 4: Migrate developer bootstrap and VM harness — superseded, do not execute
 
 **Files:** The 25 `vm-onboarding` approved destinations in Appendix A; create
 `scripts/vm/with-managed-vm.mjs` and `tests/vm/with-managed-vm.test.mjs` as new clean-room safety assets.
@@ -576,7 +584,7 @@ git diff --check
 
 ---
 
-## Task 5: Migrate the agentic evaluation harness
+## Historical Task 5: Migrate the agentic evaluation harness — superseded, do not execute
 
 **Files:** The 28 `agentic` approved destinations in Appendix A.
 
@@ -634,7 +642,7 @@ git diff --check
 
 ---
 
-## Task 6: Migrate approved safety and backup tests inside product-parity Task 5
+## Historical Task 6: Migrate approved safety and backup tests — superseded, do not execute
 
 **Files:** The 10 `security-backup` approved destinations in Appendix A.
 
@@ -689,7 +697,7 @@ entire group in its single atomic commit. Never commit this recipe by itself.
 
 ---
 
-## Task 7: Migrate shared and integration test infrastructure inside product-parity Task 11
+## Historical Task 7: Migrate shared and integration test infrastructure — superseded, do not execute
 
 **Files:** The 15 `other-tests` approved destinations in Appendix A.
 
@@ -734,7 +742,7 @@ the entire group in its offline-parity commit; never commit an adapted red harne
 
 ---
 
-## Task 8: Migrate and sanitize approved technical documentation
+## Historical Task 8: Migrate and sanitize approved technical documentation — superseded, do not execute
 
 **Files:** The 16 `recent-docs` approved destinations in Appendix A.
 
@@ -773,7 +781,7 @@ git diff --check
 
 ---
 
-## Task 9: Register and protect rewrite handoffs
+## Historical Task 9: Register and protect rewrite handoffs — superseded, do not execute
 
 **Files:**
 
@@ -823,7 +831,7 @@ rewrite destinations are final and independently reviewed.
 
 ---
 
-## Task 10: Keep discarded assets absent and distribute replacement coverage
+## Historical Task 10: Keep discarded assets absent — superseded, do not execute
 
 **Files:**
 
@@ -906,7 +914,7 @@ their owning product tasks; do not create a second coverage commit.
 
 ---
 
-## Task 11: Close the public and private source-migration inventory
+## Historical Task 11: Close the source-migration inventory — superseded, do not execute
 
 **Files:**
 
@@ -1209,7 +1217,7 @@ These eight destinations retain class `discard`, digest `null`, verdict `discard
 
 ---
 
-## Execution handoff
+## Historical execution handoff (superseded, do not execute)
 
 Before Task 1, confirm the destination and preserve unrelated changes with `git status --short --branch`
 and `git log -5 --oneline`.

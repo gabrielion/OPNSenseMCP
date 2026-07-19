@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-19
 
-**Status:** Architecture approved; written specification awaiting owner review
+**Status:** Owner-approved implementation contract
 
 **Project license:** AGPL-3.0-or-later
 
@@ -18,19 +18,25 @@ builds, tests, client installation, and runtime never require private provenance
 
 ## Decision
 
-The former monolithic provenance Task 2 is split into four independently reviewed increments:
+The former monolithic provenance Task 2 is split into five independently reviewed increments:
 
-1. **Private contract and preflight:** one schema, one pure parser, one external-input loader, and one public
-   immutable migration-group map.
-2. **Private preparation:** verify a synthetic or owner-supplied bundle, compose an allow-listed source outside
-   Git, and produce a draft private baseline for explicit review.
-3. **Approved copying:** copy only an authorized public group after complete preflight, stage all bytes, and use
-   a verified rollback journal if installation fails.
-4. **Scanning and release projection:** scan public and private evidence, strengthen the AGPL gate, and project
-   only independently reviewed final digests into the public manifest.
+1. **Task 2A1 — pure private contract:** one canonical schema, one pure parser, one public immutable
+   migration-group map, composition projection, and sanitized typed failures. It reads no environment,
+   filesystem, Git, subprocess, platform, or private input.
+2. **Task 2A2 — accepted-context preflight:** the sole external-input loader, stable POSIX filesystem
+   inspection, physical Git corpus and index verification, purpose readiness, redacted CLI, and private-tool
+   Windows refusal. It prepares, activates, copies, scans, and releases nothing.
+3. **Task 2B — private preparation and activation:** verify a synthetic or owner-supplied bundle, compose an
+   allow-listed source outside Git, produce a draft private baseline for explicit review, and activate only a
+   separately digest-bound accepted snapshot.
+4. **Task 2C — approved copying:** copy only an authorized public group after complete preflight, stage all
+   bytes, and use a verified rollback journal if installation fails.
+5. **Task 2D — scanning and release projection:** scan public and private evidence, strengthen the AGPL gate,
+   and project only independently reviewed final digests into the public manifest.
 
-Each increment has its own TDD cycle, independent review, and atomic commit. Preparation, copying, scanning,
-and release projection all consume the same parser; none may define a second private schema.
+Each increment has its own TDD cycle, independently reviewable local commit range, combined acceptance gate,
+and independent review. Preparation, copying, scanning, and release projection all consume the same parser;
+none may define a second private schema.
 
 ## Trust model
 
@@ -129,6 +135,10 @@ composition identity. `scanPolicy` is separately covered by the canonical baseli
 baseline digest, and its top-level review; removing a scan reference changes both the exact row schema and
 composition digest.
 
+`corpusRefCount` is an integer from 1 through 10,000, `corpusObjectCount` is an integer from 1 through
+100,000, and `similarityIndexBlobCount` is an integer from 0 through `corpusObjectCount`. These structural
+bounds are enforced by the pure parser before later preflight re-enumerates the retained corpus and index.
+
 The prepared private root also retains a fixed bare mirror named `corpus.git` containing the complete verified
 bundle. `corpusRefCount` and `corpusRefFingerprintSha256` bind the canonical bytewise-sorted bundled ref-name and
 target-object-ID projection; at most 10,000 refs are accepted. The selected revision must be a commit reachable
@@ -171,7 +181,9 @@ and credential rules instead.
 ```
 
 At most 512 unique forbidden blob digests and 256 unique forbidden references are accepted, and at least one
-reference must use category `legacy-reference`. A forbidden
+reference must use category `legacy-reference`. Blob digests are in ascending raw-byte order. References are
+in ascending order by the raw UTF-8 bytes of `category`, then by their decoded strict-UTF-8 bytes; uniqueness
+uses that exact `(category, decoded bytes)` pair. A forbidden
 reference contains exactly `category` and `utf8Base64`; its decoded value must be valid UTF-8, non-empty, at
 most 4096 bytes, and is held only in memory. `category` is one of `legacy-reference`, `private-path`, or
 `private-identifier`. Reports expose only this category.
@@ -225,10 +237,12 @@ Every private asset row has exactly these keys:
 Destinations and classes must match all 116 public rows exactly and in bytewise UTF-8 order. Every private
 relative path uses the Task 1 NFC and Windows-portable path rules, including reserved devices, forbidden
 characters, exact component case, and normalization/case-fold collision refusal. `.git` components are always
-forbidden. A source path equal to its public destination uses `mappingRelationship=same-path`. A different
-portable path uses `mappingRelationship=renamed` and requires a private rationale digest before source or
-snapshot review can become terminal. The mapping is bounded to one inventory destination and never creates a
-second public destination, intermediate runtime tree, or unrestricted copy path.
+forbidden. JSON escapes that decode to an unpaired UTF-16 surrogate are rejected before path normalization or
+encoding; every accepted path is a sequence of Unicode scalar values. A source path equal to its public
+destination uses `mappingRelationship=same-path`. A different portable path uses
+`mappingRelationship=renamed` and requires a private rationale digest before source or snapshot review can
+become terminal. The mapping is bounded to one inventory destination and never creates a second public
+destination, intermediate runtime tree, or unrestricted copy path.
 
 #### Approved rows
 
@@ -248,9 +262,11 @@ An approved row has a non-null `sourceAuthorization` with exactly:
   required.
 
 `origin=bundle` requires `bundleRelationship=selected`. An overlay requires `absent` or
-`supersedes`. Pending source review requires a null reviewer. Approved source review requires a non-null
-reviewer different from the author, and `supersedes` additionally requires a rationale digest. Preparation
-always emits pending source review. The parser never prints either identity or rationale digest.
+`supersedes`. Pending source review requires a null reviewer. A pending `supersedes` row emitted by preparation
+has a null supersession rationale while the top-level snapshot is also pending. Approved source review, or a
+reviewed top-level snapshot, requires a non-null supersession rationale digest. Approved source review requires
+a non-null reviewer different from the author. Preparation always emits pending source review. The parser never
+prints either identity or rationale digest.
 
 Every opaque identity is an ASCII token from 1 through 128 characters matching
 `^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$`; it is not a display name and never appears in public output.
@@ -301,6 +317,24 @@ parsePrivateBaseline(bytes, publicContract) -> deeply frozen baseline
 canonicalPrivateBaseline(value) -> canonical bytes
 privateCompositionProjection(value) -> canonical non-public projection bytes
 ```
+
+`bytes` accepts a `Buffer` or `Uint8Array` and is copied before decoding so caller mutation cannot change the
+validated snapshot. `canonicalPrivateBaseline` and `privateCompositionProjection` reconstruct fresh objects in
+the prescribed key order and the authoritative `MIGRATION_INVENTORY` row order and reject a missing, unknown,
+duplicate, destination-mismatched, or class-mismatched structural member. They do not establish
+semantic validity or review readiness; `parsePrivateBaseline` is the only function that applies the full
+schema/state/live-public-contract validation and compares the reconstructed canonical bytes with the copied raw
+input. The composition projector accepts the same complete top-level structural shape but emits only the
+specified reduced asset projection.
+
+`publicContract` is a narrow dependency-integrity assertion, not caller-provided policy. Its five properties
+must be the exact immutable `MIGRATION_INVENTORY`, `MIGRATION_CLASS_COUNTS`, `portableCollisionKey`,
+`compareDestinations`, and `isPortableDestination` exports from `scripts/provenance/inventory.mjs`. The parser
+accepts only a plain non-Proxy wrapper with exactly five ordered, enumerable own data properties; it rejects
+accessors, symbol/non-enumerable extras, alternate prototypes, and any replacement object, array, count map, or
+callback by identity before invocation. It then uses a separately constructed frozen wrapper around the five
+authoritative exports for every later validation and digest. The caller wrapper is never reused as authority,
+so arbitrary caller callbacks, Proxy traps, or time-varying getters never become path or inventory authority.
 
 The parser is pure: it reads no environment, filesystem, clock, network, Git configuration, or process state;
 it writes nothing and emits no diagnostics. Validation failures use one typed internal error without carrying
@@ -396,8 +430,8 @@ The loader and `scripts/provenance/private-preflight.mjs` require:
   override;
 - lowercase 64-character `OPNSENSE_PROVENANCE_BASELINE_SHA256` and absolute path values for the other two
   variables; paths are NFC, reject C0 controls and DEL, and are at most 4096 encoded bytes;
-- a baseline regular file, source directory, bare `corpus.git`, and `similarity-index` directory outside the
-  repository;
+- a baseline regular file, source directory, bare `corpus.git` directory, and regular `similarity-index` file
+  outside the repository;
 - a baseline file, source directory, `corpus.git`, and `similarity-index` that are direct children of one common
   private parent outside the repository, filesystem root, and user home root;
 - a common private parent that is neither an ancestor nor a descendant of the repository and is on one device
@@ -483,36 +517,46 @@ input preflight failure. Task 2A's preflight therefore returns only `0` or `2`.
 
 ## TDD and review gates
 
-Task 2A uses only synthetic temporary repositories, synthetic private roots, generated sentinel identities,
-and generated byte content. It does not inspect the real bundle, old repository, VM, firewall, or user
-credentials.
+Tasks 2A1 and 2A2 use only synthetic values, temporary repositories, temporary private roots, generated
+sentinel identities, and generated byte content. Neither inspects the real bundle, old repository, VM,
+firewall, or user credentials.
 
-The focused suite must prove:
+The Task 2A1 focused suite must prove:
 
 - exact canonical schema, duplicate-member rejection, key allow-lists, size bound, and deep freezing;
 - exact 116-row inventory and six-group partition;
 - the complete valid and invalid state matrices for approved, rewrite, and discard;
 - digest, mode, size, identity separation, overlay, and supersession rules;
+- exact composition projection and exclusion of identities, rationales, review state, and scan policy;
+- positional canonical key order at every object nesting level and exact public-inventory row order;
+- that pure parsing cannot access environment, filesystem, Git, subprocess, platform, clock, or network;
+- that parsing cannot manufacture or default review evidence.
+
+The Task 2A2 focused suite must prove:
+
 - portable Windows/Unicode path and collision predicates as host-independent unit projections, plus real POSIX
   symlink and exact-entry-case refusal;
 - absent, malformed, in-repository, overbroad, permission-unsafe, or caller-poisoned external inputs;
 - fixed simulated and later native-Windows private-tool refusal while the public verifier remains portable;
 - Git configuration, index, attributes, replacement-ref, diff, and environment isolation;
-- environment activation with newline, quote, backtick, command-substitution, duplicate-assignment, and trailing
-  payload adversarial inputs;
 - deadline calculation at every corpus-size boundary and streamed object verification without accumulated
   content output;
 - zero private sentinel value in stdout and stderr on every success and failure path;
 - complete private-corpus binding and refusal of an absent, truncated, extra-ref, or fingerprint-mismatched
   mirror;
 - refusal when the separately supplied reviewed-baseline digest is absent or mismatched;
-- that parsing and preflight cannot manufacture or default review evidence. Copier and release-projection tasks
-  extend this proof at their own boundary before those commands are accepted.
+- that preflight cannot manufacture or default review evidence.
 
-After RED and GREEN evidence, Task 2A must pass Node 22 focused tests, `npm run provenance:verify`,
-`npm run license:check`, `npm run verify`, both MCP conformance profiles, and `git diff --check`. An independent
-review must approve the schema, parser boundary, path security, redaction, and Windows claim before private
-preparation starts.
+Task 2B owns environment-file serialization and activation. Its focused suite must cover newline, quote,
+backtick, command-substitution, duplicate-assignment, trailing-payload, exclusive-creation, and exact-mode
+adversarial cases before an activation implementation is accepted. Copier and release-projection tasks extend
+the no-self-approval proof at their own boundaries.
+
+After their own RED and GREEN evidence, Tasks 2A1 and 2A2 each pass their Node 22 focused tests,
+`npm run provenance:verify`, `npm run license:check`, `npm run verify`, both MCP conformance profiles, and
+`git diff --check`. Each receives an independent specification-conformance review and code-quality review.
+The combined Task 2A acceptance review must approve the schema, parser boundary, path security, redaction, and
+Windows claim before private preparation starts.
 
 ## Out of scope for Task 2A
 
@@ -526,11 +570,12 @@ preparation starts.
 ## Normative plan routing
 
 The blocked Task 2 and checkpoint P0 text in the existing migration plan remain historical design input and
-must not execute directly. After this specification is approved, the implementation-plan rewrite replaces
-their normative sequence with: synthetic contract implementation and review; synthetic preparation
-implementation and review; real draft generation; independent source and snapshot review; separately supplied
-baseline digest; activation; accepted-context preflight; then group copying. Tasks 3 through 11 remain blocked
-until that rewritten sequence has its own readiness review.
+must not execute directly. The implementation-plan index now routes through: pure synthetic contract
+implementation and review; synthetic accepted-context preflight implementation and review; synthetic private
+preparation implementation and review; real draft generation; independent source and snapshot review;
+separately supplied baseline digest; activation; real accepted-context preflight; independently reviewed copier;
+then group copying. Historical Tasks 3 through 11 remain blocked until replacement plans explicitly reactivate
+the applicable work.
 
 ## Success criteria
 

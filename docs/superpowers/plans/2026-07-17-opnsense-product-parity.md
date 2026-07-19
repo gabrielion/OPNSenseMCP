@@ -5,6 +5,9 @@
 > against `docs/superpowers/specs/2026-07-19-operation-catalog-progressive-discovery-design.md` and
 > `docs/superpowers/specs/2026-07-19-supported-development-hosts-design.md`, then independently reviewed.
 > Product Task 1 must not start until that checkpoint is complete.
+> Replacement routing now lives in
+> `docs/superpowers/plans/2026-07-19-opnsense-product-verticals.md`. The content below remains historical input
+> and is not the Product 1A implementation plan.
 
 # OPNsense Product Contract Implementation Plan
 

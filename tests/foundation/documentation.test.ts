@@ -136,7 +136,7 @@ describe('foundation documentation', () => {
     }
   });
 
-  it('hard-stops superseded Product and Guided plans until rewrite and independent review', async () => {
+  it('hard-stops superseded plans and routes only independently reviewed replacements', async () => {
     const [index, product, guided] = await Promise.all([
       readFile('docs/superpowers/plans/2026-07-17-rebuild-plan-index.md', 'utf8'),
       readFile('docs/superpowers/plans/2026-07-17-opnsense-product-parity.md', 'utf8'),
@@ -155,8 +155,12 @@ describe('foundation documentation', () => {
       );
       expect(plan).toContain('independently reviewed');
     }
-    expect(index).toContain('MANDATORY HARD STOP');
-    expect(index).toContain('Product Task 1 MUST NOT start');
+    expect(index).toContain('beginning with Product 1A');
+    expect(index).toContain('No Product implementation starts from the superseded');
+    expect(index).toContain('GUIDED/CLIENT CHECKPOINT');
+    expect(index).toContain(
+      'Product 5 implementation starts only after that replacement passes review'
+    );
     expect(index).toContain('independently reviewed');
     expect(index).toContain(
       'docs/superpowers/specs/2026-07-19-operation-catalog-progressive-discovery-design.md'
@@ -174,5 +178,51 @@ describe('foundation documentation', () => {
       expect(checkpoint).toContain('exact-process exit');
       expect(checkpoint).toContain('cleanup evidence');
     }
+  });
+
+  it('routes bounded provenance independently from vertical product delivery', async () => {
+    const [index, task2Index, baselinePlan, historical, productRouting] = await Promise.all([
+      readFile('docs/superpowers/plans/2026-07-17-rebuild-plan-index.md', 'utf8'),
+      readFile(
+        'docs/superpowers/plans/2026-07-19-private-provenance-contract-preflight.md',
+        'utf8'
+      ),
+      readFile('docs/superpowers/plans/2026-07-19-private-provenance-baseline.md', 'utf8'),
+      readFile(
+        'docs/superpowers/plans/2026-07-17-provenance-test-infrastructure-migration.md',
+        'utf8'
+      ),
+      readFile('docs/superpowers/plans/2026-07-19-opnsense-product-verticals.md', 'utf8')
+    ]);
+    expect(task2Index).toContain('**Status:** Routing document; not directly executable');
+    expect(task2Index).toContain('Task 2A1 — pure baseline contract');
+    expect(task2Index).toContain('Task 2A2 — accepted-context preflight');
+    expect(task2Index).toContain('2026-07-19-private-provenance-baseline.md');
+    expect(baselinePlan).toContain('Task 2A1');
+    expect(historical).toContain('must not execute as written');
+    expect(historical).toContain('Historical Task 11');
+    expect(productRouting).toContain('**Status:** Routing document; not directly executable');
+    expect(productRouting).toContain('Product 1A — First useful read-only vertical');
+    expect(productRouting).toContain('Product 1B — Disposable-VM read and contributor path');
+    expect(productRouting).toContain('GET /api/core/system/status');
+    expect(productRouting).toContain('POST /api/core/service/search');
+    expect(index).toContain('2026-07-19-opnsense-product-verticals.md');
+    for (const milestone of [
+      'Useful read-only server',
+      'Central mutation envelope',
+      'One verified mutation',
+      'Independent use-case verticals',
+      'Clients and pedagogy',
+      'Pre-publication proof'
+    ])
+      expect(index).toContain(milestone);
+    for (const focusRule of [
+      'one user-visible demonstration',
+      'New clean-room product code and new tests do not wait for private provenance',
+      'one public MCP capability per immutable policy/effect'
+    ])
+      expect(index).toContain(focusRule);
+    expect(index).toContain('clean-room product');
+    expect(index).toContain('without legacy inputs');
   });
 });
