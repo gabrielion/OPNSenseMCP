@@ -10,13 +10,14 @@ import {
 } from '../../src/app/default-application.js';
 import {
   createApplicationContext,
-  listApplicationCapabilities
+  listApplicationCapabilities,
+  settleApplicationConfirmation
 } from '../../src/app/application-context.js';
 import { CapabilityCatalog } from '../../src/capabilities/catalog.js';
 import { dispatchCapability } from '../../src/capabilities/dispatch.js';
 import { defineCapability } from '../../src/capabilities/kernel.js';
 import type { RuntimeConfig } from '../../src/config/runtime-config.js';
-import { createReadFixture } from '../fixtures/capabilities.js';
+import { createMutationFixture, createReadFixture } from '../fixtures/capabilities.js';
 import { connectLegacy } from '../helpers/connect.js';
 
 function writableConfig(): RuntimeConfig {
@@ -70,6 +71,65 @@ describe('default application composition seam', () => {
     const runtime = createDefaultApplicationRuntime();
     await Promise.all([runtime.close(), runtime.close(), runtime.close()]);
     await runtime.close();
+  });
+
+  it.each(['read', 'write'] as const)(
+    'closes application admission in the same turn before an initial %s dispatch',
+    async (effect) => {
+      const handler = vi.fn();
+      const capability =
+        effect === 'read'
+          ? createReadFixture({
+              handler: ({ value }) => {
+                handler();
+                return Promise.resolve({ echoed: value });
+              }
+            })
+          : createMutationFixture(handler);
+      const application = createApplicationContext(
+        writableConfig(),
+        new CapabilityCatalog([capability])
+      );
+      const runtime = createOwnedApplicationRuntime(application);
+
+      const shutdown = runtime.close();
+      const lateDispatch = dispatchCapability(
+        { name: capability.mcpName, arguments: { value: 'late' } },
+        { application, transport: 'stdio' }
+      );
+
+      await expect(lateDispatch).rejects.toThrow(/^Application is closing$/u);
+      expect(handler).not.toHaveBeenCalled();
+      await shutdown;
+    }
+  );
+
+  it('closes application admission in the same turn before confirmation completion', async () => {
+    const handler = vi.fn();
+    const mutation = createMutationFixture(handler);
+    const application = createApplicationContext(
+      writableConfig(),
+      new CapabilityCatalog([mutation])
+    );
+    const runtime = createOwnedApplicationRuntime(application);
+    const request = { name: mutation.mcpName, arguments: { value: 'safe' } };
+    const initial = await dispatchCapability(request, { application, transport: 'stdio' });
+    if (initial.kind !== 'confirmation-required') {
+      throw new Error('Expected a confirmation challenge');
+    }
+
+    const shutdown = runtime.close();
+    const lateCompletion = settleApplicationConfirmation(
+      application,
+      'accept',
+      initial.challenge,
+      request,
+      { transport: 'stdio' }
+    );
+
+    await expect(lateCompletion).rejects.toThrow(/^Application is closing$/u);
+    expect(handler).not.toHaveBeenCalled();
+    await shutdown;
   });
 
   it('drains an already-admitted initial dispatch before owned services close', async () => {

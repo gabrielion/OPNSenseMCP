@@ -17,13 +17,28 @@ export function createOwnedApplicationRuntime(
   serviceClosers: readonly CloseOperation[] = []
 ): OwnedApplicationRuntime {
   const ownedServiceClosers = Object.freeze([...serviceClosers]);
+  let applicationDrain: Promise<void> | undefined;
+  const beginApplicationClose = (): Promise<void> => {
+    if (applicationDrain !== undefined) return applicationDrain;
+    try {
+      applicationDrain = closeApplicationContext(application);
+    } catch (error) {
+      applicationDrain = Promise.reject(error);
+    }
+    return applicationDrain;
+  };
+  const aggregateClose = createPhasedClose(
+    [[beginApplicationClose], ownedServiceClosers],
+    undefined,
+    'Application cleanup failed'
+  );
   return Object.freeze({
     application,
-    close: createPhasedClose(
-      [[() => closeApplicationContext(application)], ownedServiceClosers],
-      undefined,
-      'Application cleanup failed'
-    )
+    close: () => {
+      const settlement = aggregateClose();
+      void beginApplicationClose().catch(() => undefined);
+      return settlement;
+    }
   });
 }
 
