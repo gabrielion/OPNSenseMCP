@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
+import * as z from 'zod/v4';
 import {
   CAPABILITY_CATALOG,
   CapabilityCatalog,
   getCapability
 } from '../../src/capabilities/catalog.js';
 import { areDeclaredResourceScopesAllowed } from '../../src/capabilities/exposure.js';
+import { defineResourceCapability } from '../../src/capabilities/kernel.js';
+import type { FeatureFlag } from '../../src/config/feature-flags.js';
 import { createMutationFixture, createReadFixture } from '../fixtures/capabilities.js';
 
 describe('CapabilityCatalog', () => {
@@ -120,6 +123,53 @@ describe('CapabilityCatalog', () => {
         allowedResourceScopes: new Set(['test.read', 'test.related'])
       })
     ).toEqual([capability]);
+  });
+
+  it('exposes a closed resource capability when any selectable scope is allowed', () => {
+    const capability = defineResourceCapability({
+      id: 'test.resource.catalog',
+      mcpName: 'test_resource_catalog',
+      title: 'Resource catalog fixture',
+      description: 'Exercise selectable resource scope exposure.',
+      inputSchema: z.object({ resource: z.string() }).strict(),
+      outputSchema: z.object({ resource: z.string() }).strict(),
+      annotations: { readOnlyHint: true },
+      transports: ['stdio'],
+      selectableResourceScopes: ['resource.alpha', 'resource.beta'],
+      resolver: (input, { visibleResourceScopes }) => ({
+        kind: 'resolved',
+        input,
+        effectiveResourceScopes: visibleResourceScopes.includes(input.resource)
+          ? [input.resource]
+          : []
+      }),
+      policy: {
+        effect: 'read',
+        requiredFeatureFlags: [],
+        backup: 'none',
+        audit: 'none',
+        confirmation: 'none',
+        timeoutMs: 1000,
+        redactFields: []
+      },
+      handler: ({ resource }) => Promise.resolve({ resource })
+    });
+    const catalog = new CapabilityCatalog([capability]);
+    const context = {
+      readOnly: true,
+      transport: 'stdio' as const,
+      enabledFeatureFlags: new Set<FeatureFlag>()
+    };
+
+    expect(
+      catalog.listExposed({
+        ...context,
+        allowedResourceScopes: new Set(['resource.alpha'])
+      })
+    ).toEqual([capability]);
+    expect(
+      catalog.listExposed({ ...context, allowedResourceScopes: new Set(['resource.hidden']) })
+    ).toEqual([]);
   });
 
   it('keeps empty declared scopes eligible when no allow-list is active', () => {

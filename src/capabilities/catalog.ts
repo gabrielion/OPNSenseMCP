@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { CapabilityDefinition, ExposureContext } from './types.js';
-import { areDeclaredResourceScopesAllowed } from './exposure.js';
 import { serverStatusCapability } from './foundation/server-status.js';
-import { isKernelDefinedCapability } from './kernel.js';
+import { hasVisibleResourceScopes, isKernelDefinedCapability } from './kernel.js';
 
 function isExposed(capability: CapabilityDefinition, context: ExposureContext): boolean {
   if (!capability.transports.includes(context.transport)) return false;
@@ -12,12 +11,7 @@ function isExposed(capability: CapabilityDefinition, context: ExposureContext): 
   ) {
     return false;
   }
-  if (
-    !areDeclaredResourceScopesAllowed(
-      capability.policy.resourceScopes,
-      context.allowedResourceScopes
-    )
-  ) {
+  if (!hasVisibleResourceScopes(capability, context.allowedResourceScopes)) {
     return false;
   }
   return true;

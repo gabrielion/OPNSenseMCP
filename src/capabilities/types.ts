@@ -17,6 +17,52 @@ export interface CapabilityExecutionContext {
   readonly principalId?: string;
 }
 
+export interface ResourceCapabilityExecutionContext extends CapabilityExecutionContext {
+  readonly effectiveResourceScopes: readonly string[];
+}
+
+export interface ResourceResolutionContext {
+  readonly visibleResourceScopes: readonly string[];
+}
+
+export interface ResourceRefusalDetailByCode {
+  readonly UNKNOWN_RESOURCE: {
+    readonly suggestions: readonly string[];
+  };
+  readonly OPERATION_NOT_AVAILABLE: {
+    readonly resource: string;
+    readonly availableOperations: readonly string[];
+  };
+  readonly INVALID_RESOURCE_INPUT: {
+    readonly resource: string;
+    readonly operation: string;
+    readonly fields: readonly string[];
+  };
+  readonly TARGET_UNAVAILABLE: {
+    readonly resource: string;
+    readonly operation: string;
+  };
+}
+
+export type ResourceRefusalCode = keyof ResourceRefusalDetailByCode;
+export type ResourceRefusalDetails = ResourceRefusalDetailByCode[ResourceRefusalCode];
+export type ResourceRefusal = {
+  readonly [TCode in ResourceRefusalCode]: {
+    readonly code: TCode;
+    readonly details: ResourceRefusalDetailByCode[TCode];
+  };
+}[ResourceRefusalCode];
+
+export type ResourceResolution<TInput extends Record<string, unknown>> =
+  | {
+      readonly kind: 'resolved';
+      readonly input: TInput;
+      readonly effectiveResourceScopes: readonly string[];
+    }
+  | ({
+      readonly kind: 'refused';
+    } & ResourceRefusal);
+
 export interface CapabilityPolicy {
   readonly effect: CapabilityEffect;
   readonly resourceScopes: readonly string[];
@@ -74,17 +120,26 @@ export type RefusalCode =
   | 'INVALID_INPUT'
   | 'INVALID_OUTPUT'
   | 'INVALID_POLICY'
+  | 'INVALID_RESOURCE_INPUT'
+  | 'OPERATION_NOT_AVAILABLE'
   | 'OUTCOME_INDETERMINATE'
   | 'READ_ONLY'
   | 'RESOURCE_NOT_ALLOWED'
   | 'TIMEOUT'
+  | 'TARGET_UNAVAILABLE'
   | 'UNKNOWN_CAPABILITY'
+  | 'UNKNOWN_RESOURCE'
   | 'UNSUPPORTED_TRANSPORT';
 
 export type CapabilityResult =
   | { readonly kind: 'success'; readonly output: Record<string, unknown> }
   | { readonly kind: 'confirmation-required'; readonly challenge: ConfirmationChallenge }
-  | { readonly kind: 'refused'; readonly code: RefusalCode; readonly message: string };
+  | {
+      readonly kind: 'refused';
+      readonly code: RefusalCode;
+      readonly message: string;
+      readonly details?: ResourceRefusalDetails;
+    };
 
 export interface CapabilityDispatcher {
   listExposed(transport: TransportKind): readonly CapabilityDefinition[];

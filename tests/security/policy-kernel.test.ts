@@ -38,11 +38,15 @@ const REFUSAL_MESSAGES: Readonly<Record<RefusalCode, string>> = Object.freeze({
   INVALID_INPUT: 'Capability input is invalid.',
   INVALID_OUTPUT: 'Capability output is invalid.',
   INVALID_POLICY: 'Capability policy is invalid.',
+  INVALID_RESOURCE_INPUT: 'Resource input is invalid.',
+  OPERATION_NOT_AVAILABLE: 'Resource operation is not available.',
   OUTCOME_INDETERMINATE: 'Capability outcome is indeterminate.',
   READ_ONLY: 'Capability is disabled in read-only mode.',
   RESOURCE_NOT_ALLOWED: 'Capability resource scope is not allowed.',
   TIMEOUT: 'Capability execution timed out.',
+  TARGET_UNAVAILABLE: 'OPNsense target is unavailable.',
   UNKNOWN_CAPABILITY: 'Capability is not available.',
+  UNKNOWN_RESOURCE: 'Resource is not available.',
   UNSUPPORTED_TRANSPORT: 'Capability is not available on this transport.'
 });
 

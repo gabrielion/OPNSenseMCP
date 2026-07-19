@@ -19,6 +19,11 @@ import type {
   CapabilityResult,
   ExposureContext,
   RefusalCode,
+  ResourceCapabilityExecutionContext,
+  ResourceRefusal,
+  ResourceRefusalDetails,
+  ResourceResolution,
+  ResourceResolutionContext,
   TransportKind
 } from './types.js';
 
@@ -33,6 +38,9 @@ const MAX_CAPABILITY_METADATA_ARRAY_LENGTH = 128;
 const MAX_CAPABILITY_NAME_LENGTH = 256;
 const MAX_CAPABILITY_TITLE_LENGTH = 256;
 const MAX_CAPABILITY_DESCRIPTION_LENGTH = 4096;
+const MAX_RESOURCE_DETAIL_NAME_LENGTH = 128;
+const MAX_RESOURCE_DETAIL_ARRAY_LENGTH = 16;
+const MAX_RESOURCE_SUGGESTIONS = 3;
 
 const CAPABILITY_DEFINITION_KEYS = Object.freeze([
   'id',
@@ -46,6 +54,20 @@ const CAPABILITY_DEFINITION_KEYS = Object.freeze([
   'policy',
   'handler'
 ]);
+const RESOURCE_CAPABILITY_DEFINITION_KEYS = Object.freeze([
+  'id',
+  'mcpName',
+  'title',
+  'description',
+  'inputSchema',
+  'outputSchema',
+  'annotations',
+  'transports',
+  'policy',
+  'selectableResourceScopes',
+  'resolver',
+  'handler'
+]);
 const CAPABILITY_POLICY_KEYS = Object.freeze([
   'effect',
   'resourceScopes',
@@ -56,6 +78,9 @@ const CAPABILITY_POLICY_KEYS = Object.freeze([
   'timeoutMs',
   'redactFields'
 ]);
+const RESOURCE_CAPABILITY_POLICY_KEYS = Object.freeze(
+  CAPABILITY_POLICY_KEYS.filter((key) => key !== 'resourceScopes')
+);
 const TOOL_ANNOTATION_KEYS = Object.freeze([
   'title',
   'readOnlyHint',
@@ -74,11 +99,15 @@ const REFUSAL_MESSAGES: Readonly<Record<RefusalCode, string>> = Object.freeze({
   INVALID_INPUT: 'Capability input is invalid.',
   INVALID_OUTPUT: 'Capability output is invalid.',
   INVALID_POLICY: 'Capability policy is invalid.',
+  INVALID_RESOURCE_INPUT: 'Resource input is invalid.',
+  OPERATION_NOT_AVAILABLE: 'Resource operation is not available.',
   OUTCOME_INDETERMINATE: 'Capability outcome is indeterminate.',
   READ_ONLY: 'Capability is disabled in read-only mode.',
   RESOURCE_NOT_ALLOWED: 'Capability resource scope is not allowed.',
   TIMEOUT: 'Capability execution timed out.',
+  TARGET_UNAVAILABLE: 'OPNsense target is unavailable.',
   UNKNOWN_CAPABILITY: 'Capability is not available.',
+  UNKNOWN_RESOURCE: 'Resource is not available.',
   UNSUPPORTED_TRANSPORT: 'Capability is not available on this transport.'
 });
 
@@ -89,6 +118,12 @@ type CapabilityHandler = (
 
 const capabilityHandlers = new WeakMap<CapabilityDefinition, CapabilityHandler>();
 const kernelDefinedCapabilities = new WeakSet<CapabilityDefinition>();
+type ResourceResolver = (
+  input: Record<string, unknown>,
+  context: ResourceResolutionContext
+) => ResourceResolution<Record<string, unknown>>;
+const resourceResolvers = new WeakMap<CapabilityDefinition, ResourceResolver>();
+const resourceSelectableScopes = new WeakMap<CapabilityDefinition, readonly string[]>();
 
 export interface TypedCapabilityDefinition<
   TInput extends Record<string, unknown>,
@@ -104,6 +139,31 @@ export interface TypedCapabilityDefinition<
   readonly transports: readonly TransportKind[];
   readonly policy: CapabilityPolicy;
   readonly handler: (input: TInput, context: CapabilityExecutionContext) => Promise<TOutput>;
+}
+
+export interface TypedResourceCapabilityDefinition<
+  TParsedInput extends Record<string, unknown>,
+  TResolvedInput extends Record<string, unknown>,
+  TOutput extends Record<string, unknown>
+> {
+  readonly id: string;
+  readonly mcpName: string;
+  readonly title: string;
+  readonly description: string;
+  readonly inputSchema: z.ZodType<TParsedInput>;
+  readonly outputSchema: z.ZodType<TOutput>;
+  readonly annotations: ToolAnnotations;
+  readonly transports: readonly TransportKind[];
+  readonly selectableResourceScopes: readonly string[];
+  readonly policy: Omit<CapabilityPolicy, 'resourceScopes'>;
+  readonly resolver: (
+    input: TParsedInput,
+    context: ResourceResolutionContext
+  ) => ResourceResolution<TResolvedInput>;
+  readonly handler: (
+    input: TResolvedInput,
+    context: ResourceCapabilityExecutionContext
+  ) => Promise<TOutput>;
 }
 
 // Definitions and executable schema/callback graphs are trusted static startup code. This factory seals
@@ -190,12 +250,133 @@ function isValidTimeout(timeoutMs: number): boolean {
   return Number.isInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= MAX_TIMEOUT_MS;
 }
 
-function refusal(code: RefusalCode): CapabilityResult {
-  return Object.freeze({ kind: 'refused', code, message: REFUSAL_MESSAGES[code] });
+function refusal(code: RefusalCode, details?: ResourceRefusalDetails): CapabilityResult {
+  return Object.freeze({
+    kind: 'refused',
+    code,
+    message: REFUSAL_MESSAGES[code],
+    ...(details === undefined ? {} : { details })
+  });
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isPublicDetailName(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length >= 1 &&
+    value.length <= MAX_RESOURCE_DETAIL_NAME_LENGTH &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(value)
+  );
+}
+
+function readSafeDetailNames(
+  value: unknown,
+  maximumLength: number,
+  allowed?: ReadonlySet<string>
+): readonly string[] {
+  const names = copyDenseArray(value, isPublicDetailName);
+  if (names.length > maximumLength) throw new Error('Invalid resource refusal details');
+  const unique = [...new Set(names)].sort();
+  if (allowed !== undefined && unique.some((name) => !allowed.has(name))) {
+    throw new Error('Invalid resource refusal details');
+  }
+  return Object.freeze(unique);
+}
+
+function readSafeSuggestions(value: unknown, visible: ReadonlySet<string>): readonly string[] {
+  const names = copyDenseArray(value, isPublicDetailName);
+  if (names.length > MAX_RESOURCE_DETAIL_ARRAY_LENGTH) {
+    throw new Error('Invalid resource refusal details');
+  }
+  return Object.freeze(
+    [...new Set(names)]
+      .filter((name) => visible.has(name))
+      .sort()
+      .slice(0, MAX_RESOURCE_SUGGESTIONS)
+  );
+}
+
+function readVisibleResourceName(value: unknown, visible: ReadonlySet<string>): string {
+  if (!isPublicDetailName(value) || !visible.has(value)) {
+    throw new Error('Invalid resource refusal details');
+  }
+  return value;
+}
+
+function readResourceRefusal(
+  value: unknown,
+  visibleResourceScopes: readonly string[]
+): ResourceRefusal {
+  const refusalValue = readPlainOwnDataProperties(value, ['kind', 'code', 'details'], true);
+  if (readRequiredProperty(refusalValue, 'kind') !== 'refused') {
+    throw new Error('Invalid resource refusal');
+  }
+  const code = readRequiredProperty(refusalValue, 'code');
+  const detailsValue = readRequiredProperty(refusalValue, 'details');
+  const visible = new Set(visibleResourceScopes);
+
+  if (code === 'UNKNOWN_RESOURCE') {
+    const details = readPlainOwnDataProperties(detailsValue, ['suggestions'], true);
+    return Object.freeze({
+      code,
+      details: Object.freeze({
+        suggestions: readSafeSuggestions(readRequiredProperty(details, 'suggestions'), visible)
+      })
+    });
+  }
+  if (code === 'OPERATION_NOT_AVAILABLE') {
+    const details = readPlainOwnDataProperties(
+      detailsValue,
+      ['resource', 'availableOperations'],
+      true
+    );
+    return Object.freeze({
+      code,
+      details: Object.freeze({
+        resource: readVisibleResourceName(readRequiredProperty(details, 'resource'), visible),
+        availableOperations: readSafeDetailNames(
+          readRequiredProperty(details, 'availableOperations'),
+          MAX_RESOURCE_DETAIL_ARRAY_LENGTH
+        )
+      })
+    });
+  }
+  if (code === 'INVALID_RESOURCE_INPUT') {
+    const details = readPlainOwnDataProperties(
+      detailsValue,
+      ['resource', 'operation', 'fields'],
+      true
+    );
+    const operation = readRequiredProperty(details, 'operation');
+    if (!isPublicDetailName(operation)) throw new Error('Invalid resource refusal details');
+    return Object.freeze({
+      code,
+      details: Object.freeze({
+        resource: readVisibleResourceName(readRequiredProperty(details, 'resource'), visible),
+        operation,
+        fields: readSafeDetailNames(
+          readRequiredProperty(details, 'fields'),
+          MAX_RESOURCE_DETAIL_ARRAY_LENGTH
+        )
+      })
+    });
+  }
+  if (code === 'TARGET_UNAVAILABLE') {
+    const details = readPlainOwnDataProperties(detailsValue, ['resource', 'operation'], true);
+    const operation = readRequiredProperty(details, 'operation');
+    if (!isPublicDetailName(operation)) throw new Error('Invalid resource refusal details');
+    return Object.freeze({
+      code,
+      details: Object.freeze({
+        resource: readVisibleResourceName(readRequiredProperty(details, 'resource'), visible),
+        operation
+      })
+    });
+  }
+  throw new Error('Invalid resource refusal');
 }
 
 function invalidCapabilityDefinition(): never {
@@ -448,8 +629,111 @@ export function defineCapability<
   }
 }
 
+export function defineResourceCapability<
+  TParsedInput extends Record<string, unknown>,
+  TResolvedInput extends Record<string, unknown>,
+  TOutput extends Record<string, unknown>
+>(
+  definition: TypedResourceCapabilityDefinition<TParsedInput, TResolvedInput, TOutput>
+): CapabilityDefinition {
+  try {
+    const source = readPlainOwnDataProperties(
+      definition,
+      RESOURCE_CAPABILITY_DEFINITION_KEYS,
+      true
+    );
+    const selectableResourceScopes = copyDenseArray(
+      readRequiredProperty(source, 'selectableResourceScopes'),
+      isPublicDetailName
+    );
+    if (
+      selectableResourceScopes.length === 0 ||
+      new Set(selectableResourceScopes).size !== selectableResourceScopes.length
+    ) {
+      return invalidCapabilityDefinition();
+    }
+    const resolverValue = readRequiredProperty(source, 'resolver');
+    const handlerValue = readRequiredProperty(source, 'handler');
+    if (
+      typeof resolverValue !== 'function' ||
+      isProxy(resolverValue) ||
+      typeof handlerValue !== 'function' ||
+      isProxy(handlerValue)
+    ) {
+      return invalidCapabilityDefinition();
+    }
+    const sourcePolicy = readPlainOwnDataProperties(
+      readRequiredProperty(source, 'policy'),
+      RESOURCE_CAPABILITY_POLICY_KEYS,
+      true
+    );
+    const resolver = resolverValue as TypedResourceCapabilityDefinition<
+      TParsedInput,
+      TResolvedInput,
+      TOutput
+    >['resolver'];
+    const handler = handlerValue as TypedResourceCapabilityDefinition<
+      TParsedInput,
+      TResolvedInput,
+      TOutput
+    >['handler'];
+    const capability = defineCapability<Record<string, unknown>, TOutput>({
+      id: readRequiredProperty(source, 'id') as string,
+      mcpName: readRequiredProperty(source, 'mcpName') as string,
+      title: readRequiredProperty(source, 'title') as string,
+      description: readRequiredProperty(source, 'description') as string,
+      inputSchema: readRequiredProperty(source, 'inputSchema') as z.ZodType<
+        Record<string, unknown>
+      >,
+      outputSchema: readRequiredProperty(source, 'outputSchema') as z.ZodType<TOutput>,
+      annotations: readRequiredProperty(source, 'annotations') as ToolAnnotations,
+      transports: readRequiredProperty(source, 'transports') as readonly TransportKind[],
+      policy: {
+        effect: readRequiredProperty(sourcePolicy, 'effect') as CapabilityEffect,
+        resourceScopes: selectableResourceScopes,
+        requiredFeatureFlags: readRequiredProperty(
+          sourcePolicy,
+          'requiredFeatureFlags'
+        ) as readonly FeatureFlag[],
+        backup: readRequiredProperty(sourcePolicy, 'backup') as CapabilityPolicy['backup'],
+        audit: readRequiredProperty(sourcePolicy, 'audit') as CapabilityPolicy['audit'],
+        confirmation: readRequiredProperty(
+          sourcePolicy,
+          'confirmation'
+        ) as CapabilityPolicy['confirmation'],
+        timeoutMs: readRequiredProperty(sourcePolicy, 'timeoutMs') as number,
+        redactFields: readRequiredProperty(sourcePolicy, 'redactFields') as readonly string[]
+      },
+      handler: (input, context) =>
+        handler(input as TResolvedInput, context as ResourceCapabilityExecutionContext)
+    });
+    resourceResolvers.set(capability, (input, context) => resolver(input as TParsedInput, context));
+    resourceSelectableScopes.set(capability, selectableResourceScopes);
+    return capability;
+  } catch {
+    return invalidCapabilityDefinition();
+  }
+}
+
 export function isKernelDefinedCapability(capability: CapabilityDefinition): boolean {
   return kernelDefinedCapabilities.has(capability);
+}
+
+export function hasVisibleResourceScopes(
+  capability: CapabilityDefinition,
+  allowedResourceScopes: ReadonlySet<string> | null
+): boolean {
+  const selectable = resourceSelectableScopes.get(capability);
+  if (selectable === undefined) {
+    return areDeclaredResourceScopesAllowed(
+      capability.policy.resourceScopes,
+      allowedResourceScopes
+    );
+  }
+  return (
+    selectable.length > 0 &&
+    (allowedResourceScopes === null || selectable.some((scope) => allowedResourceScopes.has(scope)))
+  );
 }
 
 function authorizeRequest(
@@ -468,6 +752,7 @@ function authorizeRequest(
     return { kind: 'refused', result: refusal('UNKNOWN_CAPABILITY') };
   }
 
+  let visibleResourceScopes: readonly string[] | undefined;
   try {
     if (!capability.transports.includes(context.transport)) {
       return { kind: 'refused', result: refusal('UNSUPPORTED_TRANSPORT') };
@@ -480,13 +765,29 @@ function authorizeRequest(
     ) {
       return { kind: 'refused', result: refusal('FEATURE_DISABLED') };
     }
-    if (
-      !areDeclaredResourceScopesAllowed(
-        capability.policy.resourceScopes,
-        options.allowedResourceScopes
-      )
-    ) {
-      return { kind: 'refused', result: refusal('RESOURCE_NOT_ALLOWED') };
+    const selectable = resourceSelectableScopes.get(capability);
+    const resolver = resourceResolvers.get(capability);
+    if ((selectable === undefined) !== (resolver === undefined)) {
+      return { kind: 'refused', result: refusal('INVALID_POLICY') };
+    }
+    if (selectable === undefined) {
+      if (
+        !areDeclaredResourceScopesAllowed(
+          capability.policy.resourceScopes,
+          options.allowedResourceScopes
+        )
+      ) {
+        return { kind: 'refused', result: refusal('RESOURCE_NOT_ALLOWED') };
+      }
+    } else {
+      visibleResourceScopes = Object.freeze(
+        options.allowedResourceScopes === null
+          ? [...selectable]
+          : selectable.filter((scope) => options.allowedResourceScopes?.has(scope) === true)
+      );
+      if (visibleResourceScopes.length === 0) {
+        return { kind: 'refused', result: refusal('RESOURCE_NOT_ALLOWED') };
+      }
     }
   } catch {
     return { kind: 'refused', result: refusal('INVALID_POLICY') };
@@ -513,6 +814,84 @@ function authorizeRequest(
     return { kind: 'refused', result: refusal('INVALID_INPUT') };
   }
 
+  let effectiveResourceScopes: readonly string[] = Object.freeze([
+    ...capability.policy.resourceScopes
+  ]);
+  if (visibleResourceScopes !== undefined) {
+    const resolver = resourceResolvers.get(capability);
+    if (resolver === undefined) {
+      return { kind: 'refused', result: refusal('INVALID_POLICY') };
+    }
+    let resolution: ResourceResolution<Record<string, unknown>>;
+    try {
+      resolution = resolver(snapshot.value, Object.freeze({ visibleResourceScopes }));
+    } catch {
+      return { kind: 'refused', result: refusal('INVALID_RESOURCE_INPUT') };
+    }
+
+    let resolutionValue: ReadonlyMap<string, unknown>;
+    try {
+      resolutionValue = readPlainOwnDataProperties(
+        resolution,
+        ['kind', 'input', 'effectiveResourceScopes', 'code', 'details'],
+        false
+      );
+    } catch {
+      return { kind: 'refused', result: refusal('INVALID_RESOURCE_INPUT') };
+    }
+    const resolutionKind = resolutionValue.get('kind');
+    if (resolutionKind === 'refused') {
+      if (
+        resolutionValue.size !== 3 ||
+        !resolutionValue.has('code') ||
+        !resolutionValue.has('details')
+      ) {
+        return { kind: 'refused', result: refusal('INVALID_RESOURCE_INPUT') };
+      }
+      try {
+        const safe = readResourceRefusal(resolution, visibleResourceScopes);
+        return { kind: 'refused', result: refusal(safe.code, safe.details) };
+      } catch {
+        return { kind: 'refused', result: refusal('INVALID_RESOURCE_INPUT') };
+      }
+    }
+    if (
+      resolutionKind !== 'resolved' ||
+      resolutionValue.size !== 3 ||
+      !resolutionValue.has('input') ||
+      !resolutionValue.has('effectiveResourceScopes')
+    ) {
+      return { kind: 'refused', result: refusal('INVALID_RESOURCE_INPUT') };
+    }
+
+    try {
+      const resolvedScopes = copyDenseArray(
+        readRequiredProperty(resolutionValue, 'effectiveResourceScopes'),
+        isMetadataString
+      );
+      const visible = new Set(visibleResourceScopes);
+      if (
+        resolvedScopes.length === 0 ||
+        new Set(resolvedScopes).size !== resolvedScopes.length ||
+        resolvedScopes.some((scope) => !visible.has(scope))
+      ) {
+        return { kind: 'refused', result: refusal('RESOURCE_NOT_ALLOWED') };
+      }
+      effectiveResourceScopes = Object.freeze([...resolvedScopes].sort());
+      if (
+        !areDeclaredResourceScopesAllowed(effectiveResourceScopes, options.allowedResourceScopes)
+      ) {
+        return { kind: 'refused', result: refusal('RESOURCE_NOT_ALLOWED') };
+      }
+      snapshot = createCanonicalJsonSnapshot(readRequiredProperty(resolutionValue, 'input'));
+      if (!isRecord(snapshot.value)) {
+        return { kind: 'refused', result: refusal('INVALID_RESOURCE_INPUT') };
+      }
+    } catch {
+      return { kind: 'refused', result: refusal('INVALID_RESOURCE_INPUT') };
+    }
+  }
+
   if (!isValidTimeout(capability.policy.timeoutMs)) {
     return { kind: 'refused', result: refusal('INVALID_POLICY') };
   }
@@ -523,7 +902,7 @@ function authorizeRequest(
       capability,
       input: snapshot.value,
       argumentsSha256: snapshot.sha256,
-      effectiveResourceScopes: Object.freeze([...capability.policy.resourceScopes])
+      effectiveResourceScopes
     })
   };
 }
@@ -641,12 +1020,16 @@ async function executeAuthorized(
     authorization.capability.policy.timeoutMs,
     context.signal,
     internalHooks.retain,
-    (signal) =>
-      invokeHandler(
-        authorization.capability,
-        authorization.input,
-        Object.freeze({ ...executionContext, signal })
-      )
+    (signal) => {
+      const contextWithSignal: CapabilityExecutionContext = Object.freeze({
+        ...executionContext,
+        signal,
+        ...(resourceResolvers.has(authorization.capability)
+          ? { effectiveResourceScopes: authorization.effectiveResourceScopes }
+          : {})
+      });
+      return invokeHandler(authorization.capability, authorization.input, contextWithSignal);
+    }
   );
 
   if (operation.kind === 'aborted-read') {

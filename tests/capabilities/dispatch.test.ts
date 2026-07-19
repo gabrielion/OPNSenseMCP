@@ -99,11 +99,15 @@ describe('opaque application dispatch', () => {
       'INVALID_INPUT',
       'INVALID_OUTPUT',
       'INVALID_POLICY',
+      'INVALID_RESOURCE_INPUT',
+      'OPERATION_NOT_AVAILABLE',
       'OUTCOME_INDETERMINATE',
       'READ_ONLY',
       'RESOURCE_NOT_ALLOWED',
       'TIMEOUT',
+      'TARGET_UNAVAILABLE',
       'UNKNOWN_CAPABILITY',
+      'UNKNOWN_RESOURCE',
       'UNSUPPORTED_TRANSPORT'
     ];
     for (const code of codes) {
