@@ -322,6 +322,45 @@ describe.each(MCP_ERAS)('$label one-shot confirmation [$continuationSurface]', (
 });
 
 describe('2026-only raw continuation security (the 2025 shim exposes neither requestState nor tool substitution)', () => {
+  it('consumes a valid continuation redirected to an unknown tool while preserving the fixed refusal', async () => {
+    const writeHandler = vi.fn();
+    const mutation = createNestedMutation(writeHandler);
+    const handler = createMcpHandler(
+      createServerFactory(
+        createApplicationContext(config(), new CapabilityCatalog([mutation])),
+        'http'
+      )
+    );
+    try {
+      const writeArguments = { change: { value: 'safe' } };
+      const state = requestStateFrom(
+        await rawModernCall(handler, 1, mutation.mcpName, writeArguments)
+      );
+      const redirected = await rawModernCall(
+        handler,
+        2,
+        'forged_cached_tool',
+        { ignored: 'safe' },
+        { requestState: state, inputResponses: acceptedResponse() }
+      );
+      const replay = await rawModernCall(handler, 3, mutation.mcpName, writeArguments, {
+        requestState: state,
+        inputResponses: acceptedResponse()
+      });
+
+      expect(redirected.result).toEqual({
+        resultType: 'complete',
+        isError: true,
+        content: [{ type: 'text', text: 'Capability is not available.' }],
+        structuredContent: { code: 'UNKNOWN_CAPABILITY' }
+      });
+      expect(handlerCallSucceeded(replay)).toBe(false);
+      expect(writeHandler).not.toHaveBeenCalled();
+    } finally {
+      await handler.close();
+    }
+  });
+
   it('consumes a confirmed write continuation sent to a non-eliciting read without executing either tool', async () => {
     const writeHandler = vi.fn();
     const readHandler = vi.fn();

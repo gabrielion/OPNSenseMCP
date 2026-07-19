@@ -128,12 +128,12 @@ export function registerCapabilities(
       name: wireRequest.params.name,
       arguments: wireRequest.params.arguments ?? {}
     };
-    let result: CallToolResult | InputRequiredResult;
+    let result: CallToolResult | InputRequiredResult | undefined;
     if (
-      entry !== undefined &&
-      (requestCarriesContinuation(mcpContext) || definitionUsesElicitation(entry.definition))
+      requestCarriesContinuation(mcpContext) ||
+      (entry !== undefined && definitionUsesElicitation(entry.definition))
     ) {
-      result = await handleConfirmationCall(
+      const confirmationResult = await handleConfirmationCall(
         server,
         application,
         request,
@@ -141,7 +141,9 @@ export function registerCapabilities(
         codec,
         mcpContext
       );
-    } else {
+      if (entry !== undefined) result = confirmationResult;
+    }
+    if (result === undefined) {
       const context: ServerContext = {
         application,
         transport,
