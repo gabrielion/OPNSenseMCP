@@ -53,9 +53,7 @@ describe.each(MCP_ERAS)('$label partial Product 1A Task 2 context budget', ({ co
         bytes: Buffer.byteLength(canonicalJson(tool), 'utf8')
       }));
       const totalBytes = Buffer.byteLength(canonicalJson(tools), 'utf8');
-      const largestTool = [...measurements].sort(
-        (left, right) => right.bytes - left.bytes || left.name.localeCompare(right.name)
-      )[0];
+      const largestTool = [...measurements].sort((left, right) => right.bytes - left.bytes)[0];
 
       expect(tools.map(({ name }) => name)).toEqual(['opn_describe', 'server_status']);
       expect(totalBytes).toBeLessThanOrEqual(TOTAL_LIMIT);

@@ -17,13 +17,49 @@ interface OperationContract {
   resources: {
     key: string;
     operations: {
+      name: string;
       effect?: string;
+      capabilityId: string;
+      command: { method: string; path: string };
+      transportStatus: string;
+      transportNote?: string;
       resourceScope?: string;
       evidence?: unknown;
       inputSchemaRef: string;
       outputSchemaRef: string;
     }[];
   }[];
+}
+
+type MutableSchema = Record<string, unknown>;
+
+const PRODUCT_1B_TRANSPORT_NOTE =
+  'The generated official table lists GET while the service-search example uses POST; Product 1B must observe and seal the OPNsense 26 transport.';
+
+function schema(contract: OperationContract, name: string): MutableSchema {
+  const value = contract.$defs[name];
+  expect(value).toBeDefined();
+  return value as MutableSchema;
+}
+
+function schemaProperties(value: MutableSchema): Record<string, MutableSchema> {
+  return value.properties as Record<string, MutableSchema>;
+}
+
+function schemaProperty(
+  contract: OperationContract,
+  schemaName: string,
+  propertyName: string
+): MutableSchema {
+  const value = schemaProperties(schema(contract, schemaName))[propertyName];
+  if (value === undefined) throw new Error(`Missing test schema property: ${propertyName}`);
+  return value;
+}
+
+function operationAt(contract: OperationContract, resourceIndex: number) {
+  const operation = contract.resources[resourceIndex]?.operations[0];
+  if (operation === undefined) throw new Error(`Missing test operation: ${String(resourceIndex)}`);
+  return operation;
 }
 
 function readContract(): OperationContract | undefined {
@@ -51,9 +87,39 @@ describe('two-resource operation contract', () => {
     expect(contract.resources.map(({ key }) => key)).toEqual(['core.services', 'system.status']);
     expect(
       contract.resources.flatMap(({ key, operations }) =>
-        operations.map(({ effect }) => `${key}:${effect ?? 'missing'}`)
+        operations.map((operation) => ({
+          key,
+          name: operation.name,
+          effect: operation.effect,
+          capabilityId: operation.capabilityId,
+          method: operation.command.method,
+          path: operation.command.path,
+          transportStatus: operation.transportStatus,
+          transportNote: operation.transportNote ?? null
+        }))
       )
-    ).toEqual(['core.services:read', 'system.status:read']);
+    ).toEqual([
+      {
+        key: 'core.services',
+        name: 'list',
+        effect: 'read',
+        capabilityId: 'opnsense.list',
+        method: 'POST',
+        path: '/api/core/service/search',
+        transportStatus: 'mock-candidate',
+        transportNote: PRODUCT_1B_TRANSPORT_NOTE
+      },
+      {
+        key: 'system.status',
+        name: 'get',
+        effect: 'read',
+        capabilityId: 'opnsense.get',
+        method: 'GET',
+        path: '/api/core/system/status',
+        transportStatus: 'documented',
+        transportNote: null
+      }
+    ]);
     expect(contract.sourceReferences).toEqual([
       'https://docs.opnsense.org/development/api.html',
       'https://docs.opnsense.org/development/api/core/core.html'
@@ -160,6 +226,149 @@ describe('two-resource operation contract', () => {
     if (contract === undefined) return;
 
     const directory = mkdtempSync(join(tmpdir(), 'opnsense-contract-'));
+    try {
+      mutate(contract);
+      const contractPath = join(directory, 'contract.json');
+      const outputPath = join(directory, 'descriptors.ts');
+      writeFileSync(contractPath, `${JSON.stringify(contract, null, 2)}\n`, 'utf8');
+      const result = runGenerator(['--contract', contractPath, '--output', outputPath]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe('Invalid operation contract.\n');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      label: 'nested local schema references',
+      mutate: (contract: OperationContract) => {
+        schemaProperties(schema(contract, 'systemStatusGetOutput')).item = {
+          $ref: '#/$defs/systemStatusGetInput'
+        };
+      }
+    },
+    {
+      label: 'unknown schema keywords',
+      mutate: (contract: OperationContract) => {
+        schema(contract, 'systemStatusGetOutput').title = 'status';
+      }
+    },
+    {
+      label: 'schema defaults',
+      mutate: (contract: OperationContract) => {
+        schemaProperty(contract, 'coreServicesListInput', 'query').default = '';
+      }
+    },
+    {
+      label: 'schema constants',
+      mutate: (contract: OperationContract) => {
+        schemaProperty(contract, 'systemStatusGetOutput', 'item').const = {};
+      }
+    },
+    {
+      label: 'schema examples',
+      mutate: (contract: OperationContract) => {
+        schemaProperty(contract, 'systemStatusGetOutput', 'item').examples = [{}];
+      }
+    },
+    {
+      label: 'open object schemas',
+      mutate: (contract: OperationContract) => {
+        schema(contract, 'coreServicesListInput').additionalProperties = true;
+      }
+    },
+    {
+      label: 'unbounded arrays',
+      mutate: (contract: OperationContract) => {
+        delete schemaProperty(contract, 'coreServicesListOutput', 'items').maxItems;
+      }
+    },
+    {
+      label: 'unbounded strings',
+      mutate: (contract: OperationContract) => {
+        delete schemaProperty(contract, 'coreServicesListInput', 'query').maxLength;
+      }
+    },
+    {
+      label: 'unbounded integers',
+      mutate: (contract: OperationContract) => {
+        delete schemaProperty(contract, 'coreServicesListInput', 'page').maximum;
+      }
+    },
+    ...['transportStatus', 'requestPath', 'httpMethod', 'credentialId', 'apiKey', 'apiSecret'].map(
+      (property) => ({
+        label: `sensitive schema property ${property}`,
+        mutate: (contract: OperationContract) => {
+          const input = schema(contract, 'coreServicesListInput');
+          schemaProperties(input)[property] = { type: 'string', minLength: 1, maxLength: 128 };
+          (input.required as string[]).push(property);
+        }
+      })
+    )
+  ])('rejects the closed public schema subset violation: $label', ({ mutate }) => {
+    const contract = readContract();
+    expect(contract).toBeDefined();
+    if (contract === undefined) return;
+
+    const directory = mkdtempSync(join(tmpdir(), 'opnsense-schema-contract-'));
+    try {
+      mutate(contract);
+      const contractPath = join(directory, 'contract.json');
+      const outputPath = join(directory, 'descriptors.ts');
+      writeFileSync(contractPath, `${JSON.stringify(contract, null, 2)}\n`, 'utf8');
+      const result = runGenerator(['--contract', contractPath, '--output', outputPath]);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toBe('Invalid operation contract.\n');
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      label: 'operation name',
+      mutate: (contract: OperationContract) => {
+        operationAt(contract, 0).name = 'get';
+      }
+    },
+    {
+      label: 'capability association',
+      mutate: (contract: OperationContract) => {
+        operationAt(contract, 0).capabilityId = 'opnsense.get';
+      }
+    },
+    {
+      label: 'method association',
+      mutate: (contract: OperationContract) => {
+        operationAt(contract, 0).command.method = 'GET';
+      }
+    },
+    {
+      label: 'path association',
+      mutate: (contract: OperationContract) => {
+        operationAt(contract, 0).command.path = '/api/core/system/status';
+      }
+    },
+    {
+      label: 'transport-status association',
+      mutate: (contract: OperationContract) => {
+        operationAt(contract, 0).transportStatus = 'documented';
+      }
+    },
+    {
+      label: 'Product 1B note association',
+      mutate: (contract: OperationContract) => {
+        delete operationAt(contract, 0).transportNote;
+        operationAt(contract, 1).transportNote = PRODUCT_1B_TRANSPORT_NOTE;
+      }
+    }
+  ])('rejects a swapped exact resource tuple: $label', ({ mutate }) => {
+    const contract = readContract();
+    expect(contract).toBeDefined();
+    if (contract === undefined) return;
+
+    const directory = mkdtempSync(join(tmpdir(), 'opnsense-tuple-contract-'));
     try {
       mutate(contract);
       const contractPath = join(directory, 'contract.json');

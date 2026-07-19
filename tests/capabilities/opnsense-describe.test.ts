@@ -36,6 +36,66 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+const CORE_SERVICES_LIST_INPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['page', 'pageSize', 'query'],
+  properties: {
+    page: { type: 'integer', minimum: 1, maximum: 1000 },
+    pageSize: { type: 'integer', minimum: 1, maximum: 100 },
+    query: { type: 'string', maxLength: 128 }
+  }
+} as const;
+
+const CORE_SERVICES_LIST_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['page', 'pageSize', 'total', 'items'],
+  properties: {
+    page: { type: 'integer', minimum: 1, maximum: 1000 },
+    pageSize: { type: 'integer', minimum: 1, maximum: 100 },
+    total: { type: 'integer', minimum: 0, maximum: 1_000_000 },
+    items: {
+      type: 'array',
+      maxItems: 100,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'name', 'description', 'status'],
+        properties: {
+          id: { type: 'string', minLength: 1, maxLength: 128 },
+          name: { type: 'string', minLength: 1, maxLength: 128 },
+          description: { type: 'string', maxLength: 512 },
+          status: { type: 'string', minLength: 1, maxLength: 64 }
+        }
+      }
+    }
+  }
+} as const;
+
+const SYSTEM_STATUS_GET_INPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: [],
+  properties: {}
+} as const;
+
+const SYSTEM_STATUS_GET_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['item'],
+  properties: {
+    item: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['status'],
+      properties: {
+        status: { type: 'string', minLength: 1, maxLength: 64 }
+      }
+    }
+  }
+} as const;
+
 describe('opn_describe', () => {
   it('uses a strict exactly-one-mode input contract', async () => {
     expect(getCapability('opn_describe')).toBeDefined();
@@ -94,56 +154,67 @@ describe('opn_describe', () => {
     });
   });
 
-  it('returns exact safe metadata with bounded schemas and reproducible digests', async () => {
+  it('returns exact safe metadata for both resources with effective-schema digests', async () => {
     expect(existsSync('src/operations/operation-contract.v1.json')).toBe(true);
     if (!existsSync('src/operations/operation-contract.v1.json')) return;
-    const contract = JSON.parse(
+    const contract: unknown = JSON.parse(
       readFileSync('src/operations/operation-contract.v1.json', 'utf8')
-    ) as {
-      $defs: Record<string, unknown>;
-    };
-    const result = await call({ resource: 'system.status' });
-    expect(result).toMatchObject({
-      kind: 'success',
-      output: {
-        mode: 'resource',
-        resource: {
-          key: 'system.status',
-          label: 'System status',
-          category: 'System',
-          description: 'Read the bounded health status reported by the OPNsense system API.',
-          requiredPlugin: null,
-          requiredFeatures: [],
-          operations: [
-            {
-              name: 'get',
-              effect: 'read',
-              inputSchema: contract.$defs.systemStatusGetInput,
-              outputSchema: contract.$defs.systemStatusGetOutput,
-              inputSchemaDigest: sha256Json(contract.$defs.systemStatusGetInput),
-              outputSchemaDigest: sha256Json(contract.$defs.systemStatusGetOutput)
-            }
-          ],
-          contractDigest: sha256Json(contract)
+    );
+    const contractDigest = sha256Json(contract);
+    const expected = [
+      {
+        key: 'core.services',
+        label: 'Services',
+        category: 'Core',
+        description: 'Review the bounded status summary for configured core services.',
+        operation: {
+          name: 'list',
+          effect: 'read',
+          inputSchema: CORE_SERVICES_LIST_INPUT_SCHEMA,
+          outputSchema: CORE_SERVICES_LIST_OUTPUT_SCHEMA,
+          inputSchemaDigest: sha256Json(CORE_SERVICES_LIST_INPUT_SCHEMA),
+          outputSchemaDigest: sha256Json(CORE_SERVICES_LIST_OUTPUT_SCHEMA)
+        }
+      },
+      {
+        key: 'system.status',
+        label: 'System status',
+        category: 'System',
+        description: 'Read the bounded health status reported by the OPNsense system API.',
+        operation: {
+          name: 'get',
+          effect: 'read',
+          inputSchema: SYSTEM_STATUS_GET_INPUT_SCHEMA,
+          outputSchema: SYSTEM_STATUS_GET_OUTPUT_SCHEMA,
+          inputSchemaDigest: sha256Json(SYSTEM_STATUS_GET_INPUT_SCHEMA),
+          outputSchemaDigest: sha256Json(SYSTEM_STATUS_GET_OUTPUT_SCHEMA)
         }
       }
-    });
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toMatch(/\/api\/|apiKey|apiSecret|credentials|"method"|"path"/u);
-    const output = result.kind === 'success' ? result.output : undefined;
-    const resource = output?.resource;
-    expect(isRecord(resource)).toBe(true);
-    if (!isRecord(resource)) return;
-    expect(Object.keys(resource)).toEqual([
-      'category',
-      'contractDigest',
-      'description',
-      'key',
-      'label',
-      'operations',
-      'requiredFeatures',
-      'requiredPlugin'
-    ]);
+    ] as const;
+
+    for (const resource of expected) {
+      const result = await call({ resource: resource.key });
+      expect(result).toEqual({
+        kind: 'success',
+        output: {
+          mode: 'resource',
+          resource: {
+            key: resource.key,
+            label: resource.label,
+            category: resource.category,
+            description: resource.description,
+            requiredPlugin: null,
+            requiredFeatures: [],
+            operations: [resource.operation],
+            contractDigest
+          }
+        }
+      });
+      const serialized = JSON.stringify(result);
+      expect(serialized).not.toMatch(/\/api\/|apiKey|apiSecret|credentials|"method"|"path"/u);
+      const output = result.kind === 'success' ? result.output : undefined;
+      expect(isRecord(output?.resource)).toBe(true);
+    }
   });
 
   it('does not resolve hidden or unknown exact names and never echoes the unknown input', async () => {

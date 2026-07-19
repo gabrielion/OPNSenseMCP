@@ -90,7 +90,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
         outputSchemaDigest: '42f50ba17d0278f50a20b8a24cace495648f6164785e226597f9f83d7c36ab86'
       }
     ],
-    contractDigest: '8b5fe065339cc38c8273176747e8a87e4a30a1c3fdc95c3a1d80f29cabcd3c69',
+    contractDigest: '8b63e403641036cd1cec37f3219509098764e556d9f03b385a650b5d9d2d845a',
     runtime: {
       module: 'core',
       controller: 'service',
@@ -215,7 +215,8 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
         inputSchema: {
           type: 'object',
           additionalProperties: false,
-          maxProperties: 0
+          required: [],
+          properties: {}
         },
         outputSchema: {
           type: 'object',
@@ -236,11 +237,11 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
             }
           }
         },
-        inputSchemaDigest: '38eda73750648c5b0fa57556fb953e33cafdb6e1e7ed481d3033cd729ba8cda8',
+        inputSchemaDigest: 'd746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f',
         outputSchemaDigest: '11e1bc49417ca3079e04578cc82bb0a52b44dda433c678e444817591b8e7651f'
       }
     ],
-    contractDigest: '8b5fe065339cc38c8273176747e8a87e4a30a1c3fdc95c3a1d80f29cabcd3c69',
+    contractDigest: '8b63e403641036cd1cec37f3219509098764e556d9f03b385a650b5d9d2d845a',
     runtime: {
       module: 'core',
       controller: 'system',
@@ -262,7 +263,8 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
           inputSchema: {
             type: 'object',
             additionalProperties: false,
-            maxProperties: 0
+            required: [],
+            properties: {}
           },
           outputSchema: {
             type: 'object',
@@ -283,7 +285,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
               }
             }
           },
-          inputSchemaDigest: '38eda73750648c5b0fa57556fb953e33cafdb6e1e7ed481d3033cd729ba8cda8',
+          inputSchemaDigest: 'd746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f',
           outputSchemaDigest: '11e1bc49417ca3079e04578cc82bb0a52b44dda433c678e444817591b8e7651f',
           resourceScope: 'system.status',
           capabilityId: 'opnsense.get',
@@ -305,4 +307,4 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
 ] as const;
 
 export const GENERATED_OPERATION_CONTRACT_DIGEST =
-  '8b5fe065339cc38c8273176747e8a87e4a30a1c3fdc95c3a1d80f29cabcd3c69';
+  '8b63e403641036cd1cec37f3219509098764e556d9f03b385a650b5d9d2d845a';

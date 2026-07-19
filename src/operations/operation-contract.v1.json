@@ -45,7 +45,8 @@
     "systemStatusGetInput": {
       "type": "object",
       "additionalProperties": false,
-      "maxProperties": 0
+      "required": [],
+      "properties": {}
     },
     "systemStatusGetOutput": {
       "type": "object",
