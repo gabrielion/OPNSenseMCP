@@ -23,7 +23,9 @@ export function createOwnedApplicationRuntime(
     try {
       applicationDrain = closeApplicationContext(application);
     } catch (error) {
-      applicationDrain = Promise.reject(error);
+      applicationDrain = Promise.reject(
+        error instanceof Error ? error : new Error('Application cleanup failed')
+      );
     }
     return applicationDrain;
   };

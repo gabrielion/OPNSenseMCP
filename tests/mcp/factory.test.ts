@@ -215,10 +215,8 @@ describe.each(MCP_ERAS)('$label MCP server factory', ({ connect }) => {
     );
     try {
       const listed = await connection.client.listTools();
-      expect(listed.tools[0]?.inputSchema).toMatchObject({
-        type: 'object',
-        oneOf: expect.any(Array)
-      });
+      expect(listed.tools[0]?.inputSchema).toMatchObject({ type: 'object' });
+      expect(Array.isArray(listed.tools[0]?.inputSchema.oneOf)).toBe(true);
 
       const result = await connection.client.callTool({
         name: unionInput.mcpName,
@@ -266,10 +264,8 @@ describe.each(MCP_ERAS)('$label MCP server factory', ({ connect }) => {
     );
     try {
       const listed = await connection.client.listTools();
-      expect(listed.tools[0]?.outputSchema).toMatchObject({
-        type: 'object',
-        anyOf: expect.any(Array)
-      });
+      expect(listed.tools[0]?.outputSchema).toMatchObject({ type: 'object' });
+      expect(Array.isArray(listed.tools[0]?.outputSchema?.anyOf)).toBe(true);
 
       const result = await connection.client.callTool({
         name: unionOutput.mcpName,
