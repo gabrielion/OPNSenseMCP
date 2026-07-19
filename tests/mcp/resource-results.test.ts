@@ -25,31 +25,89 @@ describe('bounded resource refusal results', () => {
       message: 'OPNsense target is unavailable.',
       details: { resource: 'resource.alpha', operation: 'get' }
     }
-  ])('projects fixed $code messages and typed safe details', ({ code, message, details }) => {
-    const result = formatCapabilityResult({
-      kind: 'refused',
-      code,
-      message: 'SENTINEL_UNTRUSTED_MESSAGE',
-      details: details as ResourceRefusalDetails
-    });
+  ])(
+    'drops direct hand-built $code details even when they look safe',
+    ({ code, message, details }) => {
+      const result = formatCapabilityResult({
+        kind: 'refused',
+        code,
+        message: 'SENTINEL_UNTRUSTED_MESSAGE',
+        details: details as ResourceRefusalDetails
+      });
 
-    expect(result).toEqual({
-      isError: true,
-      content: [{ type: 'text', text: message }],
-      structuredContent: { code, details }
-    });
-    expect(JSON.stringify(result)).not.toContain('SENTINEL');
-  });
+      expect(result).toEqual({
+        isError: true,
+        content: [{ type: 'text', text: message }],
+        structuredContent: { code }
+      });
+      expect(JSON.stringify(result)).not.toContain('SENTINEL');
+    }
+  );
 
-  it('drops malformed detail values instead of reflecting them', () => {
+  it.each([
+    {
+      label: 'suggestion',
+      code: 'UNKNOWN_RESOURCE' as const,
+      details: { suggestions: ['SENTINEL_SECRET_VALUE'] }
+    },
+    {
+      label: 'operation availability resource',
+      code: 'OPERATION_NOT_AVAILABLE' as const,
+      details: { resource: 'SENTINEL_SECRET_VALUE', availableOperations: ['get'] }
+    },
+    {
+      label: 'available operation',
+      code: 'OPERATION_NOT_AVAILABLE' as const,
+      details: { resource: 'resource.alpha', availableOperations: ['SENTINEL_SECRET_VALUE'] }
+    },
+    {
+      label: 'invalid-input resource',
+      code: 'INVALID_RESOURCE_INPUT' as const,
+      details: {
+        resource: 'SENTINEL_SECRET_VALUE',
+        operation: 'get',
+        fields: ['query']
+      }
+    },
+    {
+      label: 'invalid-input operation',
+      code: 'INVALID_RESOURCE_INPUT' as const,
+      details: {
+        resource: 'resource.alpha',
+        operation: 'SENTINEL_SECRET_VALUE',
+        fields: ['query']
+      }
+    },
+    {
+      label: 'invalid-input field',
+      code: 'INVALID_RESOURCE_INPUT' as const,
+      details: {
+        resource: 'resource.alpha',
+        operation: 'get',
+        fields: ['SENTINEL_SECRET_VALUE']
+      }
+    },
+    {
+      label: 'target resource',
+      code: 'TARGET_UNAVAILABLE' as const,
+      details: { resource: 'SENTINEL_SECRET_VALUE', operation: 'get' }
+    },
+    {
+      label: 'target operation',
+      code: 'TARGET_UNAVAILABLE' as const,
+      details: { resource: 'resource.alpha', operation: 'SENTINEL_SECRET_VALUE' }
+    }
+  ])('drops an unsealed identifier-shaped sentinel in the $label detail', ({ code, details }) => {
     const malformed = {
       kind: 'refused',
-      code: 'UNKNOWN_RESOURCE',
+      code,
       message: 'SENTINEL_MESSAGE',
-      details: { suggestions: ['resource.alpha', 'SENTINEL SECRET VALUE'] }
+      details
     } as CapabilityResult;
 
-    expect(formatCapabilityResult(malformed)).toEqual(refusalResult('UNKNOWN_RESOURCE'));
-    expect(JSON.stringify(formatCapabilityResult(malformed))).not.toContain('SENTINEL');
+    expect(formatCapabilityResult(malformed)).toEqual(refusalResult(code));
+    expect(JSON.stringify(formatCapabilityResult(malformed))).not.toContain(
+      'SENTINEL_SECRET_VALUE'
+    );
   });
 });

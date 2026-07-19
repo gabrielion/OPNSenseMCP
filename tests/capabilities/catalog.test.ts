@@ -136,6 +136,7 @@ describe('CapabilityCatalog', () => {
       annotations: { readOnlyHint: true },
       transports: ['stdio'],
       selectableResourceScopes: ['resource.alpha', 'resource.beta'],
+      refusalDetailVocabulary: { operations: [], fields: [] },
       resolver: (input, { visibleResourceScopes }) => ({
         kind: 'resolved',
         input,

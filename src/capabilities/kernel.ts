@@ -21,6 +21,8 @@ import type {
   RefusalCode,
   ResourceCapabilityExecutionContext,
   ResourceRefusal,
+  ResourceRefusalCode,
+  ResourceRefusalDetailByCode,
   ResourceRefusalDetails,
   ResourceResolution,
   ResourceResolutionContext,
@@ -65,6 +67,7 @@ const RESOURCE_CAPABILITY_DEFINITION_KEYS = Object.freeze([
   'transports',
   'policy',
   'selectableResourceScopes',
+  'refusalDetailVocabulary',
   'resolver',
   'handler'
 ]);
@@ -88,6 +91,7 @@ const TOOL_ANNOTATION_KEYS = Object.freeze([
   'idempotentHint',
   'openWorldHint'
 ]);
+const RESOURCE_REFUSAL_DETAIL_VOCABULARY_KEYS = Object.freeze(['operations', 'fields']);
 
 const REFUSAL_MESSAGES: Readonly<Record<RefusalCode, string>> = Object.freeze({
   CANCELLED: 'Capability execution was cancelled.',
@@ -124,6 +128,15 @@ type ResourceResolver = (
 ) => ResourceResolution<Record<string, unknown>>;
 const resourceResolvers = new WeakMap<CapabilityDefinition, ResourceResolver>();
 const resourceSelectableScopes = new WeakMap<CapabilityDefinition, readonly string[]>();
+interface SealedResourceRefusalDetailVocabulary {
+  readonly operations: ReadonlySet<string>;
+  readonly fields: ReadonlySet<string>;
+}
+const resourceRefusalDetailVocabularies = new WeakMap<
+  CapabilityDefinition,
+  SealedResourceRefusalDetailVocabulary
+>();
+const sealedResourceRefusalDetails = new WeakMap<object, ResourceRefusalCode>();
 
 export interface TypedCapabilityDefinition<
   TInput extends Record<string, unknown>,
@@ -155,6 +168,10 @@ export interface TypedResourceCapabilityDefinition<
   readonly annotations: ToolAnnotations;
   readonly transports: readonly TransportKind[];
   readonly selectableResourceScopes: readonly string[];
+  readonly refusalDetailVocabulary: {
+    readonly operations: readonly string[];
+    readonly fields: readonly string[];
+  };
   readonly policy: Omit<CapabilityPolicy, 'resourceScopes'>;
   readonly resolver: (
     input: TParsedInput,
@@ -275,15 +292,39 @@ function isPublicDetailName(value: unknown): value is string {
 function readSafeDetailNames(
   value: unknown,
   maximumLength: number,
-  allowed?: ReadonlySet<string>
+  allowed: ReadonlySet<string>
 ): readonly string[] {
   const names = copyDenseArray(value, isPublicDetailName);
   if (names.length > maximumLength) throw new Error('Invalid resource refusal details');
   const unique = [...new Set(names)].sort();
-  if (allowed !== undefined && unique.some((name) => !allowed.has(name))) {
+  if (unique.some((name) => !allowed.has(name))) {
     throw new Error('Invalid resource refusal details');
   }
   return Object.freeze(unique);
+}
+
+function readReviewedDetailName(value: unknown, allowed: ReadonlySet<string>): string {
+  if (!isPublicDetailName(value) || !allowed.has(value)) {
+    throw new Error('Invalid resource refusal details');
+  }
+  return value;
+}
+
+function sealResourceRefusalDetails<TCode extends ResourceRefusalCode>(
+  code: TCode,
+  details: ResourceRefusalDetailByCode[TCode]
+): ResourceRefusalDetailByCode[TCode] {
+  sealedResourceRefusalDetails.set(details, code);
+  return details;
+}
+
+export function projectSealedResourceRefusalDetails(
+  code: RefusalCode,
+  details: ResourceRefusalDetails | undefined
+): ResourceRefusalDetails | undefined {
+  return details !== undefined && sealedResourceRefusalDetails.get(details) === code
+    ? details
+    : undefined;
 }
 
 function readSafeSuggestions(value: unknown, visible: ReadonlySet<string>): readonly string[] {
@@ -308,7 +349,8 @@ function readVisibleResourceName(value: unknown, visible: ReadonlySet<string>): 
 
 function readResourceRefusal(
   value: unknown,
-  visibleResourceScopes: readonly string[]
+  visibleResourceScopes: readonly string[],
+  vocabulary: SealedResourceRefusalDetailVocabulary
 ): ResourceRefusal {
   const refusalValue = readPlainOwnDataProperties(value, ['kind', 'code', 'details'], true);
   if (readRequiredProperty(refusalValue, 'kind') !== 'refused') {
@@ -322,9 +364,12 @@ function readResourceRefusal(
     const details = readPlainOwnDataProperties(detailsValue, ['suggestions'], true);
     return Object.freeze({
       code,
-      details: Object.freeze({
-        suggestions: readSafeSuggestions(readRequiredProperty(details, 'suggestions'), visible)
-      })
+      details: sealResourceRefusalDetails(
+        code,
+        Object.freeze({
+          suggestions: readSafeSuggestions(readRequiredProperty(details, 'suggestions'), visible)
+        })
+      )
     });
   }
   if (code === 'OPERATION_NOT_AVAILABLE') {
@@ -335,13 +380,17 @@ function readResourceRefusal(
     );
     return Object.freeze({
       code,
-      details: Object.freeze({
-        resource: readVisibleResourceName(readRequiredProperty(details, 'resource'), visible),
-        availableOperations: readSafeDetailNames(
-          readRequiredProperty(details, 'availableOperations'),
-          MAX_RESOURCE_DETAIL_ARRAY_LENGTH
-        )
-      })
+      details: sealResourceRefusalDetails(
+        code,
+        Object.freeze({
+          resource: readVisibleResourceName(readRequiredProperty(details, 'resource'), visible),
+          availableOperations: readSafeDetailNames(
+            readRequiredProperty(details, 'availableOperations'),
+            MAX_RESOURCE_DETAIL_ARRAY_LENGTH,
+            vocabulary.operations
+          )
+        })
+      )
     });
   }
   if (code === 'INVALID_RESOURCE_INPUT') {
@@ -350,30 +399,39 @@ function readResourceRefusal(
       ['resource', 'operation', 'fields'],
       true
     );
-    const operation = readRequiredProperty(details, 'operation');
-    if (!isPublicDetailName(operation)) throw new Error('Invalid resource refusal details');
     return Object.freeze({
       code,
-      details: Object.freeze({
-        resource: readVisibleResourceName(readRequiredProperty(details, 'resource'), visible),
-        operation,
-        fields: readSafeDetailNames(
-          readRequiredProperty(details, 'fields'),
-          MAX_RESOURCE_DETAIL_ARRAY_LENGTH
-        )
-      })
+      details: sealResourceRefusalDetails(
+        code,
+        Object.freeze({
+          resource: readVisibleResourceName(readRequiredProperty(details, 'resource'), visible),
+          operation: readReviewedDetailName(
+            readRequiredProperty(details, 'operation'),
+            vocabulary.operations
+          ),
+          fields: readSafeDetailNames(
+            readRequiredProperty(details, 'fields'),
+            MAX_RESOURCE_DETAIL_ARRAY_LENGTH,
+            vocabulary.fields
+          )
+        })
+      )
     });
   }
   if (code === 'TARGET_UNAVAILABLE') {
     const details = readPlainOwnDataProperties(detailsValue, ['resource', 'operation'], true);
-    const operation = readRequiredProperty(details, 'operation');
-    if (!isPublicDetailName(operation)) throw new Error('Invalid resource refusal details');
     return Object.freeze({
       code,
-      details: Object.freeze({
-        resource: readVisibleResourceName(readRequiredProperty(details, 'resource'), visible),
-        operation
-      })
+      details: sealResourceRefusalDetails(
+        code,
+        Object.freeze({
+          resource: readVisibleResourceName(readRequiredProperty(details, 'resource'), visible),
+          operation: readReviewedDetailName(
+            readRequiredProperty(details, 'operation'),
+            vocabulary.operations
+          )
+        })
+      )
     });
   }
   throw new Error('Invalid resource refusal');
@@ -652,6 +710,26 @@ export function defineResourceCapability<
     ) {
       return invalidCapabilityDefinition();
     }
+    const vocabularySource = readPlainOwnDataProperties(
+      readRequiredProperty(source, 'refusalDetailVocabulary'),
+      RESOURCE_REFUSAL_DETAIL_VOCABULARY_KEYS,
+      true
+    );
+    const operations = copyDenseArray(
+      readRequiredProperty(vocabularySource, 'operations'),
+      isPublicDetailName
+    );
+    const fields = copyDenseArray(
+      readRequiredProperty(vocabularySource, 'fields'),
+      isPublicDetailName
+    );
+    if (new Set(operations).size !== operations.length || new Set(fields).size !== fields.length) {
+      return invalidCapabilityDefinition();
+    }
+    const refusalDetailVocabulary: SealedResourceRefusalDetailVocabulary = Object.freeze({
+      operations: new Set(operations),
+      fields: new Set(fields)
+    });
     const resolverValue = readRequiredProperty(source, 'resolver');
     const handlerValue = readRequiredProperty(source, 'handler');
     if (
@@ -709,6 +787,7 @@ export function defineResourceCapability<
     });
     resourceResolvers.set(capability, (input, context) => resolver(input as TParsedInput, context));
     resourceSelectableScopes.set(capability, selectableResourceScopes);
+    resourceRefusalDetailVocabularies.set(capability, refusalDetailVocabulary);
     return capability;
   } catch {
     return invalidCapabilityDefinition();
@@ -767,7 +846,11 @@ function authorizeRequest(
     }
     const selectable = resourceSelectableScopes.get(capability);
     const resolver = resourceResolvers.get(capability);
-    if ((selectable === undefined) !== (resolver === undefined)) {
+    const detailVocabulary = resourceRefusalDetailVocabularies.get(capability);
+    if (
+      (selectable === undefined) !== (resolver === undefined) ||
+      (selectable === undefined) !== (detailVocabulary === undefined)
+    ) {
       return { kind: 'refused', result: refusal('INVALID_POLICY') };
     }
     if (selectable === undefined) {
@@ -819,7 +902,8 @@ function authorizeRequest(
   ]);
   if (visibleResourceScopes !== undefined) {
     const resolver = resourceResolvers.get(capability);
-    if (resolver === undefined) {
+    const detailVocabulary = resourceRefusalDetailVocabularies.get(capability);
+    if (resolver === undefined || detailVocabulary === undefined) {
       return { kind: 'refused', result: refusal('INVALID_POLICY') };
     }
     let resolution: ResourceResolution<Record<string, unknown>>;
@@ -849,7 +933,7 @@ function authorizeRequest(
         return { kind: 'refused', result: refusal('INVALID_RESOURCE_INPUT') };
       }
       try {
-        const safe = readResourceRefusal(resolution, visibleResourceScopes);
+        const safe = readResourceRefusal(resolution, visibleResourceScopes, detailVocabulary);
         return { kind: 'refused', result: refusal(safe.code, safe.details) };
       } catch {
         return { kind: 'refused', result: refusal('INVALID_RESOURCE_INPUT') };

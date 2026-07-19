@@ -13,6 +13,7 @@ import type {
   ResourceCapabilityExecutionContext,
   ResourceResolution
 } from '../../src/capabilities/types.js';
+import { formatCapabilityResult } from '../../src/mcp/results.js';
 
 interface ParsedInput extends Record<string, unknown> {
   readonly resource: string;
@@ -31,6 +32,10 @@ interface Output extends Record<string, unknown> {
 
 interface FixtureOptions {
   readonly selectableResourceScopes?: readonly string[];
+  readonly refusalDetailVocabulary?: {
+    readonly operations: readonly string[];
+    readonly fields: readonly string[];
+  };
   readonly inputSchema?: z.ZodType<ParsedInput>;
   readonly resolver?: (
     input: ParsedInput,
@@ -65,6 +70,10 @@ function resourceDefinition(
       'resource.alpha',
       'resource.beta'
     ],
+    refusalDetailVocabulary: options.refusalDetailVocabulary ?? {
+      operations: ['get', 'list'],
+      fields: ['page', 'query']
+    },
     resolver:
       options.resolver ??
       ((input, { visibleResourceScopes }) =>
@@ -108,6 +117,29 @@ describe('closed generic-resource authorization', () => {
   ])('rejects $label at trusted definition time', ({ scopes }) => {
     expect(() =>
       defineResourceCapability(resourceDefinition({ selectableResourceScopes: scopes }))
+    ).toThrow(/^Invalid capability definition$/);
+  });
+
+  it.each([
+    {
+      label: 'duplicate operation vocabulary',
+      vocabulary: { operations: ['get', 'get'], fields: ['query'] }
+    },
+    {
+      label: 'unsafe operation vocabulary',
+      vocabulary: { operations: ['SENTINEL SECRET VALUE'], fields: ['query'] }
+    },
+    {
+      label: 'duplicate field vocabulary',
+      vocabulary: { operations: ['get'], fields: ['query', 'query'] }
+    },
+    {
+      label: 'unsafe field vocabulary',
+      vocabulary: { operations: ['get'], fields: ['SENTINEL SECRET VALUE'] }
+    }
+  ])('rejects $label at trusted definition time', ({ vocabulary }) => {
+    expect(() =>
+      defineResourceCapability(resourceDefinition({ refusalDetailVocabulary: vocabulary }))
     ).toThrow(/^Invalid capability definition$/);
   });
 
@@ -301,16 +333,31 @@ describe('closed generic-resource authorization', () => {
     expect(handler).not.toHaveBeenCalled();
   });
 
-  it('captures resolver, handler, and selectable scopes without exposing their authority', async () => {
-    const originalResolver = vi.fn(resourceDefinition().resolver);
+  it('captures resolver, handler, selectable scopes, and detail vocabulary without exposing their authority', async () => {
+    const originalResolver = vi.fn((input: ParsedInput) =>
+      input.resource === 'resource.alpha'
+        ? {
+            kind: 'resolved' as const,
+            input,
+            effectiveResourceScopes: [input.resource]
+          }
+        : {
+            kind: 'refused' as const,
+            code: 'INVALID_RESOURCE_INPUT' as const,
+            details: { resource: 'resource.beta', operation: 'get', fields: ['query'] }
+          }
+    );
     const replacementResolver = vi.fn(() => {
       throw new Error('SENTINEL_REPLACEMENT');
     });
     const originalHandler = vi.fn(({ resource }: ResolvedInput) => Promise.resolve({ resource }));
     const replacementHandler = vi.fn(() => Promise.resolve({ resource: 'unsafe' }));
     const selectableResourceScopes = ['resource.alpha', 'resource.beta'];
+    const operations = ['get', 'list'];
+    const fields = ['page', 'query'];
     const source = resourceDefinition({
       selectableResourceScopes,
+      refusalDetailVocabulary: { operations, fields },
       resolver: originalResolver,
       handler: originalHandler
     });
@@ -319,6 +366,8 @@ describe('closed generic-resource authorization', () => {
     Reflect.set(source, 'resolver', replacementResolver);
     Reflect.set(source, 'handler', replacementHandler);
     selectableResourceScopes.splice(0, selectableResourceScopes.length, 'resource.hidden');
+    operations.splice(0, operations.length, 'SENTINEL_SECRET_VALUE');
+    fields.splice(0, fields.length, 'SENTINEL_SECRET_VALUE');
 
     const result = await dispatcherFor(capability, {
       allowedResourceScopes: new Set(['resource.alpha'])
@@ -326,9 +375,20 @@ describe('closed generic-resource authorization', () => {
       { name: capability.mcpName, arguments: { resource: 'resource.alpha' } },
       { transport: 'stdio' }
     );
+    const reviewedDetailsResult = await dispatcherFor(capability, {
+      allowedResourceScopes: new Set(['resource.beta'])
+    }).dispatch(
+      { name: capability.mcpName, arguments: { resource: 'resource.beta' } },
+      { transport: 'stdio' }
+    );
 
     expect(result).toEqual({ kind: 'success', output: { resource: 'resource.alpha' } });
-    expect(originalResolver).toHaveBeenCalledOnce();
+    expect(reviewedDetailsResult).toMatchObject({
+      kind: 'refused',
+      code: 'INVALID_RESOURCE_INPUT',
+      details: { resource: 'resource.beta', operation: 'get', fields: ['query'] }
+    });
+    expect(originalResolver).toHaveBeenCalledTimes(2);
     expect(replacementResolver).not.toHaveBeenCalled();
     expect(originalHandler).toHaveBeenCalledOnce();
     expect(replacementHandler).not.toHaveBeenCalled();
@@ -348,6 +408,7 @@ describe('closed generic-resource authorization', () => {
     expect(capability.policy.resourceScopes).toEqual(['resource.alpha', 'resource.beta']);
     expect(Reflect.has(capability, 'resolver')).toBe(false);
     expect(Reflect.has(capability, 'selectableResourceScopes')).toBe(false);
+    expect(Reflect.has(capability, 'refusalDetailVocabulary')).toBe(false);
   });
 
   it.each([
@@ -373,12 +434,117 @@ describe('closed generic-resource authorization', () => {
       })
     );
 
-    await expect(
-      dispatcherFor(capability).dispatch(
-        { name: capability.mcpName, arguments: { resource: 'resource.alpha' } },
-        { transport: 'stdio' }
-      )
-    ).resolves.toMatchObject({ kind: 'refused', code, details: expected });
+    const result = await dispatcherFor(capability).dispatch(
+      { name: capability.mcpName, arguments: { resource: 'resource.alpha' } },
+      { transport: 'stdio' }
+    );
+
+    expect(result).toMatchObject({ kind: 'refused', code, details: expected });
+    expect(formatCapabilityResult(result).structuredContent).toEqual({ code, details: expected });
+  });
+
+  it.each([
+    {
+      label: 'operation availability resource',
+      code: 'OPERATION_NOT_AVAILABLE' as const,
+      details: {
+        resource: 'SENTINEL_SECRET_VALUE',
+        availableOperations: ['get']
+      }
+    },
+    {
+      label: 'available operation',
+      code: 'OPERATION_NOT_AVAILABLE' as const,
+      details: {
+        resource: 'resource.alpha',
+        availableOperations: ['SENTINEL_SECRET_VALUE']
+      }
+    },
+    {
+      label: 'invalid-input resource',
+      code: 'INVALID_RESOURCE_INPUT' as const,
+      details: {
+        resource: 'SENTINEL_SECRET_VALUE',
+        operation: 'get',
+        fields: ['query']
+      }
+    },
+    {
+      label: 'invalid-input operation',
+      code: 'INVALID_RESOURCE_INPUT' as const,
+      details: {
+        resource: 'resource.alpha',
+        operation: 'SENTINEL_SECRET_VALUE',
+        fields: ['query']
+      }
+    },
+    {
+      label: 'invalid-input field',
+      code: 'INVALID_RESOURCE_INPUT' as const,
+      details: {
+        resource: 'resource.alpha',
+        operation: 'get',
+        fields: ['SENTINEL_SECRET_VALUE']
+      }
+    },
+    {
+      label: 'target resource',
+      code: 'TARGET_UNAVAILABLE' as const,
+      details: {
+        resource: 'SENTINEL_SECRET_VALUE',
+        operation: 'get'
+      }
+    },
+    {
+      label: 'target operation',
+      code: 'TARGET_UNAVAILABLE' as const,
+      details: {
+        resource: 'resource.alpha',
+        operation: 'SENTINEL_SECRET_VALUE'
+      }
+    }
+  ])('rejects an identifier-shaped sentinel in the $label detail', async ({ code, details }) => {
+    const capability = defineResourceCapability(
+      resourceDefinition({
+        resolver: () => ({ kind: 'refused', code, details }) as ResourceResolution<ResolvedInput>
+      })
+    );
+
+    const result = await dispatcherFor(capability).dispatch(
+      { name: capability.mcpName, arguments: { resource: 'resource.alpha' } },
+      { transport: 'stdio' }
+    );
+
+    expect(result).toEqual({
+      kind: 'refused',
+      code: 'INVALID_RESOURCE_INPUT',
+      message: 'Resource input is invalid.'
+    });
+    expect(JSON.stringify(formatCapabilityResult(result))).not.toContain('SENTINEL_SECRET_VALUE');
+  });
+
+  it('filters identifier-shaped unknown-resource suggestions to visible selectable scopes', async () => {
+    const capability = defineResourceCapability(
+      resourceDefinition({
+        resolver: () => ({
+          kind: 'refused',
+          code: 'UNKNOWN_RESOURCE',
+          details: { suggestions: ['SENTINEL_SECRET_VALUE'] }
+        })
+      })
+    );
+
+    const result = await dispatcherFor(capability).dispatch(
+      { name: capability.mcpName, arguments: { resource: 'resource.alpha' } },
+      { transport: 'stdio' }
+    );
+
+    expect(result).toMatchObject({
+      kind: 'refused',
+      code: 'UNKNOWN_RESOURCE',
+      details: { suggestions: [] }
+    });
+    expect(JSON.stringify(formatCapabilityResult(result))).not.toContain('SENTINEL_SECRET_VALUE');
   });
 
   it('sanitizes malformed resolver results without reflecting rejected values or exceptions', async () => {
