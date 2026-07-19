@@ -46,20 +46,21 @@ function deferred() {
 }
 
 describe('default application composition seam', () => {
-  it('constructs the replaceable Foundation runtime with only server_status', async () => {
+  it('constructs the replaceable partial Task 2 runtime', async () => {
     const runtime = createDefaultApplicationRuntime();
     const connection = await connectLegacy(runtime.application);
     try {
       expect(
         listApplicationCapabilities(runtime.application, 'stdio').map(({ mcpName }) => mcpName)
-      ).toEqual(['server_status']);
+      ).toEqual(['server_status', 'opn_describe']);
       expect(
         listApplicationCapabilities(runtime.application, 'http').map(({ mcpName }) => mcpName)
-      ).toEqual(['server_status']);
+      ).toEqual(['server_status', 'opn_describe']);
       expect(Object.getOwnPropertyNames(runtime)).toEqual(['application', 'close']);
       expect(Object.isFrozen(runtime)).toBe(true);
       expect((await connection.client.listTools()).tools.map(({ name }) => name)).toEqual([
-        'server_status'
+        'server_status',
+        'opn_describe'
       ]);
     } finally {
       await connection.close();

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { CapabilityDefinition, ExposureContext } from './types.js';
 import { serverStatusCapability } from './foundation/server-status.js';
+import { opnDescribeCapability } from './opnsense/describe.js';
 import { hasVisibleResourceScopes, isKernelDefinedCapability } from './kernel.js';
 
 function isExposed(capability: CapabilityDefinition, context: ExposureContext): boolean {
@@ -53,7 +54,10 @@ export class CapabilityCatalog {
   }
 }
 
-export const CAPABILITY_CATALOG = new CapabilityCatalog([serverStatusCapability]);
+export const CAPABILITY_CATALOG = new CapabilityCatalog([
+  serverStatusCapability,
+  opnDescribeCapability
+]);
 
 export function getCapability(name: string): CapabilityDefinition | undefined {
   return CAPABILITY_CATALOG.getByMcpName(name);

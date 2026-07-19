@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { canonicalJson, sha256Json } from '../../src/security/canonical-json.js';
 
 describe('canonical JSON', () => {
-  it('sorts object keys recursively with JavaScript UTF-16 relational order', () => {
+  it('sorts object keys recursively by Unicode code point', () => {
     const value = Object.assign(Object.create(null) as Record<string, unknown>, {
       '\uE000': 'bmp',
       '😀': 'astral',
@@ -13,7 +13,7 @@ describe('canonical JSON', () => {
     });
 
     expect(canonicalJson(value)).toBe(
-      '{"10":"ten","2":"two","nested":{"a":false,"z":true},"😀":"astral","":"bmp"}'
+      '{"10":"ten","2":"two","nested":{"a":false,"z":true},"":"bmp","😀":"astral"}'
     );
   });
 

@@ -194,11 +194,13 @@ describe('CapabilityCatalog', () => {
     expect(areDeclaredResourceScopesAllowed(['one', 'two'], new Set(['one']))).toBe(false);
   });
 
-  it('ships only the read-only server status capability', () => {
+  it('ships the partial Task 2 read-only discovery surface', () => {
     expect(CAPABILITY_CATALOG.all.map((capability) => capability.mcpName)).toEqual([
-      'server_status'
+      'server_status',
+      'opn_describe'
     ]);
     expect(getCapability('server_status')?.policy.effect).toBe('read');
+    expect(getCapability('opn_describe')?.policy.effect).toBe('read');
     expect(getCapability('missing')).toBeUndefined();
   });
 });

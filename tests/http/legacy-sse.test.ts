@@ -293,7 +293,10 @@ describe('isolated legacy SSE compatibility', () => {
     const client = new Client({ name: 'beta', version: '0.1.0' }, { capabilities: {} });
     connections.add(() => Promise.allSettled([client.close(), transport.close()]));
     await client.connect(transport);
-    expect((await client.listTools()).tools.map(({ name }) => name)).toEqual(['server_status']);
+    expect((await client.listTools()).tools.map(({ name }) => name)).toEqual([
+      'server_status',
+      'opn_describe'
+    ]);
   });
 
   it('serves the isolated v1 client while retaining /mcp', async () => {
@@ -316,8 +319,14 @@ describe('isolated legacy SSE compatibility', () => {
     connections.add(() => Promise.allSettled([betaClient.close(), betaTransport.close()]));
     await client.connect(transport);
     await betaClient.connect(betaTransport);
-    expect((await client.listTools()).tools.map(({ name }) => name)).toEqual(['server_status']);
-    expect((await betaClient.listTools()).tools.map(({ name }) => name)).toEqual(['server_status']);
+    expect((await client.listTools()).tools.map(({ name }) => name)).toEqual([
+      'server_status',
+      'opn_describe'
+    ]);
+    expect((await betaClient.listTools()).tools.map(({ name }) => name)).toEqual([
+      'server_status',
+      'opn_describe'
+    ]);
     expect((await client.callTool({ name: 'server_status', arguments: {} })).isError).not.toBe(
       true
     );

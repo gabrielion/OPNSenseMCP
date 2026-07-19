@@ -121,11 +121,12 @@ describe.each([
   ['2025 compatibility', 'legacy' as const],
   ['2026-07-28', { pin: '2026-07-28' as const }]
 ])('owned stdio entrypoint: %s', (_label, versionNegotiation) => {
-  it('keeps stdout protocol-clean, exposes server_status, and never diagnoses the sentinel', async () => {
+  it('keeps stdout protocol-clean, exposes the partial Task 2 tools, and never diagnoses the sentinel', async () => {
     const connection = await connect(versionNegotiation);
     try {
       expect((await connection.client.listTools()).tools.map(({ name }) => name)).toEqual([
-        'server_status'
+        'server_status',
+        'opn_describe'
       ]);
       expect(connection.stderr()).not.toContain(SENTINEL);
     } finally {

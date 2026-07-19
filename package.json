@@ -36,13 +36,15 @@
     "format:check": "prettier --check .",
     "license:check": "node scripts/check-license-headers.mjs",
     "release:check:legacy-sse": "node scripts/check-legacy-sse-dependency.mjs",
+    "operations:generate": "node scripts/generate-operation-descriptors.mjs",
+    "operations:check": "node scripts/generate-operation-descriptors.mjs --check",
     "provenance:verify": "node scripts/provenance/verify-manifest.mjs docs/provenance/migration-manifest.json",
     "test": "npm run build && vitest run",
     "test:watch": "vitest",
     "test:conformance:2025": "npm run build && node scripts/run-conformance.mjs 2025-11-25",
     "test:conformance:2026": "npm run build && node scripts/run-conformance.mjs 2026-07-28",
     "test:conformance": "npm run test:conformance:2025 && npm run test:conformance:2026",
-    "verify": "npm run format:check && npm run lint && npm run typecheck && npm run license:check && npm test"
+    "verify": "npm run operations:check && npm run format:check && npm run lint && npm run typecheck && npm run license:check && npm test"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "2.0.0-beta.4",

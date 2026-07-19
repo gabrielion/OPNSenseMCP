@@ -87,6 +87,27 @@ function isLegacyObjectSchema(value: unknown): value is LegacyTool['inputSchema'
   );
 }
 
+function isProvablyObjectShapedRoot(schema: Record<string, unknown>): boolean {
+  if (
+    'properties' in schema ||
+    'patternProperties' in schema ||
+    'additionalProperties' in schema ||
+    'required' in schema
+  ) {
+    return true;
+  }
+  for (const keyword of ['oneOf', 'anyOf', 'allOf'] as const) {
+    const members = schema[keyword];
+    if (Array.isArray(members) && members.length > 0) {
+      return members.every(
+        (member) =>
+          isRecord(member) && (member.type === 'object' || isProvablyObjectShapedRoot(member))
+      );
+    }
+  }
+  return false;
+}
+
 function toLegacyObjectSchema(
   schema: z.ZodType,
   io: 'input' | 'output'
@@ -96,6 +117,13 @@ function toLegacyObjectSchema(
     converted = z.toJSONSchema(schema, { io });
   } catch {
     throw new Error(LEGACY_SCHEMA_ERROR);
+  }
+  if (
+    isRecord(converted) &&
+    converted.type === undefined &&
+    isProvablyObjectShapedRoot(converted)
+  ) {
+    converted = { ...converted, type: 'object' };
   }
   if (!isLegacyObjectSchema(converted)) throw new Error(LEGACY_SCHEMA_ERROR);
   return converted;

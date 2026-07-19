@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "scope": "product-1a-task-2-partial",
+  "tools": ["opn_describe", "server_status"],
+  "toolCount": 2,
+  "totalBytes": 4183,
+  "largestTool": { "name": "opn_describe", "bytes": 3513 },
+  "limits": { "totalBytes": 131072, "perToolBytes": 16384 }
+}
