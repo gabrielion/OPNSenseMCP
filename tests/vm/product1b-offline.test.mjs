@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import {
+  access,
   chmod,
   lstat,
   mkdir,
@@ -64,6 +66,83 @@ function fakeDecompress(bytes = Buffer.from('raw image', 'utf8')) {
   return async ({ destination }) => {
     await writeFile(destination, bytes);
   };
+}
+
+async function waitForFile(path) {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    try {
+      await access(path);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  throw new Error('fixture child did not reach the requested phase');
+}
+
+async function runInterruptedCli({ signal, phase }) {
+  const root = await temporaryRoot();
+  const cacheRoot = join(root, 'cache');
+  const bin = join(root, 'bin');
+  const marker = join(root, 'phase-ready');
+  const archive = Buffer.from('fixture archive', 'utf8');
+  const spec = fixtureSpec(archive);
+  await mkdir(cacheRoot);
+  await mkdir(bin);
+
+  const markerCommand = `: > ${JSON.stringify(marker)}`;
+  const curlBody =
+    phase === 'curl'
+      ? `printf %s ${JSON.stringify(archive.toString('utf8'))}\n${markerCommand}\nexec sleep 30\n`
+      : `printf %s ${JSON.stringify(archive.toString('utf8'))}\n`;
+  const bzip2Body =
+    phase === 'bzip2'
+      ? `printf partial-raw\n${markerCommand}\nexec sleep 30\n`
+      : 'printf raw-image\n';
+  await writeFile(join(bin, 'curl'), `#!/bin/sh\n${curlBody}`, { mode: 0o755 });
+  await writeFile(join(bin, 'bzip2'), `#!/bin/sh\n${bzip2Body}`, { mode: 0o755 });
+
+  const moduleUrl = new URL('../../scripts/vm/product1b.mjs', import.meta.url).href;
+  const source = [
+    `import { runPrepareImageCli } from ${JSON.stringify(moduleUrl)};`,
+    `const spec = ${JSON.stringify(spec)};`,
+    'process.exitCode = await runPrepareImageCli({',
+    '  cacheRoot: process.env.PRODUCT1B_TEST_CACHE,',
+    '  spec',
+    '});'
+  ].join('\n');
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', source], {
+    env: {
+      PATH: `${bin}:/bin:/usr/bin`,
+      PRODUCT1B_TEST_CACHE: cacheRoot,
+      PRODUCT1B_SECRET_SENTINEL: '/private/cache PRODUCT_1B_SECRET_SENTINEL'
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+
+  await waitForFile(marker);
+  child.kill(signal);
+  const outcome = await Promise.race([
+    new Promise((resolve) =>
+      child.once('close', (code, childSignal) => resolve({ code, childSignal }))
+    ),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('interrupted CLI did not close in time')), 3000)
+    )
+  ]);
+
+  return { cacheRoot, spec, stdout, stderr, outcome };
 }
 
 async function expectImageError(promise, code) {
@@ -228,7 +307,12 @@ describe('Product 1B immutable image cache', () => {
     const bin = join(root, 'bin');
     const destination = join(root, 'download.partial');
     await mkdir(bin);
-    await writeFile(join(bin, 'curl'), '#!/bin/sh\nprintf fast\n', { mode: 0o755 });
+    const argumentsLog = join(root, 'curl-arguments');
+    await writeFile(
+      join(bin, 'curl'),
+      `#!/bin/sh\nprintf '%s\\n' "$@" > ${JSON.stringify(argumentsLog)}\nprintf fast\n`,
+      { mode: 0o755 }
+    );
     await writeFile(destination, '');
     const previousPath = process.env.PATH;
     process.env.PATH = bin;
@@ -245,12 +329,158 @@ describe('Product 1B immutable image cache', () => {
         ])
       ).resolves.toBeUndefined();
       expect(await readFile(destination, 'utf8')).toBe('fast');
+      expect((await readFile(argumentsLog, 'utf8')).trim().split('\n')).toEqual([
+        '--disable',
+        '--fail',
+        '--silent',
+        '--show-error',
+        '--location',
+        '--proto',
+        '=https',
+        '--proto-redir',
+        '=https',
+        '--max-filesize',
+        '4',
+        '--max-time',
+        '900',
+        '--output',
+        '-',
+        'https://example.invalid/fixed'
+      ]);
     } finally {
       clearTimeout(closeTimer);
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
     }
   });
+
+  it('gives one concurrent caller exclusive cache ownership and a fixed busy result to the other', async () => {
+    const cacheRoot = await temporaryRoot();
+    const archive = Buffer.from('fixture archive', 'utf8');
+    const spec = fixtureSpec(archive);
+    let releaseDownload;
+    let announceDownload;
+    const downloadStarted = new Promise((resolve) => {
+      announceDownload = resolve;
+    });
+    const first = prepareImage({
+      cacheRoot,
+      spec,
+      download: async ({ destination }) => {
+        await writeFile(destination, archive);
+        announceDownload();
+        await new Promise((resolve) => {
+          releaseDownload = resolve;
+        });
+      },
+      decompress: fakeDecompress()
+    });
+    await downloadStarted;
+
+    const competingError = await expectImageError(
+      prepareImage({
+        cacheRoot,
+        spec,
+        download: vi.fn(),
+        decompress: vi.fn()
+      }),
+      'CACHE_BUSY'
+    );
+    expect(formatImageFailure(competingError)).toBe(
+      'Product 1B image: FAILED; image preparation is already running, retry later\n'
+    );
+
+    releaseDownload();
+    await expect(first).resolves.toEqual({ archive: 'downloaded', raw: 'created' });
+    expect((await readdir(cacheRoot)).some((name) => name.includes('.partial-'))).toBe(false);
+    expect((await readdir(cacheRoot)).some((name) => name.includes('.lock'))).toBe(false);
+  });
+
+  it('treats an exclusively created lock whose owner record is still being written as busy', async () => {
+    const cacheRoot = await temporaryRoot();
+    const archive = Buffer.from('fixture archive', 'utf8');
+    const spec = fixtureSpec(archive);
+    await writeFile(join(cacheRoot, '.prepare-image.lock'), '', { mode: 0o600 });
+
+    const error = await expectImageError(
+      prepareImage({
+        cacheRoot,
+        spec,
+        download: vi.fn(),
+        decompress: vi.fn()
+      }),
+      'CACHE_BUSY'
+    );
+
+    expect(formatImageFailure(error)).toBe(
+      'Product 1B image: FAILED; image preparation is already running, retry later\n'
+    );
+    expect(await readdir(cacheRoot)).toEqual(['.prepare-image.lock']);
+  });
+
+  it('lets only one caller recover a dead owner and preserves every non-owned cache entry', async () => {
+    const cacheRoot = await temporaryRoot();
+    const archive = Buffer.from('fixture archive', 'utf8');
+    const spec = fixtureSpec(archive);
+    const deadOwner = { schemaVersion: 1, pid: 2_147_483_647, nonce: '0123456789abcdef' };
+    const unrelatedName = `.unrelated.partial-${deadOwner.pid}-${deadOwner.nonce}`;
+    await writeFile(join(cacheRoot, '.prepare-image.lock'), `${JSON.stringify(deadOwner)}\n`, {
+      mode: 0o600
+    });
+    await writeFile(
+      join(cacheRoot, `.${spec.rawName}.partial-${deadOwner.pid}-${deadOwner.nonce}`),
+      'owned stale bytes'
+    );
+    await writeFile(join(cacheRoot, unrelatedName), 'unrelated sentinel');
+
+    const outcomes = await Promise.allSettled([
+      prepareImage({
+        cacheRoot,
+        spec,
+        download: fakeDownload(archive),
+        decompress: fakeDecompress()
+      }),
+      prepareImage({
+        cacheRoot,
+        spec,
+        download: fakeDownload(archive),
+        decompress: fakeDecompress()
+      })
+    ]);
+
+    expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+    const refusal = outcomes.find((outcome) => outcome.status === 'rejected');
+    expect(refusal?.reason).toBeInstanceOf(Product1bImageError);
+    expect(refusal?.reason.code).toBe('CACHE_BUSY');
+    expect(await readFile(join(cacheRoot, unrelatedName), 'utf8')).toBe('unrelated sentinel');
+    expect((await readdir(cacheRoot)).some((name) => name.includes('.lock'))).toBe(false);
+  });
+
+  it.each([
+    ['SIGTERM', 'curl'],
+    ['SIGINT', 'bzip2']
+  ])(
+    'unwinds an interrupted CLI after %s while %s is active without cache residue',
+    async (signal, phase) => {
+      const { cacheRoot, spec, stdout, stderr, outcome } = await runInterruptedCli({
+        signal,
+        phase
+      });
+
+      expect(outcome).toEqual({ code: 3, childSignal: null });
+      expect(stdout).toBe('');
+      expect(stderr).toBe(
+        'Product 1B image: FAILED; image preparation interrupted, retry image preparation\n'
+      );
+      expect(`${stdout}${stderr}`).not.toContain('PRODUCT1B_SECRET_SENTINEL');
+      expect(`${stdout}${stderr}`).not.toContain('/private/cache');
+      const entries = await readdir(cacheRoot);
+      expect(entries.some((name) => name.includes('.partial-'))).toBe(false);
+      expect(entries.some((name) => name.includes('.lock'))).toBe(false);
+      expect(entries).not.toContain(spec.rawName);
+      expect(entries).not.toContain(`${spec.rawName}.integrity.json`);
+    }
+  );
 
   it.each([
     ['oversize', Buffer.from('fixture archive plus one byte', 'utf8'), 'ARCHIVE_TOO_LARGE'],

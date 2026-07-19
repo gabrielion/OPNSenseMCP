@@ -26,6 +26,8 @@ const COMMANDS = Object.freeze([
 ]);
 const DOWNLOAD_TIMEOUT_MS = 15 * 60 * 1000;
 const COMMAND_TIMEOUT_MS = 5000;
+const CHILD_CLOSE_TIMEOUT_MS = 2000;
+const CACHE_LOCK_NAME = '.prepare-image.lock';
 
 const IMAGE_FAILURES = Object.freeze({
   ARCHIVE_TOO_LARGE: 'download exceeded the pinned archive size; retry image preparation',
@@ -33,6 +35,8 @@ const IMAGE_FAILURES = Object.freeze({
   ARCHIVE_DIGEST_MISMATCH: 'download digest did not match OPNsense 26.1.6; retry image preparation',
   DECOMPRESSION_FAILED: 'decompression failed, retry image preparation',
   DOWNLOAD_FAILED: 'download failed, check HTTPS access and retry image preparation',
+  CACHE_BUSY: 'image preparation is already running, retry later',
+  CANCELLED: 'image preparation interrupted, retry image preparation',
   UNSAFE_CACHE_ENTRY: 'cache entry is unsafe; remove it manually before retrying',
   CACHE_UNAVAILABLE: 'user cache is unavailable; check its permissions and retry'
 });
@@ -162,6 +166,14 @@ function isUnsafeOpen(error) {
   );
 }
 
+function isAlreadyPresent(error) {
+  return error instanceof Error && 'code' in error && error.code === 'EEXIST';
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted === true) throw imageError('CANCELLED');
+}
+
 async function ensureCacheRoot(cacheRoot) {
   try {
     const before = await lstat(cacheRoot);
@@ -196,12 +208,12 @@ function validateSpec(spec) {
   }
 }
 
-async function openRegular(path) {
+async function openRegular(path, { maximumLinks = 1 } = {}) {
   let handle;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.nlink !== 1) {
+    if (!stat.isFile() || stat.nlink < 1 || stat.nlink > maximumLinks) {
       await handle.close();
       throw imageError('UNSAFE_CACHE_ENTRY');
     }
@@ -215,7 +227,8 @@ async function openRegular(path) {
   }
 }
 
-async function hashArchive(path, spec) {
+async function hashArchive(path, spec, signal) {
+  throwIfAborted(signal);
   const opened = await openRegular(path);
   if (opened === undefined) return { state: 'missing' };
   const { handle, stat } = opened;
@@ -226,6 +239,7 @@ async function hashArchive(path, spec) {
     const buffer = Buffer.allocUnsafe(64 * 1024);
     let position = 0;
     while (position < stat.size) {
+      throwIfAborted(signal);
       const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, position);
       if (bytesRead === 0) throw imageError('ARCHIVE_SIZE_MISMATCH');
       hash.update(buffer.subarray(0, bytesRead));
@@ -240,7 +254,7 @@ async function hashArchive(path, spec) {
   }
 }
 
-async function digestOpenedFile(opened, maxBytes) {
+async function digestOpenedFile(opened, maxBytes, signal) {
   const { handle, stat } = opened;
   try {
     if (stat.size <= 0 || stat.size > maxBytes) return undefined;
@@ -248,6 +262,7 @@ async function digestOpenedFile(opened, maxBytes) {
     const buffer = Buffer.allocUnsafe(64 * 1024);
     let position = 0;
     while (position < stat.size) {
+      throwIfAborted(signal);
       const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, position);
       if (bytesRead === 0) return undefined;
       hash.update(buffer.subarray(0, bytesRead));
@@ -280,7 +295,8 @@ async function readIntegrityProof(path) {
   }
 }
 
-async function inspectRawBase(rawPath, proofPath, spec) {
+async function inspectRawBase(rawPath, proofPath, spec, signal) {
+  throwIfAborted(signal);
   const proof = await readIntegrityProof(proofPath);
   const raw = await openRegular(rawPath);
   if (raw === undefined) return proof === undefined ? 'missing' : 'invalid';
@@ -288,7 +304,7 @@ async function inspectRawBase(rawPath, proofPath, spec) {
     await raw.handle.close();
     throw imageError('UNSAFE_CACHE_ENTRY');
   }
-  const digest = await digestOpenedFile(raw, spec.rawMaxBytes);
+  const digest = await digestOpenedFile(raw, spec.rawMaxBytes, signal);
   if (digest === undefined || proof === undefined) return 'invalid';
   return proof.schemaVersion === 1 &&
     proof.archiveSha256 === spec.archiveSha256 &&
@@ -323,7 +339,8 @@ async function writeChunk(handle, chunk, position) {
   }
 }
 
-async function streamCommand({ command, arguments_, destination, maxBytes, timeoutMs }) {
+async function streamCommand({ command, arguments_, destination, maxBytes, timeoutMs, signal }) {
+  throwIfAborted(signal);
   const handle = await open(destination, constants.O_WRONLY | constants.O_NOFOLLOW);
   const child = spawn(command, arguments_, {
     env: { PATH: process.env.PATH ?? '' },
@@ -332,26 +349,53 @@ async function streamCommand({ command, arguments_, destination, maxBytes, timeo
     windowsHide: true
   });
   let timedOut = false;
+  let interrupted = false;
   let spawnFailure;
   let streamFailure;
   let byteCount = 0;
-  let finishTimeout;
-  const timedCompletion = new Promise((resolve) => {
-    finishTimeout = resolve;
-  });
+  let closeResult;
   const closed = new Promise((resolve) => {
-    child.once('close', (status, signal) => resolve({ status, signal }));
+    child.once('close', (status, childSignal) => {
+      closeResult = { status, signal: childSignal };
+      resolve(closeResult);
+    });
   });
+  const stopChild = () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    child.stdout.destroy();
+  };
+  const onAbort = () => {
+    interrupted = true;
+    stopChild();
+  };
   const timeout = setTimeout(() => {
     timedOut = true;
-    child.kill('SIGKILL');
-    child.stdout.destroy();
-    finishTimeout({ status: null, signal: 'timeout' });
+    stopChild();
   }, timeoutMs);
   timeout.unref();
   child.once('error', (error) => {
     spawnFailure = error;
   });
+  signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal?.aborted === true) onAbort();
+
+  const awaitBoundedClose = async () => {
+    if (closeResult !== undefined) return closeResult;
+    let closeTimer;
+    try {
+      return await Promise.race([
+        closed,
+        new Promise((resolve) => {
+          closeTimer = setTimeout(
+            () => resolve({ status: null, signal: 'close-timeout' }),
+            CHILD_CLOSE_TIMEOUT_MS
+          );
+        })
+      ]);
+    } finally {
+      clearTimeout(closeTimer);
+    }
+  };
 
   try {
     try {
@@ -363,25 +407,34 @@ async function streamCommand({ command, arguments_, destination, maxBytes, timeo
       }
     } catch (error) {
       streamFailure = error;
-      child.kill('SIGKILL');
+      stopChild();
     }
-    const { status, signal } = await Promise.race([closed, timedCompletion]);
+    const { status, signal: childSignal } =
+      interrupted || timedOut || streamFailure !== undefined
+        ? await awaitBoundedClose()
+        : await closed;
+    if (interrupted) throw imageError('CANCELLED');
     if (streamFailure !== undefined) throw streamFailure;
-    if (spawnFailure !== undefined || timedOut || status !== 0 || signal !== null) {
+    if (spawnFailure !== undefined || timedOut || status !== 0 || childSignal !== null) {
       throw spawnFailure ?? new Error('command failed');
     }
     await handle.sync();
   } finally {
     clearTimeout(timeout);
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    signal?.removeEventListener('abort', onAbort);
+    if (closeResult === undefined) {
+      stopChild();
+      await awaitBoundedClose();
+    }
     await handle.close();
   }
 }
 
-export async function downloadArchive({ destination, url, maxBytes }) {
+export async function downloadArchive({ destination, url, maxBytes, signal }) {
   await streamCommand({
     command: 'curl',
     arguments_: [
+      '--disable',
       '--fail',
       '--silent',
       '--show-error',
@@ -400,22 +453,24 @@ export async function downloadArchive({ destination, url, maxBytes }) {
     ],
     destination,
     maxBytes,
-    timeoutMs: DOWNLOAD_TIMEOUT_MS
+    timeoutMs: DOWNLOAD_TIMEOUT_MS,
+    signal
   });
 }
 
-export async function decompressArchive({ source, destination, maxBytes }) {
+export async function decompressArchive({ source, destination, maxBytes, signal }) {
   await streamCommand({
     command: 'bzip2',
     arguments_: ['-dc', source],
     destination,
     maxBytes,
-    timeoutMs: DOWNLOAD_TIMEOUT_MS
+    timeoutMs: DOWNLOAD_TIMEOUT_MS,
+    signal
   });
 }
 
-function partialPath(cacheRoot, name) {
-  return join(cacheRoot, `.${name}.partial-${process.pid}-${randomBytes(8).toString('hex')}`);
+function partialPath(cacheRoot, name, owner) {
+  return join(cacheRoot, `.${name}.partial-${owner.pid}-${owner.nonce}`);
 }
 
 async function reservePartial(path) {
@@ -431,6 +486,143 @@ async function unlinkIfPresent(path) {
   }
 }
 
+async function readCacheOwner(lockPath) {
+  const opened = await openRegular(lockPath, { maximumLinks: 2 });
+  if (opened === undefined) return undefined;
+  try {
+    if (opened.stat.size === 0) throw imageError('CACHE_BUSY');
+    if (opened.stat.size > 256 || (opened.stat.mode & 0o077) !== 0) {
+      throw imageError('UNSAFE_CACHE_ENTRY');
+    }
+    const bytes = Buffer.alloc(opened.stat.size);
+    const { bytesRead } = await opened.handle.read(bytes, 0, bytes.byteLength, 0);
+    if (bytesRead !== bytes.byteLength) throw imageError('UNSAFE_CACHE_ENTRY');
+    let owner;
+    try {
+      owner = JSON.parse(bytes.toString('utf8'));
+    } catch {
+      throw imageError('CACHE_BUSY');
+    }
+    if (
+      typeof owner !== 'object' ||
+      owner === null ||
+      Array.isArray(owner) ||
+      Object.keys(owner).sort().join(',') !== 'nonce,pid,schemaVersion' ||
+      owner.schemaVersion !== 1 ||
+      !Number.isSafeInteger(owner.pid) ||
+      owner.pid <= 0 ||
+      !/^[a-f\d]{16}$/u.test(owner.nonce)
+    ) {
+      throw imageError('UNSAFE_CACHE_ENTRY');
+    }
+    return { owner, stat: opened.stat };
+  } catch (error) {
+    if (error instanceof Product1bImageError) throw error;
+    throw imageError('UNSAFE_CACHE_ENTRY', error);
+  } finally {
+    await opened.handle.close();
+  }
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !(error instanceof Error && 'code' in error && error.code === 'ESRCH');
+  }
+}
+
+function sameOwner(left, right) {
+  return left.pid === right.pid && left.nonce === right.nonce;
+}
+
+async function removeOwnedStaging(cacheRoot, spec, owner) {
+  const names = [spec.archiveName, spec.rawName, `${spec.rawName}.integrity.json`];
+  for (const name of names) await unlinkIfPresent(partialPath(cacheRoot, name, owner));
+}
+
+async function recoverStaleLock(lockPath, cacheRoot, spec, observed) {
+  if (processIsAlive(observed.owner.pid)) throw imageError('CACHE_BUSY');
+  const recoveryPath = join(
+    cacheRoot,
+    `.prepare-image.recovery-${observed.owner.pid}-${observed.owner.nonce}`
+  );
+  try {
+    await link(lockPath, recoveryPath);
+  } catch (error) {
+    if (isAlreadyPresent(error) || isMissing(error)) throw imageError('CACHE_BUSY');
+    throw imageError('CACHE_UNAVAILABLE', error);
+  }
+  try {
+    const current = await readCacheOwner(lockPath);
+    const recovery = await readCacheOwner(recoveryPath);
+    if (
+      current === undefined ||
+      recovery === undefined ||
+      current.stat.dev !== observed.stat.dev ||
+      current.stat.ino !== observed.stat.ino ||
+      recovery.stat.dev !== observed.stat.dev ||
+      recovery.stat.ino !== observed.stat.ino ||
+      !sameOwner(current.owner, observed.owner) ||
+      !sameOwner(recovery.owner, observed.owner)
+    ) {
+      throw imageError('CACHE_BUSY');
+    }
+    await removeOwnedStaging(cacheRoot, spec, observed.owner);
+    await unlink(lockPath);
+  } finally {
+    await unlinkIfPresent(recoveryPath);
+  }
+}
+
+async function acquireCacheLock(cacheRoot, spec) {
+  const lockPath = join(cacheRoot, CACHE_LOCK_NAME);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const owner = {
+      schemaVersion: 1,
+      pid: process.pid,
+      nonce: randomBytes(8).toString('hex')
+    };
+    let handle;
+    let created = false;
+    try {
+      handle = await open(
+        lockPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600
+      );
+      created = true;
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.nlink !== 1) throw imageError('UNSAFE_CACHE_ENTRY');
+      await handle.writeFile(`${JSON.stringify(owner)}\n`, 'utf8');
+      await handle.sync();
+      await handle.close();
+      return { lockPath, owner };
+    } catch (error) {
+      if (handle !== undefined) await handle.close().catch(() => undefined);
+      if (created) await unlinkIfPresent(lockPath);
+      if (!isAlreadyPresent(error)) {
+        if (error instanceof Product1bImageError) throw error;
+        throw imageError('CACHE_UNAVAILABLE', error);
+      }
+      const observed = await readCacheOwner(lockPath);
+      if (observed === undefined) continue;
+      if (observed.stat.nlink !== 1) throw imageError('CACHE_BUSY');
+      await recoverStaleLock(lockPath, cacheRoot, spec, observed);
+    }
+  }
+  throw imageError('CACHE_BUSY');
+}
+
+async function releaseCacheLock(lock) {
+  const current = await readCacheOwner(lock.lockPath);
+  if (current === undefined || !sameOwner(current.owner, lock.owner)) {
+    throw imageError('CACHE_UNAVAILABLE');
+  }
+  await unlinkIfPresent(lock.lockPath);
+}
+
 async function installLink(source, destination) {
   try {
     await link(source, destination);
@@ -441,24 +633,24 @@ async function installLink(source, destination) {
   }
 }
 
-async function ensureArchive({ cacheRoot, spec, download }) {
+async function ensureArchive({ cacheRoot, spec, download, owner, signal }) {
   const archivePath = join(cacheRoot, spec.archiveName);
   try {
-    const existing = await hashArchive(archivePath, spec);
+    const existing = await hashArchive(archivePath, spec, signal);
     if (existing.state === 'valid') return { path: archivePath, state: 'reused' };
   } catch (error) {
     if (!(error instanceof Product1bImageError) || error.code === 'UNSAFE_CACHE_ENTRY') throw error;
     await unlink(archivePath);
   }
 
-  const temporary = partialPath(cacheRoot, spec.archiveName);
+  const temporary = partialPath(cacheRoot, spec.archiveName, owner);
   await reservePartial(temporary);
   try {
-    await download({ destination: temporary, url: spec.url, maxBytes: spec.archiveBytes });
-    await hashArchive(temporary, spec);
+    await download({ destination: temporary, url: spec.url, maxBytes: spec.archiveBytes, signal });
+    await hashArchive(temporary, spec, signal);
     const installed = await installLink(temporary, archivePath);
     if (installed === 'exists') {
-      await hashArchive(archivePath, spec);
+      await hashArchive(archivePath, spec, signal);
       return { path: archivePath, state: 'reused' };
     }
     return { path: archivePath, state: 'downloaded' };
@@ -470,18 +662,18 @@ async function ensureArchive({ cacheRoot, spec, download }) {
   }
 }
 
-async function ensureRawBase({ cacheRoot, spec, archivePath, decompress }) {
+async function ensureRawBase({ cacheRoot, spec, archivePath, decompress, owner, signal }) {
   const rawPath = join(cacheRoot, spec.rawName);
   const proofPath = join(cacheRoot, `${spec.rawName}.integrity.json`);
-  const existing = await inspectRawBase(rawPath, proofPath, spec);
+  const existing = await inspectRawBase(rawPath, proofPath, spec, signal);
   if (existing === 'valid') return 'reused';
   if (existing === 'invalid') {
     await unlinkIfPresent(rawPath);
     await unlinkIfPresent(proofPath);
   }
 
-  const temporaryRaw = partialPath(cacheRoot, spec.rawName);
-  const temporaryProof = partialPath(cacheRoot, `${spec.rawName}.integrity.json`);
+  const temporaryRaw = partialPath(cacheRoot, spec.rawName, owner);
+  const temporaryProof = partialPath(cacheRoot, `${spec.rawName}.integrity.json`, owner);
   await reservePartial(temporaryRaw);
   await reservePartial(temporaryProof);
   let rawInstalled = false;
@@ -490,11 +682,12 @@ async function ensureRawBase({ cacheRoot, spec, archivePath, decompress }) {
     await decompress({
       source: archivePath,
       destination: temporaryRaw,
-      maxBytes: spec.rawMaxBytes
+      maxBytes: spec.rawMaxBytes,
+      signal
     });
     const opened = await openRegular(temporaryRaw);
     if (opened === undefined) throw imageError('DECOMPRESSION_FAILED');
-    const digest = await digestOpenedFile(opened, spec.rawMaxBytes);
+    const digest = await digestOpenedFile(opened, spec.rawMaxBytes, signal);
     if (digest === undefined) throw imageError('DECOMPRESSION_FAILED');
     await writeIntegrityProof(temporaryProof, {
       schemaVersion: 1,
@@ -527,18 +720,29 @@ export async function prepareImage({
   cacheRoot,
   spec = IMAGE_SPEC,
   download = downloadArchive,
-  decompress = decompressArchive
+  decompress = decompressArchive,
+  signal
 }) {
   validateSpec(spec);
+  throwIfAborted(signal);
   await ensureCacheRoot(cacheRoot);
-  const archive = await ensureArchive({ cacheRoot, spec, download });
-  const raw = await ensureRawBase({
-    cacheRoot,
-    spec,
-    archivePath: archive.path,
-    decompress
-  });
-  return { archive: archive.state, raw };
+  const lock = await acquireCacheLock(cacheRoot, spec);
+  try {
+    throwIfAborted(signal);
+    const archive = await ensureArchive({ cacheRoot, spec, download, owner: lock.owner, signal });
+    const raw = await ensureRawBase({
+      cacheRoot,
+      spec,
+      archivePath: archive.path,
+      decompress,
+      owner: lock.owner,
+      signal
+    });
+    return { archive: archive.state, raw };
+  } finally {
+    await removeOwnedStaging(cacheRoot, spec, lock.owner);
+    await releaseCacheLock(lock);
+  }
 }
 
 export function formatImageFailure(error) {
@@ -553,6 +757,35 @@ function userCacheRoot() {
     : join(homedir(), '.cache', 'opnsense-mcp', 'product1b');
 }
 
+export async function runPrepareImageCli({
+  cacheRoot = userCacheRoot(),
+  spec = IMAGE_SPEC,
+  download = downloadArchive,
+  decompress = decompressArchive,
+  stdout = process.stdout,
+  stderr = process.stderr
+} = {}) {
+  const controller = new AbortController();
+  let interrupted = false;
+  const interrupt = () => {
+    interrupted = true;
+    controller.abort();
+  };
+  process.on('SIGINT', interrupt);
+  process.on('SIGTERM', interrupt);
+  try {
+    await prepareImage({ cacheRoot, spec, download, decompress, signal: controller.signal });
+    stdout.write('Product 1B image: READY; verified immutable OPNsense 26.1.6 base cached\n');
+    return 0;
+  } catch (error) {
+    stderr.write(formatImageFailure(interrupted ? imageError('CANCELLED') : error));
+    return interrupted ? 3 : 2;
+  } finally {
+    process.off('SIGINT', interrupt);
+    process.off('SIGTERM', interrupt);
+  }
+}
+
 async function main() {
   const command = process.argv[2];
   if (command === 'doctor') {
@@ -562,15 +795,7 @@ async function main() {
     return;
   }
   if (command === 'prepare-image') {
-    try {
-      await prepareImage({ cacheRoot: userCacheRoot() });
-      process.stdout.write(
-        'Product 1B image: READY; verified immutable OPNsense 26.1.6 base cached\n'
-      );
-    } catch (error) {
-      process.stderr.write(formatImageFailure(error));
-      process.exitCode = 2;
-    }
+    process.exitCode = await runPrepareImageCli();
     return;
   }
   process.stderr.write('Usage: product1b.mjs doctor|prepare-image\n');
