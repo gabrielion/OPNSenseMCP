@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { spawn } from 'node:child_process';
-import { win32 } from 'node:path';
 
 let target;
 let startAccepted = false;
@@ -38,38 +37,11 @@ function send(message) {
 }
 
 function terminateAfterOwnerDisconnect() {
-  if (process.platform !== 'win32') {
-    try {
-      process.kill(-process.pid, 'SIGKILL');
-    } catch {
-      process.exitCode = 1;
-    }
-    return;
+  try {
+    process.kill(-process.pid, 'SIGKILL');
+  } catch {
+    process.exitCode = 1;
   }
-  const systemRoot = process.env.SystemRoot;
-  if (
-    typeof systemRoot === 'string' &&
-    /^[A-Za-z]:\\[^\0/]+(?:\\[^\0/]+)*$/u.test(systemRoot) &&
-    win32.normalize(systemRoot) === systemRoot
-  ) {
-    const killer = spawn(
-      win32.join(systemRoot, 'System32', 'taskkill.exe'),
-      ['/pid', String(process.pid), '/t', '/f'],
-      {
-        shell: false,
-        stdio: 'ignore',
-        windowsHide: true
-      }
-    );
-    killer.once('error', () => {
-      target?.kill('SIGKILL');
-      process.exitCode = 1;
-    });
-    killer.unref();
-    return;
-  }
-  target?.kill('SIGKILL');
-  process.exitCode = 1;
 }
 
 process.on('message', (message) => {

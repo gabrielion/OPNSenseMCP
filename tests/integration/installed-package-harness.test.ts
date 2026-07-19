@@ -5,6 +5,7 @@ import { join, posix, win32 } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   COMMAND_SUPERVISOR_STARTUP_TIMEOUT_MS,
+  POSIX_COMMAND_HARNESS_ERROR,
   localArchiveInstallArguments,
   ownedTreeTerminationPlan,
   packageHarnessPlatform,
@@ -158,62 +159,68 @@ describe('installed-package harness portability', () => {
     });
   });
 
-  it('derives only validated owned POSIX groups and shell-free Windows taskkill plans', () => {
+  it('derives only validated owned POSIX groups and refuses Windows containment', () => {
     expect(ownedTreeTerminationPlan('darwin', 4321, 1234)).toEqual({
       kind: 'posix-group',
       group: -4321
     });
-    expect(ownedTreeTerminationPlan('win32', 4321, 1234, 'C:\\Windows')).toEqual({
-      kind: 'windows-taskkill',
-      command: 'C:\\Windows\\System32\\taskkill.exe',
-      arguments: ['/pid', '4321', '/t', '/f'],
-      shell: false
-    });
+    expect(() => ownedTreeTerminationPlan('win32', 4321, 1234)).toThrow(
+      POSIX_COMMAND_HARNESS_ERROR
+    );
     for (const unsafe of [undefined, Number.NaN, -1, 0, 1, 1234]) {
       expect(() => ownedTreeTerminationPlan('linux', unsafe, 1234)).toThrow(
         'Invalid owned process identifier'
       );
     }
     for (const unsafeRoot of [undefined, '', 'Windows', 'C:\\Windows\\..\\Temp']) {
-      expect(() => ownedTreeTerminationPlan('win32', 4321, 1234, unsafeRoot)).toThrow(
-        'Invalid Windows system root'
-      );
+      expect(() =>
+        packageHarnessPlatform({
+          platform: 'win32',
+          consumer: 'C:\\Temp\\consumer',
+          packageName: '@gabrielion/opnsense-mcp',
+          nodeExecutable: 'C:\\node\\node.exe',
+          npmCli: 'C:\\node\\npm-cli.js',
+          windowsSystemRoot: unsafeRoot
+        })
+      ).toThrow('Invalid Windows system root');
     }
-    expect(() =>
-      packageHarnessPlatform({
-        platform: 'win32',
-        consumer: 'C:\\Temp\\consumer',
-        packageName: '@gabrielion/opnsense-mcp',
-        nodeExecutable: 'C:\\node\\node.exe',
-        npmCli: 'C:\\node\\npm-cli.js',
-        windowsSystemRoot: undefined
-      })
-    ).toThrow('Invalid Windows system root');
   });
 
-  it('rejects an untrusted Windows system root before starting a supervisor', async () => {
-    await expect(
-      runBoundedCommand(
-        { command: process.execPath, arguments: ['-e', 'process.exit(0)'] },
-        {
-          cwd: process.cwd(),
-          environment: process.env,
-          input: '',
-          timeoutMs: 1_000,
-          cleanupTimeoutMs: 1_000
-        },
-        { platform: 'win32', windowsSystemRoot: 'relative-root' }
-      )
-    ).rejects.toThrow('Command platform configuration failed');
+  it('refuses simulated Windows before starting the generic supervisor', async () => {
+    const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-posix-harness-boundary-'));
+    const supervisorPath = join(temporaryRoot, 'must-not-start.mjs');
+    const markerPath = join(temporaryRoot, 'started');
+    await writeFile(
+      supervisorPath,
+      `import { writeFileSync } from 'node:fs';writeFileSync(${JSON.stringify(markerPath)}, 'started');`,
+      'utf8'
+    );
+    try {
+      await expect(
+        runBoundedCommand(
+          { command: process.execPath, arguments: ['-e', 'process.exit(0)'] },
+          {
+            cwd: process.cwd(),
+            environment: process.env,
+            input: '',
+            timeoutMs: 1_000,
+            cleanupTimeoutMs: 1_000
+          },
+          { platform: 'win32', supervisorPath }
+        )
+      ).rejects.toThrow(POSIX_COMMAND_HARNESS_ERROR);
+      await expect(readFile(markerPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
   });
 
-  it('does not start a Windows tree killer after its cleanup deadline has expired', async () => {
-    const controller = new AbortController();
-    controller.abort();
-
-    await expect(
-      terminateOwnedProcessTree('win32', 4321, controller.signal, 'C:\\Windows')
-    ).rejects.toThrow('Process tree termination aborted');
+  it('keeps the command supervisor free of Windows tree-containment branches', async () => {
+    const source = await readFile(
+      new URL('../support/bounded-command-supervisor.mjs', import.meta.url),
+      'utf8'
+    );
+    expect(source).not.toMatch(/\b(?:taskkill|SystemRoot|win32)\b/u);
   });
 
   it('kills a real parent and descendant before rejecting the command timeout', async () => {

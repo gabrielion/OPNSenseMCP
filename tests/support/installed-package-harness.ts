@@ -46,17 +46,15 @@ interface BoundedCommandDependencies {
   readonly supervisorPath?: string;
   readonly terminateOwnedTree?: (pid: number, signal: AbortSignal) => Promise<void>;
   readonly outputLimitBytes?: number;
-  readonly windowsSystemRoot?: string;
 }
 
-export type OwnedTreeTerminationPlan =
-  | { readonly kind: 'posix-group'; readonly group: number }
-  | {
-      readonly kind: 'windows-taskkill';
-      readonly command: string;
-      readonly arguments: readonly ['/pid', string, '/t', '/f'];
-      readonly shell: false;
-    };
+export const POSIX_COMMAND_HARNESS_ERROR =
+  'Installed-package bounded-command harness requires POSIX process groups; use the native Windows product smoke for Windows validation';
+
+export interface OwnedTreeTerminationPlan {
+  readonly kind: 'posix-group';
+  readonly group: number;
+}
 
 function errnoCode(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null) return undefined;
@@ -82,80 +80,22 @@ function windowsSystemExecutable(systemRoot: string | undefined, executable: str
   return win32.join(systemRoot, 'System32', executable);
 }
 
+function assertSupportedCommandHarnessPlatform(
+  platform: NodeJS.Platform
+): asserts platform is 'darwin' | 'linux' {
+  if (platform !== 'darwin' && platform !== 'linux') {
+    throw new Error(POSIX_COMMAND_HARNESS_ERROR);
+  }
+}
+
 export function ownedTreeTerminationPlan(
   platform: NodeJS.Platform,
   pid: number | undefined,
-  currentPid = process.pid,
-  windowsSystemRoot = process.env.SystemRoot
+  currentPid = process.pid
 ): OwnedTreeTerminationPlan {
+  assertSupportedCommandHarnessPlatform(platform);
   const ownedPid = validatedOwnedPid(pid, currentPid);
-  if (platform === 'win32') {
-    const arguments_: readonly ['/pid', string, '/t', '/f'] = [
-      '/pid',
-      String(ownedPid),
-      '/t',
-      '/f'
-    ];
-    return Object.freeze({
-      kind: 'windows-taskkill',
-      command: windowsSystemExecutable(windowsSystemRoot, 'taskkill.exe'),
-      arguments: Object.freeze(arguments_),
-      shell: false
-    });
-  }
   return Object.freeze({ kind: 'posix-group', group: -ownedPid });
-}
-
-function terminateWindowsTree(
-  plan: Extract<OwnedTreeTerminationPlan, { readonly kind: 'windows-taskkill' }>,
-  signal: AbortSignal
-): Promise<void> {
-  return new Promise((resolveTermination, rejectTermination) => {
-    if (signal.aborted) {
-      rejectTermination(new Error('Process tree termination aborted'));
-      return;
-    }
-    const killer = spawn(plan.command, [...plan.arguments], {
-      shell: plan.shell,
-      stdio: 'ignore',
-      windowsHide: true
-    });
-    killer.unref();
-    let settled = false;
-    const finish = (callback: () => void) => {
-      if (settled) return;
-      settled = true;
-      signal.removeEventListener('abort', onAbort);
-      callback();
-    };
-    const onAbort = () => {
-      try {
-        killer.kill('SIGKILL');
-      } catch {
-        // The independently owned cleanup deadline remains authoritative.
-      }
-      finish(() => {
-        rejectTermination(new Error('Process tree termination aborted'));
-      });
-    };
-    killer.once('error', () => {
-      finish(() => {
-        rejectTermination(new Error('Process tree termination failed'));
-      });
-    });
-    killer.once('close', (code, terminationSignal) => {
-      if (code === 0 && terminationSignal === null) {
-        finish(() => {
-          resolveTermination();
-        });
-      } else {
-        finish(() => {
-          rejectTermination(new Error('Process tree termination failed'));
-        });
-      }
-    });
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
 }
 
 const PROCESS_LIST_OUTPUT_LIMIT = 4 * 1024 * 1024;
@@ -275,14 +215,9 @@ function waitForPosixGroupExit(group: number, signal: AbortSignal): Promise<void
 export async function terminateOwnedProcessTree(
   platform: NodeJS.Platform,
   pid: number | undefined,
-  signal: AbortSignal,
-  windowsSystemRoot = process.env.SystemRoot
+  signal: AbortSignal
 ): Promise<void> {
-  const plan = ownedTreeTerminationPlan(platform, pid, process.pid, windowsSystemRoot);
-  if (plan.kind === 'windows-taskkill') {
-    await terminateWindowsTree(plan, signal);
-    return;
-  }
+  const plan = ownedTreeTerminationPlan(platform, pid, process.pid);
   if (signal.aborted) throw new Error('Process tree termination aborted');
   try {
     process.kill(plan.group, 'SIGKILL');
@@ -420,25 +355,25 @@ export function runBoundedCommand(
 ): Promise<CommandResult> {
   return new Promise((resolveCommand, rejectCommand) => {
     const platform = dependencies.platform ?? process.platform;
-    const windowsSystemRoot = dependencies.windowsSystemRoot ?? process.env.SystemRoot;
+    try {
+      assertSupportedCommandHarnessPlatform(platform);
+    } catch {
+      rejectCommand(new Error(POSIX_COMMAND_HARNESS_ERROR));
+      return;
+    }
     let outputLimit: number;
     try {
       outputLimit = validatedOutputLimit(dependencies.outputLimitBytes);
-      if (platform === 'win32') windowsSystemExecutable(windowsSystemRoot, 'taskkill.exe');
     } catch {
       rejectCommand(new Error('Command platform configuration failed'));
       return;
     }
-    const supervisorEnvironment =
-      platform === 'win32' && windowsSystemRoot !== undefined
-        ? { SystemRoot: windowsSystemRoot }
-        : Object.freeze({});
     let supervisor: ReturnType<typeof fork>;
     try {
       supervisor = fork(dependencies.supervisorPath ?? COMMAND_SUPERVISOR_PATH, [], {
         cwd: options.cwd,
-        detached: platform !== 'win32',
-        env: supervisorEnvironment,
+        detached: true,
+        env: Object.freeze({}),
         execArgv: [],
         serialization: 'json',
         stdio: ['pipe', 'pipe', 'pipe', 'ipc']
@@ -564,12 +499,7 @@ export function runBoundedCommand(
           const ownedPid = validatedOwnedPid(supervisor.pid, process.pid);
           termination =
             dependencies.terminateOwnedTree === undefined
-              ? terminateOwnedProcessTree(
-                  platform,
-                  ownedPid,
-                  terminationAbort.signal,
-                  windowsSystemRoot
-                )
+              ? terminateOwnedProcessTree(platform, ownedPid, terminationAbort.signal)
               : dependencies.terminateOwnedTree(ownedPid, terminationAbort.signal);
         }
       } catch {
