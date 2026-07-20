@@ -111,6 +111,7 @@ export interface ConfirmationChallenge {
 }
 
 export type RefusalCode =
+  | 'BACKUP_FAILED'
   | 'CANCELLED'
   | 'CONFIRMATION_DECLINED'
   | 'CONFIRMATION_INVALID'
@@ -121,10 +122,14 @@ export type RefusalCode =
   | 'INVALID_OUTPUT'
   | 'INVALID_POLICY'
   | 'INVALID_RESOURCE_INPUT'
+  | 'LOCK_UNAVAILABLE'
   | 'OPERATION_NOT_AVAILABLE'
   | 'OUTCOME_INDETERMINATE'
+  | 'OUTCOME_UNVERIFIED'
+  | 'PREFLIGHT_FAILED'
   | 'READ_ONLY'
   | 'RESOURCE_NOT_ALLOWED'
+  | 'STATE_REVALIDATION_FAILED'
   | 'TIMEOUT'
   | 'TARGET_UNAVAILABLE'
   | 'UNKNOWN_CAPABILITY'
@@ -154,4 +159,49 @@ export interface ExposureContext {
   readonly transport: TransportKind;
   readonly enabledFeatureFlags: ReadonlySet<FeatureFlag>;
   readonly allowedResourceScopes: ReadonlySet<string> | null;
+}
+
+// Mutation envelope service seam (Product 2). These are injected, cross-cutting services that a write
+// capability's fixed lifecycle uses. They are trusted startup dependencies; they never accept caller data
+// beyond the sealed, canonicalized values the kernel supplies.
+
+export interface PreflightResult {
+  readonly effectPlanDigest: string;
+  readonly observedStateDigest: string;
+}
+
+export interface LockHandle {
+  release(): Promise<void>;
+}
+
+export interface MutationLockManager {
+  acquire(targetKey: string, signal: AbortSignal): Promise<LockHandle | null>;
+}
+
+export interface BackupService {
+  create(scope: string, signal: AbortSignal): Promise<{ readonly backupId: string }>;
+  exists(backupId: string): Promise<boolean>;
+}
+
+export type AuditPhase = 'intent' | 'result';
+
+export interface AuditRecord {
+  readonly capabilityId: string;
+  readonly mcpName: string;
+  readonly effect: CapabilityEffect;
+  readonly argumentsSha256: string;
+  readonly effectiveResourceScopes: readonly string[];
+  readonly phase: AuditPhase;
+  readonly outcome: string;
+  readonly backupId?: string;
+}
+
+export interface AuditSink {
+  record(record: AuditRecord): void;
+}
+
+export interface MutationEnvelopeServices {
+  readonly lock: MutationLockManager;
+  readonly backup: BackupService;
+  readonly audit: AuditSink;
 }

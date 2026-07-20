@@ -18,6 +18,8 @@ import type {
   CapabilityRequest,
   CapabilityResult,
   ExposureContext,
+  MutationEnvelopeServices,
+  PreflightResult,
   RefusalCode,
   ResourceCapabilityExecutionContext,
   ResourceRefusal,
@@ -71,6 +73,20 @@ const RESOURCE_CAPABILITY_DEFINITION_KEYS = Object.freeze([
   'resolver',
   'handler'
 ]);
+const WRITE_CAPABILITY_DEFINITION_KEYS = Object.freeze([
+  'id',
+  'mcpName',
+  'title',
+  'description',
+  'inputSchema',
+  'outputSchema',
+  'annotations',
+  'transports',
+  'policy',
+  'preflight',
+  'handler',
+  'verifyOutcome'
+]);
 const CAPABILITY_POLICY_KEYS = Object.freeze([
   'effect',
   'resourceScopes',
@@ -94,6 +110,7 @@ const TOOL_ANNOTATION_KEYS = Object.freeze([
 const RESOURCE_REFUSAL_DETAIL_VOCABULARY_KEYS = Object.freeze(['operations', 'fields']);
 
 const REFUSAL_MESSAGES: Readonly<Record<RefusalCode, string>> = Object.freeze({
+  BACKUP_FAILED: 'Capability refused: a strict verified backup could not be created.',
   CANCELLED: 'Capability execution was cancelled.',
   CONFIRMATION_DECLINED: 'Capability confirmation was declined.',
   CONFIRMATION_INVALID: 'Capability confirmation is invalid.',
@@ -104,10 +121,16 @@ const REFUSAL_MESSAGES: Readonly<Record<RefusalCode, string>> = Object.freeze({
   INVALID_OUTPUT: 'Capability output is invalid.',
   INVALID_POLICY: 'Capability policy is invalid.',
   INVALID_RESOURCE_INPUT: 'Resource input is invalid.',
+  LOCK_UNAVAILABLE: 'Capability refused: the target mutation lock is unavailable.',
   OPERATION_NOT_AVAILABLE: 'Resource operation is not available.',
-  OUTCOME_INDETERMINATE: 'Capability outcome is indeterminate.',
+  OUTCOME_INDETERMINATE:
+    'Capability outcome is indeterminate; the pre-change backup is preserved. Do not retry blindly: reconcile the target state against the preserved backup before any further change.',
+  OUTCOME_UNVERIFIED:
+    'Capability outcome could not be verified; the pre-change backup is preserved. Reconcile the target state against the preserved backup before any further change.',
+  PREFLIGHT_FAILED: 'Capability refused: the read-only preflight failed.',
   READ_ONLY: 'Capability is disabled in read-only mode.',
   RESOURCE_NOT_ALLOWED: 'Capability resource scope is not allowed.',
+  STATE_REVALIDATION_FAILED: 'Capability refused: the target state changed after preflight.',
   TIMEOUT: 'Capability execution timed out.',
   TARGET_UNAVAILABLE: 'OPNsense target is unavailable.',
   UNKNOWN_CAPABILITY: 'Capability is not available.',
@@ -137,6 +160,21 @@ const resourceRefusalDetailVocabularies = new WeakMap<
   SealedResourceRefusalDetailVocabulary
 >();
 const sealedResourceRefusalDetails = new WeakMap<object, ResourceRefusalCode>();
+
+type PreflightCallback = (
+  input: Record<string, unknown>,
+  context: CapabilityExecutionContext
+) => Promise<PreflightResult>;
+type VerifyOutcomeCallback = (
+  input: Record<string, unknown>,
+  output: Record<string, unknown>,
+  context: CapabilityExecutionContext
+) => Promise<boolean>;
+// Write capabilities created by defineWriteCapability run the fixed mutation envelope. Membership in these
+// kernel-private maps — not the effect string — is what routes a capability through the envelope, so the
+// foundation's plain defineCapability write fixtures keep their existing execution path unchanged.
+const writeEnvelopePreflights = new WeakMap<CapabilityDefinition, PreflightCallback>();
+const writeEnvelopeVerifiers = new WeakMap<CapabilityDefinition, VerifyOutcomeCallback>();
 
 export interface TypedCapabilityDefinition<
   TInput extends Record<string, unknown>,
@@ -794,6 +832,106 @@ export function defineResourceCapability<
   }
 }
 
+export interface TypedWriteCapabilityDefinition<
+  TInput extends Record<string, unknown>,
+  TOutput extends Record<string, unknown>
+> {
+  readonly id: string;
+  readonly mcpName: string;
+  readonly title: string;
+  readonly description: string;
+  readonly inputSchema: z.ZodType<TInput>;
+  readonly outputSchema: z.ZodType<TOutput>;
+  readonly annotations: ToolAnnotations;
+  readonly transports: readonly TransportKind[];
+  readonly policy: CapabilityPolicy;
+  readonly preflight: (
+    input: TInput,
+    context: CapabilityExecutionContext
+  ) => Promise<PreflightResult>;
+  readonly handler: (input: TInput, context: CapabilityExecutionContext) => Promise<TOutput>;
+  readonly verifyOutcome: (
+    input: TInput,
+    output: TOutput,
+    context: CapabilityExecutionContext
+  ) => Promise<boolean>;
+}
+
+// A write capability runs the fixed mutation envelope. It reuses defineCapability for its sealed data-only
+// metadata and handler, then captures the read-only preflight and outcome verifier in kernel-private maps.
+// It enforces the write policy matrix that the generic factory does not: a real write must be audited, and a
+// firewall write must carry a strict backup.
+export function defineWriteCapability<
+  TInput extends Record<string, unknown>,
+  TOutput extends Record<string, unknown>
+>(definition: TypedWriteCapabilityDefinition<TInput, TOutput>): CapabilityDefinition {
+  try {
+    const source = readPlainOwnDataProperties(definition, WRITE_CAPABILITY_DEFINITION_KEYS, true);
+    const sourcePolicy = readPlainOwnDataProperties(
+      readRequiredProperty(source, 'policy'),
+      CAPABILITY_POLICY_KEYS,
+      true
+    );
+    const effect = readRequiredProperty(sourcePolicy, 'effect');
+    const backup = readRequiredProperty(sourcePolicy, 'backup');
+    const audit = readRequiredProperty(sourcePolicy, 'audit');
+    if (
+      !isCapabilityEffect(effect) ||
+      effect === 'read' ||
+      audit !== 'required' ||
+      (effect === 'firewall-write' && backup !== 'strict')
+    ) {
+      return invalidCapabilityDefinition();
+    }
+    const preflightValue = readRequiredProperty(source, 'preflight');
+    const verifyOutcomeValue = readRequiredProperty(source, 'verifyOutcome');
+    if (
+      typeof preflightValue !== 'function' ||
+      isProxy(preflightValue) ||
+      typeof verifyOutcomeValue !== 'function' ||
+      isProxy(verifyOutcomeValue)
+    ) {
+      return invalidCapabilityDefinition();
+    }
+    const preflight = preflightValue as TypedWriteCapabilityDefinition<
+      TInput,
+      TOutput
+    >['preflight'];
+    const verifyOutcome = verifyOutcomeValue as TypedWriteCapabilityDefinition<
+      TInput,
+      TOutput
+    >['verifyOutcome'];
+    const capability = defineCapability<TInput, TOutput>({
+      id: readRequiredProperty(source, 'id') as string,
+      mcpName: readRequiredProperty(source, 'mcpName') as string,
+      title: readRequiredProperty(source, 'title') as string,
+      description: readRequiredProperty(source, 'description') as string,
+      inputSchema: readRequiredProperty(source, 'inputSchema') as z.ZodType<TInput>,
+      outputSchema: readRequiredProperty(source, 'outputSchema') as z.ZodType<TOutput>,
+      annotations: readRequiredProperty(source, 'annotations') as ToolAnnotations,
+      transports: readRequiredProperty(source, 'transports') as readonly TransportKind[],
+      policy: readRequiredProperty(source, 'policy') as CapabilityPolicy,
+      handler: readRequiredProperty(source, 'handler') as TypedCapabilityDefinition<
+        TInput,
+        TOutput
+      >['handler']
+    });
+    writeEnvelopePreflights.set(capability, (input, context) =>
+      preflight(input as TInput, context)
+    );
+    writeEnvelopeVerifiers.set(capability, (input, output, context) =>
+      verifyOutcome(input as TInput, output as TOutput, context)
+    );
+    return capability;
+  } catch {
+    return invalidCapabilityDefinition();
+  }
+}
+
+function isMutationEnvelopeCapability(capability: CapabilityDefinition): boolean {
+  return writeEnvelopePreflights.has(capability);
+}
+
 export function isKernelDefinedCapability(capability: CapabilityDefinition): boolean {
   return kernelDefinedCapabilities.has(capability);
 }
@@ -1093,6 +1231,13 @@ async function executeAuthorized(
   context: CapabilityInvocationContext,
   internalHooks: CapabilityKernelInternalHooks
 ): Promise<CapabilityResult> {
+  if (isMutationEnvelopeCapability(authorization.capability)) {
+    // Product 2 Tasks 2-4 install the fixed target-lock / sealed-preflight / redacted-audit /
+    // strict-verified-backup / state-revalidation / bounded-execution / outcome-verification /
+    // final-audit / lock-release lifecycle here. Until then a routed mutation fails closed and never
+    // reaches an unenveloped handler.
+    return refusal('EXECUTION_FAILED');
+  }
   const executionContext: CapabilityExecutionContext = Object.freeze({
     signal: new AbortController().signal,
     readOnly: options.readOnly,
@@ -1178,7 +1323,8 @@ export function createCapabilityDispatcher(
   sourceOptions: CapabilityPolicyOptions,
   installCompletion?: (completion: ConfirmationCompletion) => void,
   testRuntime: CapabilityKernelRuntime = {},
-  internalHooks: CapabilityKernelInternalHooks = {}
+  internalHooks: CapabilityKernelInternalHooks = {},
+  mutationServices?: MutationEnvelopeServices
 ): CapabilityDispatcher {
   const options: SealedPolicyOptions = Object.freeze({
     readOnly: sourceOptions.readOnly,
@@ -1189,6 +1335,23 @@ export function createCapabilityDispatcher(
     enabledFeatureFlags: new Set(sourceOptions.enabledFeatureFlags)
   });
   const runtime = validateRuntime(testRuntime);
+  if (mutationServices === undefined) {
+    // A capability that runs the mutation envelope cannot be exposed without its services. Evaluate
+    // exposure across both transports under the sealed options; the view exposes only listExposed.
+    const exposesEnvelopeCapability = (['stdio', 'http'] as const).some((transport) =>
+      catalog
+        .listExposed({
+          readOnly: options.readOnly,
+          transport,
+          enabledFeatureFlags: options.enabledFeatureFlags,
+          allowedResourceScopes: options.allowedResourceScopes
+        })
+        .some((capability) => isMutationEnvelopeCapability(capability))
+    );
+    if (exposesEnvelopeCapability) {
+      throw new Error('Mutation envelope services are required to expose a write capability');
+    }
+  }
   const retain = internalHooks.retain;
   const sealedInternalHooks: CapabilityKernelInternalHooks = Object.freeze(
     retain === undefined ? {} : { retain }

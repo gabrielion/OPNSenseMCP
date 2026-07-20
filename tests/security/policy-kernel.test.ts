@@ -29,6 +29,7 @@ import type {
 import type { FeatureFlag } from '../../src/config/feature-flags.js';
 
 const REFUSAL_MESSAGES: Readonly<Record<RefusalCode, string>> = Object.freeze({
+  BACKUP_FAILED: 'Capability refused: a strict verified backup could not be created.',
   CANCELLED: 'Capability execution was cancelled.',
   CONFIRMATION_DECLINED: 'Capability confirmation was declined.',
   CONFIRMATION_INVALID: 'Capability confirmation is invalid.',
@@ -39,10 +40,16 @@ const REFUSAL_MESSAGES: Readonly<Record<RefusalCode, string>> = Object.freeze({
   INVALID_OUTPUT: 'Capability output is invalid.',
   INVALID_POLICY: 'Capability policy is invalid.',
   INVALID_RESOURCE_INPUT: 'Resource input is invalid.',
+  LOCK_UNAVAILABLE: 'Capability refused: the target mutation lock is unavailable.',
   OPERATION_NOT_AVAILABLE: 'Resource operation is not available.',
-  OUTCOME_INDETERMINATE: 'Capability outcome is indeterminate.',
+  OUTCOME_INDETERMINATE:
+    'Capability outcome is indeterminate; the pre-change backup is preserved. Do not retry blindly: reconcile the target state against the preserved backup before any further change.',
+  OUTCOME_UNVERIFIED:
+    'Capability outcome could not be verified; the pre-change backup is preserved. Reconcile the target state against the preserved backup before any further change.',
+  PREFLIGHT_FAILED: 'Capability refused: the read-only preflight failed.',
   READ_ONLY: 'Capability is disabled in read-only mode.',
   RESOURCE_NOT_ALLOWED: 'Capability resource scope is not allowed.',
+  STATE_REVALIDATION_FAILED: 'Capability refused: the target state changed after preflight.',
   TIMEOUT: 'Capability execution timed out.',
   TARGET_UNAVAILABLE: 'OPNsense target is unavailable.',
   UNKNOWN_CAPABILITY: 'Capability is not available.',
