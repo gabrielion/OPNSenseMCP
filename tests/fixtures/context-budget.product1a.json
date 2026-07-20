@@ -3,7 +3,7 @@
   "scope": "product-1a-final",
   "tools": ["opn_describe", "opn_get", "opn_list", "server_status"],
   "toolCount": 4,
-  "totalBytes": 6369,
+  "totalBytes": 6701,
   "largestTool": { "name": "opn_describe", "bytes": 3549 },
   "limits": { "totalBytes": 131072, "perToolBytes": 16384 }
 }
