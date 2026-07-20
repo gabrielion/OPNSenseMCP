@@ -11,7 +11,11 @@ describe('reviewed OPNsense firewall-alias adapter', () => {
       .fn<OPNsenseHttpsClient['request']>()
       .mockResolvedValueOnce({ result: 'saved', uuid: UUID })
       .mockResolvedValueOnce({ status: 'ok' });
-    const adapter = createOPNsenseAliasAdapter({ request, close: vi.fn() });
+    const adapter = createOPNsenseAliasAdapter({
+      request,
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
+    });
     const signal = new AbortController().signal;
 
     await expect(
@@ -56,7 +60,11 @@ describe('reviewed OPNsense firewall-alias adapter', () => {
     const request = vi
       .fn<OPNsenseHttpsClient['request']>()
       .mockResolvedValueOnce({ result: 'failed', validations: { 'alias.name': 'in use' } });
-    const adapter = createOPNsenseAliasAdapter({ request, close: vi.fn() });
+    const adapter = createOPNsenseAliasAdapter({
+      request,
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
+    });
 
     await expect(
       adapter.createHostAlias(
@@ -72,7 +80,11 @@ describe('reviewed OPNsense firewall-alias adapter', () => {
       .fn<OPNsenseHttpsClient['request']>()
       .mockResolvedValueOnce({ result: 'saved', uuid: UUID })
       .mockResolvedValueOnce({ status: 'error' });
-    const adapter = createOPNsenseAliasAdapter({ request, close: vi.fn() });
+    const adapter = createOPNsenseAliasAdapter({
+      request,
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
+    });
 
     await expect(
       adapter.createHostAlias(
@@ -87,7 +99,11 @@ describe('reviewed OPNsense firewall-alias adapter', () => {
       .fn<OPNsenseHttpsClient['request']>()
       .mockResolvedValueOnce({ result: 'deleted' })
       .mockResolvedValueOnce({ status: 'ok' });
-    const adapter = createOPNsenseAliasAdapter({ request, close: vi.fn() });
+    const adapter = createOPNsenseAliasAdapter({
+      request,
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
+    });
     const signal = new AbortController().signal;
 
     await expect(adapter.deleteHostAlias(UUID, signal)).resolves.toEqual({ item: { id: UUID } });
@@ -118,7 +134,11 @@ describe('reviewed OPNsense firewall-alias adapter', () => {
         }
       ]
     });
-    const adapter = createOPNsenseAliasAdapter({ request, close: vi.fn() });
+    const adapter = createOPNsenseAliasAdapter({
+      request,
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
+    });
     const signal = new AbortController().signal;
 
     await expect(
@@ -143,7 +163,11 @@ describe('reviewed OPNsense firewall-alias adapter', () => {
       current: 1,
       rows: [{ uuid: UUID, name: '', type: 'host', description: 'x' }]
     });
-    const adapter = createOPNsenseAliasAdapter({ request, close: vi.fn() });
+    const adapter = createOPNsenseAliasAdapter({
+      request,
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
+    });
 
     await expect(
       adapter.searchHostAliases({ page: 1, pageSize: 25, query: '' }, new AbortController().signal)

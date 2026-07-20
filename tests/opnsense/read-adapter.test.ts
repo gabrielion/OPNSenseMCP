@@ -32,7 +32,11 @@ describe('reviewed OPNsense read adapter', () => {
         ],
         secret: 'SENTINEL_DROP'
       });
-    const adapter = createOPNsenseReadAdapter({ request, close: vi.fn() });
+    const adapter = createOPNsenseReadAdapter({
+      request,
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
+    });
     const signal = new AbortController().signal;
 
     await expect(adapter.getSystemStatus(signal)).resolves.toEqual({ item: { status: 'ok' } });
@@ -71,7 +75,8 @@ describe('reviewed OPNsense read adapter', () => {
   ])('rejects an invalid upstream page without exposing it', async (response) => {
     const adapter = createOPNsenseReadAdapter({
       request: vi.fn().mockResolvedValue(response),
-      close: vi.fn()
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
     });
     await expect(
       adapter.listServices(

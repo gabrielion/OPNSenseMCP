@@ -79,6 +79,7 @@ export type ClosedOPNsenseRequest =
 
 export interface OPNsenseHttpsClient {
   request(request: ClosedOPNsenseRequest): Promise<unknown>;
+  downloadConfigBackup(signal: AbortSignal): Promise<Uint8Array>;
   close(): void;
 }
 
@@ -88,6 +89,7 @@ interface ResolvedRequest {
   readonly maxInputBytes: number;
   readonly maxOutputBytes: number;
   readonly body?: object;
+  readonly raw?: boolean;
   readonly signal: AbortSignal;
 }
 
@@ -99,6 +101,17 @@ function isJsonContentType(value: string | undefined): boolean {
   if (value === undefined) return false;
   const mediaType = value.split(';', 1)[0]?.trim().toLowerCase();
   return mediaType === 'application/json' || mediaType?.endsWith('+json') === true;
+}
+
+function isConfigBackupContentType(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const mediaType = value.split(';', 1)[0]?.trim().toLowerCase();
+  return (
+    mediaType === 'application/octet-stream' ||
+    mediaType === 'application/xml' ||
+    mediaType === 'text/xml' ||
+    mediaType?.endsWith('+xml') === true
+  );
 }
 
 function isIdentityContentEncoding(value: string | readonly string[] | undefined): boolean {
@@ -201,6 +214,8 @@ const FIREWALL_ALIAS_DELETE_OPERATION = requireOperation('firewall.alias', 'dele
 });
 
 const RECONFIGURE_MAX_OUTPUT_BYTES = 4096;
+const CONFIG_BACKUP_PATH = '/api/core/backup/download/this';
+const CONFIG_BACKUP_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 
 function requireReconfigureCommand(operation: RuntimeOperationDescriptor): string {
@@ -330,6 +345,17 @@ function resolveClosedRequest(request: unknown): ResolvedRequest | undefined {
         signal
       };
     }
+    if (request.operation === 'core.backup/download') {
+      if (!hasExactKeys(request, ['operation', 'signal'])) return undefined;
+      return {
+        method: 'GET',
+        path: CONFIG_BACKUP_PATH,
+        maxInputBytes: 0,
+        maxOutputBytes: CONFIG_BACKUP_MAX_OUTPUT_BYTES,
+        raw: true,
+        signal
+      };
+    }
     if (request.operation === 'firewall.alias/delete') {
       if (!hasExactKeys(request, ['operation', 'id', 'signal'])) return undefined;
       if (typeof request.id !== 'string' || !UUID_PATTERN.test(request.id)) return undefined;
@@ -356,183 +382,200 @@ export function createOPNsenseHttpsClient(config: OPNsenseConnectionConfig): OPN
   });
   let closed = false;
 
+  const perform = (resolved: ResolvedRequest): Promise<unknown> => {
+    let body: Buffer | undefined;
+    try {
+      body =
+        resolved.body === undefined
+          ? undefined
+          : Buffer.from(JSON.stringify(resolved.body), 'utf8');
+    } catch {
+      return Promise.reject(requestFailure());
+    }
+    if (body !== undefined && body.byteLength > resolved.maxInputBytes) {
+      return Promise.reject(requestFailure());
+    }
+    if (resolved.signal.aborted) return Promise.reject(requestFailure());
+    const responseLimit = Math.min(config.maxResponseBytes, resolved.maxOutputBytes);
+    const settlement = new Promise<unknown>((resolve, reject) => {
+      let settled = false;
+      let failing = false;
+      let response: IncomingMessage | undefined;
+      let request: ClientRequest | undefined;
+      let timer: NodeJS.Timeout | undefined;
+      const cleanup = () => {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+        resolved.signal.removeEventListener('abort', onAbort);
+        request?.off('response', onResponse);
+        request?.off('error', onRequestError);
+        request?.off('close', onFailureRequestClose);
+        response?.off('data', onResponseData);
+        response?.off('aborted', onResponseAborted);
+        response?.off('error', onResponseError);
+        response?.off('end', onResponseEnd);
+        response?.off('close', onFailureResponseClose);
+      };
+      const finishFailure = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(requestFailure());
+      };
+      const maybeFinishFailure = () => {
+        if (
+          failing &&
+          (request === undefined || request.closed) &&
+          (response === undefined || response.closed)
+        ) {
+          finishFailure();
+        }
+      };
+      const onFailureRequestClose = () => {
+        maybeFinishFailure();
+      };
+      const onFailureResponseClose = () => {
+        maybeFinishFailure();
+      };
+      const fail = () => {
+        if (settled || failing) return;
+        failing = true;
+        if (request !== undefined && !request.closed) {
+          request.once('close', onFailureRequestClose);
+        }
+        if (response !== undefined && !response.closed) {
+          response.once('close', onFailureResponseClose);
+        }
+        response?.destroy();
+        request?.destroy();
+        maybeFinishFailure();
+      };
+      const succeed = (value: unknown) => {
+        if (settled || failing) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+      const onAbort = () => {
+        fail();
+      };
+      const onTimeout = () => {
+        fail();
+      };
+      const onRequestError = () => {
+        fail();
+      };
+      const onResponseAborted = () => {
+        fail();
+      };
+      const onResponseError = () => {
+        fail();
+      };
+      const chunks: Buffer[] = [];
+      let received = 0;
+      const onResponseData = (chunk: Buffer | string) => {
+        if (settled || failing) return;
+        const bytes = Buffer.from(chunk);
+        received += bytes.byteLength;
+        if (received > responseLimit) {
+          fail();
+          return;
+        }
+        chunks.push(bytes);
+      };
+      const onResponseEnd = () => {
+        if (settled || failing) return;
+        try {
+          const collected = Buffer.concat(chunks, received);
+          succeed(resolved.raw === true ? collected : strictJson(collected));
+        } catch {
+          fail();
+        }
+      };
+      const onResponse = (incoming: IncomingMessage) => {
+        if (settled || failing) {
+          incoming.destroy();
+          return;
+        }
+        response = incoming;
+        incoming.once('aborted', onResponseAborted);
+        incoming.once('error', onResponseError);
+        const length = declaredLength(incoming);
+        if (
+          incoming.statusCode === undefined ||
+          incoming.statusCode < 200 ||
+          incoming.statusCode >= 300 ||
+          (resolved.raw === true
+            ? !isConfigBackupContentType(incoming.headers['content-type'])
+            : !isJsonContentType(incoming.headers['content-type'])) ||
+          !isIdentityContentEncoding(incoming.headers['content-encoding']) ||
+          (length !== undefined && (!Number.isFinite(length) || length > responseLimit))
+        ) {
+          fail();
+          return;
+        }
+        incoming.on('data', onResponseData);
+        incoming.once('end', onResponseEnd);
+      };
+
+      resolved.signal.addEventListener('abort', onAbort, { once: true });
+      if (resolved.signal.aborted) {
+        fail();
+        return;
+      }
+      timer = setTimeout(onTimeout, config.timeoutMs);
+      timer.unref();
+
+      const headers: Record<string, string | number> = {
+        accept:
+          resolved.raw === true ? 'application/octet-stream, application/xml' : 'application/json',
+        authorization: `Basic ${Buffer.from(`${config.apiKey}:${config.apiSecret}`, 'ascii').toString('base64')}`
+      };
+      if (body !== undefined) {
+        headers['content-type'] = 'application/json';
+        headers['content-length'] = body.byteLength;
+      }
+      try {
+        request = httpsRequest({
+          protocol: origin.protocol,
+          hostname: origin.hostname,
+          port: origin.port,
+          method: resolved.method,
+          path: resolved.path,
+          headers,
+          agent,
+          rejectUnauthorized: true,
+          ...(config.tlsServerName === undefined ? {} : { servername: config.tlsServerName })
+        });
+        request.once('response', onResponse);
+        request.once('error', onRequestError);
+        if (body !== undefined) request.end(body);
+        else request.end();
+      } catch {
+        fail();
+      }
+    });
+    return settlement.catch(() => {
+      throw requestFailure();
+    });
+  };
+
   return Object.freeze({
     request(closedRequest: ClosedOPNsenseRequest): Promise<unknown> {
       if (closed) return Promise.reject(new Error(CLOSED_CLIENT_MESSAGE));
       const resolved = resolveClosedRequest(closedRequest);
       if (resolved === undefined) return Promise.reject(requestFailure());
-      let body: Buffer | undefined;
-      try {
-        body =
-          resolved.body === undefined
-            ? undefined
-            : Buffer.from(JSON.stringify(resolved.body), 'utf8');
-      } catch {
-        return Promise.reject(requestFailure());
-      }
-      if (body !== undefined && body.byteLength > resolved.maxInputBytes) {
-        return Promise.reject(requestFailure());
-      }
-      if (resolved.signal.aborted) return Promise.reject(requestFailure());
-      const responseLimit = Math.min(config.maxResponseBytes, resolved.maxOutputBytes);
-      const settlement = new Promise<unknown>((resolve, reject) => {
-        let settled = false;
-        let failing = false;
-        let response: IncomingMessage | undefined;
-        let request: ClientRequest | undefined;
-        let timer: NodeJS.Timeout | undefined;
-        const cleanup = () => {
-          if (timer !== undefined) {
-            clearTimeout(timer);
-            timer = undefined;
-          }
-          resolved.signal.removeEventListener('abort', onAbort);
-          request?.off('response', onResponse);
-          request?.off('error', onRequestError);
-          request?.off('close', onFailureRequestClose);
-          response?.off('data', onResponseData);
-          response?.off('aborted', onResponseAborted);
-          response?.off('error', onResponseError);
-          response?.off('end', onResponseEnd);
-          response?.off('close', onFailureResponseClose);
-        };
-        const finishFailure = () => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(requestFailure());
-        };
-        const maybeFinishFailure = () => {
-          if (
-            failing &&
-            (request === undefined || request.closed) &&
-            (response === undefined || response.closed)
-          ) {
-            finishFailure();
-          }
-        };
-        const onFailureRequestClose = () => {
-          maybeFinishFailure();
-        };
-        const onFailureResponseClose = () => {
-          maybeFinishFailure();
-        };
-        const fail = () => {
-          if (settled || failing) return;
-          failing = true;
-          if (request !== undefined && !request.closed) {
-            request.once('close', onFailureRequestClose);
-          }
-          if (response !== undefined && !response.closed) {
-            response.once('close', onFailureResponseClose);
-          }
-          response?.destroy();
-          request?.destroy();
-          maybeFinishFailure();
-        };
-        const succeed = (value: unknown) => {
-          if (settled || failing) return;
-          settled = true;
-          cleanup();
-          resolve(value);
-        };
-        const onAbort = () => {
-          fail();
-        };
-        const onTimeout = () => {
-          fail();
-        };
-        const onRequestError = () => {
-          fail();
-        };
-        const onResponseAborted = () => {
-          fail();
-        };
-        const onResponseError = () => {
-          fail();
-        };
-        const chunks: Buffer[] = [];
-        let received = 0;
-        const onResponseData = (chunk: Buffer | string) => {
-          if (settled || failing) return;
-          const bytes = Buffer.from(chunk);
-          received += bytes.byteLength;
-          if (received > responseLimit) {
-            fail();
-            return;
-          }
-          chunks.push(bytes);
-        };
-        const onResponseEnd = () => {
-          if (settled || failing) return;
-          try {
-            succeed(strictJson(Buffer.concat(chunks, received)));
-          } catch {
-            fail();
-          }
-        };
-        const onResponse = (incoming: IncomingMessage) => {
-          if (settled || failing) {
-            incoming.destroy();
-            return;
-          }
-          response = incoming;
-          incoming.once('aborted', onResponseAborted);
-          incoming.once('error', onResponseError);
-          const length = declaredLength(incoming);
-          if (
-            incoming.statusCode === undefined ||
-            incoming.statusCode < 200 ||
-            incoming.statusCode >= 300 ||
-            !isJsonContentType(incoming.headers['content-type']) ||
-            !isIdentityContentEncoding(incoming.headers['content-encoding']) ||
-            (length !== undefined && (!Number.isFinite(length) || length > responseLimit))
-          ) {
-            fail();
-            return;
-          }
-          incoming.on('data', onResponseData);
-          incoming.once('end', onResponseEnd);
-        };
-
-        resolved.signal.addEventListener('abort', onAbort, { once: true });
-        if (resolved.signal.aborted) {
-          fail();
-          return;
-        }
-        timer = setTimeout(onTimeout, config.timeoutMs);
-        timer.unref();
-
-        const headers: Record<string, string | number> = {
-          accept: 'application/json',
-          authorization: `Basic ${Buffer.from(`${config.apiKey}:${config.apiSecret}`, 'ascii').toString('base64')}`
-        };
-        if (body !== undefined) {
-          headers['content-type'] = 'application/json';
-          headers['content-length'] = body.byteLength;
-        }
-        try {
-          request = httpsRequest({
-            protocol: origin.protocol,
-            hostname: origin.hostname,
-            port: origin.port,
-            method: resolved.method,
-            path: resolved.path,
-            headers,
-            agent,
-            rejectUnauthorized: true,
-            ...(config.tlsServerName === undefined ? {} : { servername: config.tlsServerName })
-          });
-          request.once('response', onResponse);
-          request.once('error', onRequestError);
-          if (body !== undefined) request.end(body);
-          else request.end();
-        } catch {
-          fail();
-        }
-      });
-      return settlement.catch(() => {
-        throw requestFailure();
+      return perform(resolved);
+    },
+    downloadConfigBackup(signal: AbortSignal): Promise<Uint8Array> {
+      if (closed) return Promise.reject(new Error(CLOSED_CLIENT_MESSAGE));
+      const resolved = resolveClosedRequest({ operation: 'core.backup/download', signal });
+      if (resolved === undefined) return Promise.reject(requestFailure());
+      return perform(resolved).then((value) => {
+        if (!Buffer.isBuffer(value)) throw requestFailure();
+        return new Uint8Array(value);
       });
     },
     close(): void {
