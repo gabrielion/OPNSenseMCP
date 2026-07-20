@@ -3,6 +3,8 @@
 import { realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
+import { DEFAULT_CONFIGURE_COMMAND_DEPENDENCIES, runConfigureCommand } from './config/configure.js';
+import { createProcessConfigureTerminal } from './config/configure-terminal.js';
 import { startStdio, type StdioRuntime } from './entrypoints/stdio.js';
 
 interface SignalProcess {
@@ -49,6 +51,38 @@ export async function runStdioEntrypoint(): Promise<StdioRuntime> {
   return handle;
 }
 
+export interface CommandLineDependencies {
+  startStdio(): Promise<unknown>;
+  runConfigure(arguments_: readonly string[]): Promise<0 | 1>;
+  writeError(message: string): void;
+}
+
+const DEFAULT_COMMAND_LINE_DEPENDENCIES: CommandLineDependencies = Object.freeze({
+  startStdio: runStdioEntrypoint,
+  runConfigure: (arguments_: readonly string[]) =>
+    runConfigureCommand(
+      arguments_,
+      createProcessConfigureTerminal(),
+      DEFAULT_CONFIGURE_COMMAND_DEPENDENCIES
+    ),
+  writeError: (message: string) => {
+    process.stderr.write(message);
+  }
+});
+
+export async function runCommandLine(
+  arguments_: readonly string[],
+  dependencies: CommandLineDependencies = DEFAULT_COMMAND_LINE_DEPENDENCIES
+): Promise<0 | 1> {
+  if (arguments_.length === 0) {
+    await dependencies.startStdio();
+    return 0;
+  }
+  if (arguments_[0] === 'configure') return dependencies.runConfigure(arguments_.slice(1));
+  dependencies.writeError('Error\n');
+  return 1;
+}
+
 type RealPathResolver = (path: string) => Promise<string>;
 
 export async function isDirectInvocation(
@@ -69,8 +103,12 @@ export async function isDirectInvocation(
 }
 
 if (await isDirectInvocation(import.meta.url, process.argv[1])) {
-  void runStdioEntrypoint().catch(() => {
-    process.stderr.write('Error\n');
-    process.exitCode = 1;
-  });
+  void runCommandLine(process.argv.slice(2))
+    .then((exitCode) => {
+      process.exitCode = exitCode;
+    })
+    .catch(() => {
+      process.stderr.write('Error\n');
+      process.exitCode = 1;
+    });
 }

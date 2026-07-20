@@ -13,10 +13,30 @@ import {
   createOPNsenseReadAdapter,
   UNAVAILABLE_OPNSENSE_READ_ADAPTER
 } from '../opnsense/read-adapter.js';
+import { lstatSync } from 'node:fs';
+import { resolveDefaultOPNsenseConfigPath } from '../config/runtime-config.js';
 
 export interface OwnedApplicationRuntime {
   readonly application: ApplicationContext;
   close(): Promise<void>;
+}
+
+function isRegularNonSymlinkFile(path: string): boolean {
+  try {
+    const stats = lstatSync(path);
+    return stats.isFile() && !stats.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+export function selectOPNsenseConfigFile(
+  explicitPath: string | undefined,
+  defaultPath: string | undefined,
+  isRegularFile: (path: string) => boolean = isRegularNonSymlinkFile
+): string | undefined {
+  if (explicitPath !== undefined) return explicitPath;
+  return defaultPath !== undefined && isRegularFile(defaultPath) ? defaultPath : undefined;
 }
 
 export function createOwnedApplicationRuntime(
@@ -53,15 +73,21 @@ export function createOwnedApplicationRuntime(
 
 export function createDefaultApplicationRuntime(): OwnedApplicationRuntime {
   const config = loadRuntimeConfig();
+  const defaultPath = resolveDefaultOPNsenseConfigPath(process.platform, {
+    ...(process.env.HOME === undefined ? {} : { HOME: process.env.HOME }),
+    ...(process.env.XDG_CONFIG_HOME === undefined
+      ? {}
+      : { XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME }),
+    ...(process.env.APPDATA === undefined ? {} : { APPDATA: process.env.APPDATA })
+  });
+  const configPath = selectOPNsenseConfigFile(config.opnsenseConfigFile, defaultPath);
   let client: OPNsenseHttpsClient | undefined;
   try {
     const adapter =
-      config.opnsenseConfigFile === undefined
+      configPath === undefined
         ? UNAVAILABLE_OPNSENSE_READ_ADAPTER
         : (() => {
-            client = createOPNsenseHttpsClient(
-              loadOPNsenseConnectionConfig(config.opnsenseConfigFile)
-            );
+            client = createOPNsenseHttpsClient(loadOPNsenseConnectionConfig(configPath));
             return createOPNsenseReadAdapter(client);
           })();
     const application = createApplicationContext(config, createProductCapabilityCatalog(adapter));

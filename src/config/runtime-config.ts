@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { randomBytes } from 'node:crypto';
+import { posix, win32 } from 'node:path';
 import * as z from 'zod/v4';
 import { FeatureFlagSchema, type FeatureFlag } from './feature-flags.js';
 
@@ -29,6 +30,47 @@ const SerializedOriginSchema = z
   .string()
   .refine(isSerializedHttpOrigin, 'must be an exact serialized HTTP Origin');
 const OriginCsvSchema = CsvSchema.pipe(z.array(SerializedOriginSchema));
+
+export interface DefaultConfigPathEnvironment {
+  readonly HOME?: string;
+  readonly XDG_CONFIG_HOME?: string;
+  readonly APPDATA?: string;
+}
+
+export function resolveDefaultOPNsenseConfigPath(
+  platform: NodeJS.Platform,
+  environment: DefaultConfigPathEnvironment
+): string | undefined {
+  if (platform === 'darwin') {
+    return environment.HOME !== undefined && posix.isAbsolute(environment.HOME)
+      ? posix.join(
+          environment.HOME,
+          'Library',
+          'Application Support',
+          'opnsense-mcp',
+          'config.json'
+        )
+      : undefined;
+  }
+
+  if (platform === 'linux') {
+    if (
+      environment.XDG_CONFIG_HOME !== undefined &&
+      posix.isAbsolute(environment.XDG_CONFIG_HOME)
+    ) {
+      return posix.join(environment.XDG_CONFIG_HOME, 'opnsense-mcp', 'config.json');
+    }
+    return environment.HOME !== undefined && posix.isAbsolute(environment.HOME)
+      ? posix.join(environment.HOME, '.config', 'opnsense-mcp', 'config.json')
+      : undefined;
+  }
+
+  return platform === 'win32' &&
+    environment.APPDATA !== undefined &&
+    win32.isAbsolute(environment.APPDATA)
+    ? win32.join(environment.APPDATA, 'opnsense-mcp', 'config.json')
+    : undefined;
+}
 
 const EnvironmentSchema = z
   .object({

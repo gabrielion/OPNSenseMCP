@@ -7,7 +7,8 @@ import * as z from 'zod/v4';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createDefaultApplicationRuntime,
-  createOwnedApplicationRuntime
+  createOwnedApplicationRuntime,
+  selectOPNsenseConfigFile
 } from '../../src/app/default-application.js';
 import {
   createApplicationContext,
@@ -24,6 +25,9 @@ import { startSyntheticOPNsenseTarget } from '../support/https-opnsense-mock.js'
 
 beforeEach(() => {
   vi.stubEnv('OPNSENSE_CONFIG_FILE', undefined);
+  vi.stubEnv('HOME', '');
+  vi.stubEnv('XDG_CONFIG_HOME', '');
+  vi.stubEnv('APPDATA', '');
 });
 
 afterEach(() => {
@@ -56,6 +60,27 @@ function deferred() {
 }
 
 describe('default application composition seam', () => {
+  it('uses an explicit config path authoritatively and ignores missing or unsafe defaults', () => {
+    const isRegularNonSymlinkFile = (path: string) => path === '/safe/default.json';
+
+    expect(
+      selectOPNsenseConfigFile(
+        '/explicit/missing.json',
+        '/safe/default.json',
+        isRegularNonSymlinkFile
+      )
+    ).toBe('/explicit/missing.json');
+    expect(
+      selectOPNsenseConfigFile(undefined, '/missing/default.json', isRegularNonSymlinkFile)
+    ).toBe(undefined);
+    expect(
+      selectOPNsenseConfigFile(undefined, '/unsafe/default.json', isRegularNonSymlinkFile)
+    ).toBe(undefined);
+    expect(selectOPNsenseConfigFile(undefined, '/safe/default.json', isRegularNonSymlinkFile)).toBe(
+      '/safe/default.json'
+    );
+  });
+
   it('constructs the final four-tool Product 1A runtime without target credentials', async () => {
     const runtime = createDefaultApplicationRuntime();
     const connection = await connectLegacy(runtime.application);

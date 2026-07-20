@@ -119,6 +119,14 @@ function currentUserId(): number {
   return process.getuid();
 }
 
+export function validateOPNsenseConnectionConfigDocument(document: unknown): void {
+  try {
+    PrivateConfigurationSchema.parse(document);
+  } catch {
+    invalidConfiguration();
+  }
+}
+
 export function loadOPNsenseConnectionConfig(path: string): OPNsenseConnectionConfig {
   try {
     const bytes = readOpenedBoundedFile(path, CONFIG_MAX_BYTES, (stats) => {
@@ -127,6 +135,7 @@ export function loadOPNsenseConnectionConfig(path: string): OPNsenseConnectionCo
       }
     });
     const parsedJson: unknown = JSON.parse(decodeUtf8(bytes));
+    validateOPNsenseConnectionConfigDocument(parsedJson);
     const parsed = PrivateConfigurationSchema.parse(parsedJson);
     const ca =
       parsed.caFile === undefined

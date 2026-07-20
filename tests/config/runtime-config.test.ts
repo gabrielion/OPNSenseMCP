@@ -1,8 +1,38 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
+import * as runtimeConfig from '../../src/config/runtime-config.js';
 import { loadRuntimeConfig } from '../../src/config/runtime-config.js';
 
 describe('loadRuntimeConfig', () => {
+  it('resolves bounded platform-default configuration paths without consulting process state', () => {
+    const resolveDefaultOPNsenseConfigPath = Reflect.get(
+      runtimeConfig,
+      'resolveDefaultOPNsenseConfigPath'
+    ) as unknown;
+
+    expect(resolveDefaultOPNsenseConfigPath).toEqual(expect.any(Function));
+    if (typeof resolveDefaultOPNsenseConfigPath !== 'function') return;
+
+    const resolve = resolveDefaultOPNsenseConfigPath as (
+      platform: NodeJS.Platform,
+      environment: { HOME?: string; XDG_CONFIG_HOME?: string; APPDATA?: string }
+    ) => string | undefined;
+    expect(resolve('darwin', { HOME: '/Users/tester' })).toBe(
+      '/Users/tester/Library/Application Support/opnsense-mcp/config.json'
+    );
+    expect(resolve('linux', { XDG_CONFIG_HOME: '/var/config', HOME: '/home/tester' })).toBe(
+      '/var/config/opnsense-mcp/config.json'
+    );
+    expect(resolve('linux', { HOME: '/home/tester' })).toBe(
+      '/home/tester/.config/opnsense-mcp/config.json'
+    );
+    expect(resolve('win32', { APPDATA: 'C:\\Users\\tester\\AppData\\Roaming' })).toBe(
+      'C:\\Users\\tester\\AppData\\Roaming\\opnsense-mcp\\config.json'
+    );
+    expect(resolve('linux', { HOME: 'relative' })).toBeUndefined();
+    expect(resolve('win32', { APPDATA: 'relative' })).toBeUndefined();
+  });
+
   it('defaults to read-only stdio with a private ephemeral request-state key', () => {
     const config = loadRuntimeConfig({});
 
