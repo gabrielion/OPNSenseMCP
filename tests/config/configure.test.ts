@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import {
   chmod,
   link,
@@ -18,6 +18,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_CONFIGURE_FILE_SYSTEM,
+  IncompleteConfigurationError,
   runConfigureCommand,
   writePrivateOPNsenseConfigFile,
   type ConfigureFileSystem,
@@ -193,6 +194,30 @@ describe('configure command', () => {
     expect(io.stderr.join('')).not.toContain(KEY);
   });
 
+  it('warns without reflecting private input when cleanup is incomplete', async () => {
+    const path = join(directory, 'opnsense-mcp', 'config.json');
+    const privateCaPath = '/private/configure-warning-ca.pem';
+    const io = terminal(['https://firewall.example', KEY, SECRET, privateCaPath, '']);
+
+    await expect(
+      runConfigureCommand([], io.instance, {
+        ...commandDependencies(path),
+        writePrivateConfigFile: () => {
+          throw new IncompleteConfigurationError();
+        }
+      })
+    ).resolves.toBe(1);
+
+    expect(io.stdout).toEqual([]);
+    expect(io.stderr).toEqual([
+      'Configuration cleanup is incomplete. Remove the private config file before retrying.\n'
+    ]);
+    expect(io.stderr.join('')).not.toContain(path);
+    expect(io.stderr.join('')).not.toContain(privateCaPath);
+    expect(io.stderr.join('')).not.toContain(KEY);
+    expect(io.stderr.join('')).not.toContain(SECRET);
+  });
+
   it('refuses symlink application directories and existing symlink files', async () => {
     const target = join(directory, 'target');
     await writeFile(target, 'not a directory', { mode: 0o600 });
@@ -278,7 +303,6 @@ describe('configure command', () => {
 
   it.each([
     ['writeSync', 1],
-    ['closeSync', 1],
     ['linkSync', 1],
     ['unlinkSync', 1],
     ['fsyncSync', 2]
@@ -299,6 +323,129 @@ describe('configure command', () => {
       await expectNoTransactionSecrets(dirname(path), path);
     }
   );
+
+  it('reports incomplete configuration when closing a written temporary file is ambiguous', async () => {
+    const path = join(directory, 'opnsense-mcp', 'config.json');
+
+    expect(() => {
+      writePrivateOPNsenseConfigFile(path, document, process.platform, failAfter('closeSync', 1));
+    }).toThrow(/^Incomplete OPNsense configuration requires manual removal\.$/u);
+    await expectNoTransactionSecrets(dirname(path), path);
+  });
+
+  it('stops rather than retrying when a write makes no forward progress', async () => {
+    const path = join(directory, 'opnsense-mcp', 'config.json');
+    let writes = 0;
+    const noProgressWrite: ConfigureFileSystem = {
+      ...DEFAULT_CONFIGURE_FILE_SYSTEM,
+      writeSync: () => {
+        writes += 1;
+        if (writes === 1) return 0;
+        throw new Error('write retried after no progress');
+      }
+    };
+
+    expect(() => {
+      writePrivateOPNsenseConfigFile(path, document, process.platform, noProgressWrite);
+    }).toThrow(/^Invalid OPNsense configuration\.$/u);
+    expect(writes).toBe(1);
+    await expectNoTransactionSecrets(dirname(path), path);
+  });
+
+  it('reports incomplete configuration when rollback directory fsync cannot be confirmed', async () => {
+    const path = join(directory, 'opnsense-mcp', 'config.json');
+    let fsyncs = 0;
+    const rollbackSyncFailure: ConfigureFileSystem = {
+      ...DEFAULT_CONFIGURE_FILE_SYSTEM,
+      linkSync: () => {
+        throw new Error('injected link failure');
+      },
+      fsyncSync: (descriptor) => {
+        fsyncs += 1;
+        if (fsyncs > 1) throw new Error('injected rollback directory fsync failure');
+        DEFAULT_CONFIGURE_FILE_SYSTEM.fsyncSync(descriptor);
+      }
+    };
+
+    expect(() => {
+      writePrivateOPNsenseConfigFile(path, document, process.platform, rollbackSyncFailure);
+    }).toThrow(/^Incomplete OPNsense configuration requires manual removal\.$/u);
+    expect(fsyncs).toBe(2);
+    await expectNoTransactionSecrets(dirname(path), path);
+  });
+
+  it('reports incomplete configuration when rollback directory revalidation fails', async () => {
+    const path = join(directory, 'opnsense-mcp', 'config.json');
+    let cleanupStarted = false;
+    const rollbackValidationFailure: ConfigureFileSystem = {
+      ...DEFAULT_CONFIGURE_FILE_SYSTEM,
+      linkSync: () => {
+        cleanupStarted = true;
+        throw new Error('injected link failure');
+      },
+      lstatSync: (target) => {
+        if (cleanupStarted && target === dirname(path)) {
+          throw new Error('injected rollback directory validation failure');
+        }
+        return DEFAULT_CONFIGURE_FILE_SYSTEM.lstatSync(target);
+      }
+    };
+
+    expect(() => {
+      writePrivateOPNsenseConfigFile(path, document, process.platform, rollbackValidationFailure);
+    }).toThrow(/^Incomplete OPNsense configuration requires manual removal\.$/u);
+    await expectNoTransactionSecrets(dirname(path), path);
+  });
+
+  it('does not remove an unverified temporary replacement after initial fstat failure', async () => {
+    const path = join(directory, 'opnsense-mcp', 'config.json');
+    const temporaryPath = `${path}.${'01'.repeat(16)}.tmp`;
+    let fstats = 0;
+    const initialTemporaryFstatFailure: ConfigureFileSystem = {
+      ...DEFAULT_CONFIGURE_FILE_SYSTEM,
+      randomBytes: () => Buffer.alloc(16, 1),
+      fstatSync: (descriptor) => {
+        fstats += 1;
+        if (fstats === 2) {
+          unlinkSync(temporaryPath);
+          writeFileSync(temporaryPath, 'RACING TEMPORARY TARGET', { mode: 0o600, flag: 'wx' });
+          throw new Error('injected temporary fstat failure');
+        }
+        return DEFAULT_CONFIGURE_FILE_SYSTEM.fstatSync(descriptor);
+      }
+    };
+
+    expect(() => {
+      writePrivateOPNsenseConfigFile(
+        path,
+        document,
+        process.platform,
+        initialTemporaryFstatFailure
+      );
+    }).toThrow(/^Invalid OPNsense configuration\.$/u);
+    expect(await readFile(temporaryPath, 'utf8')).toBe('RACING TEMPORARY TARGET');
+    expect(await readFile(temporaryPath, 'utf8')).not.toContain(KEY);
+    expect(await readFile(temporaryPath, 'utf8')).not.toContain(SECRET);
+  });
+
+  it('keeps a durably installed configuration when closing its directory descriptor reports failure', async () => {
+    const path = join(directory, 'opnsense-mcp', 'config.json');
+    let closes = 0;
+    const finalCloseFailure: ConfigureFileSystem = {
+      ...DEFAULT_CONFIGURE_FILE_SYSTEM,
+      closeSync: (descriptor) => {
+        closes += 1;
+        DEFAULT_CONFIGURE_FILE_SYSTEM.closeSync(descriptor);
+        if (closes === 2) throw new Error('injected final directory close failure');
+      }
+    };
+
+    expect(() => {
+      writePrivateOPNsenseConfigFile(path, document, process.platform, finalCloseFailure);
+    }).not.toThrow();
+    expect(closes).toBe(2);
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(document);
+  });
 
   it('rolls back after validation of the installed one-link final fails', async () => {
     const path = join(directory, 'opnsense-mcp', 'config.json');

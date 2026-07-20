@@ -24,6 +24,8 @@ import { validateOPNsenseConnectionConfigDocument } from '../opnsense/config.js'
 
 const CONFIGURATION_ERROR = 'Invalid OPNsense configuration.';
 const INCOMPLETE_CONFIGURATION_ERROR = 'Incomplete OPNsense configuration requires manual removal.';
+export const INCOMPLETE_CONFIGURATION_WARNING =
+  'Configuration cleanup is incomplete. Remove the private config file before retrying.\n';
 
 export interface ConfigureTerminal {
   prompt(message: string, options: { readonly masked: boolean }): Promise<string>;
@@ -46,6 +48,11 @@ export interface ConfigureCommandDependencies {
     platform: NodeJS.Platform,
     environment: DefaultConfigPathEnvironment
   ) => string | undefined;
+  readonly writePrivateConfigFile?: (
+    path: string,
+    document: ConfigurationDocument,
+    platform: NodeJS.Platform
+  ) => void;
 }
 
 export interface ConfigureFileSystem {
@@ -81,7 +88,7 @@ export const DEFAULT_CONFIGURE_FILE_SYSTEM: ConfigureFileSystem = Object.freeze(
   writeSync
 });
 
-class IncompleteConfigurationError extends Error {
+export class IncompleteConfigurationError extends Error {
   constructor() {
     super(INCOMPLETE_CONFIGURATION_ERROR);
   }
@@ -211,6 +218,25 @@ function revalidateDirectories(
   }
 }
 
+function revalidateHeldDirectory(
+  descriptor: number,
+  managedDirectory: PathIdentity,
+  directoryIdentities: readonly PathIdentity[],
+  userId: number,
+  fileSystem: ConfigureFileSystem
+): void {
+  const validateDescriptor = () => {
+    const stats = fileSystem.fstatSync(descriptor);
+    if (!sameIdentity(stats, managedDirectory)) invalidConfiguration();
+    requirePrivateDirectory(stats, userId);
+  };
+  validateDescriptor();
+  revalidateDirectories(directoryIdentities, userId, fileSystem);
+  fileSystem.fsyncSync(descriptor);
+  validateDescriptor();
+  revalidateDirectories(directoryIdentities, userId, fileSystem);
+}
+
 function removeOnlyOwnedPath(
   path: string,
   identity: Pick<PathIdentity, 'dev' | 'ino'>,
@@ -268,6 +294,7 @@ export function writePrivateOPNsenseConfigFile(
     let temporaryIdentity: PathIdentity | undefined;
     let failure: unknown;
     let successful = false;
+    let temporaryCloseConfirmed = true;
     try {
       directoryDescriptor = fileSystem.openSync(
         directory,
@@ -275,7 +302,11 @@ export function writePrivateOPNsenseConfigFile(
       );
       const directoryStats = fileSystem.fstatSync(directoryDescriptor);
       const managedDirectory = directoryIdentities.at(-1);
-      if (managedDirectory === undefined || !sameIdentity(directoryStats, managedDirectory)) {
+      if (
+        managedDirectory === undefined ||
+        !sameIdentity(directoryStats, managedDirectory) ||
+        !directoryStats.isDirectory()
+      ) {
         invalidConfiguration();
       }
       revalidate();
@@ -296,13 +327,21 @@ export function writePrivateOPNsenseConfigFile(
       const contents = Buffer.from(JSON.stringify(document), 'utf8');
       let offset = 0;
       while (offset < contents.length) {
-        offset += fileSystem.writeSync(descriptor, contents, offset, contents.length - offset);
+        const remaining = contents.length - offset;
+        const written = fileSystem.writeSync(descriptor, contents, offset, remaining);
+        if (written <= 0 || written > remaining) throw new Error('Unable to write configuration.');
+        offset += written;
       }
       revalidate();
       fileSystem.fsyncSync(descriptor);
       const descriptorToClose = descriptor;
       descriptor = undefined;
-      fileSystem.closeSync(descriptorToClose);
+      try {
+        fileSystem.closeSync(descriptorToClose);
+      } catch (error) {
+        temporaryCloseConfirmed = false;
+        throw error;
+      }
       revalidate();
       fileSystem.linkSync(temporaryPath, path);
       revalidate();
@@ -314,14 +353,23 @@ export function writePrivateOPNsenseConfigFile(
       const finalStats = fileSystem.lstatSync(path);
       requirePrivateFile(finalStats, userId, 1);
       if (!sameIdentity(finalStats, temporaryIdentity)) invalidConfiguration();
-      fileSystem.fsyncSync(directoryDescriptor);
-      revalidate();
+      revalidateHeldDirectory(
+        directoryDescriptor,
+        managedDirectory,
+        directoryIdentities,
+        userId,
+        fileSystem
+      );
       const finalStatsAfterSync = fileSystem.lstatSync(path);
       requirePrivateFile(finalStatsAfterSync, userId, 1);
       if (!sameIdentity(finalStatsAfterSync, temporaryIdentity)) invalidConfiguration();
       const directoryDescriptorToClose = directoryDescriptor;
       directoryDescriptor = undefined;
-      fileSystem.closeSync(directoryDescriptorToClose);
+      try {
+        fileSystem.closeSync(directoryDescriptorToClose);
+      } catch {
+        // The durable final identity above is authoritative even if close reports ambiguously.
+      }
       successful = true;
     } catch (error) {
       failure = error;
@@ -334,7 +382,7 @@ export function writePrivateOPNsenseConfigFile(
         try {
           fileSystem.closeSync(descriptorToClose);
         } catch {
-          // Cleanup continues independently.
+          temporaryCloseConfirmed = false;
         }
       }
       let temporaryRemoved = temporaryIdentity === undefined;
@@ -343,16 +391,42 @@ export function writePrivateOPNsenseConfigFile(
         temporaryRemoved = removeOnlyOwnedPath(temporaryPath, temporaryIdentity, fileSystem);
         finalRemoved = removeOnlyOwnedPath(path, temporaryIdentity, fileSystem);
       }
+      let rollbackDurable = temporaryIdentity === undefined;
+      let rollbackCloseConfirmed = true;
       if (directoryDescriptor !== undefined) {
+        if (temporaryIdentity !== undefined) {
+          try {
+            const managedDirectory = directoryIdentities.at(-1);
+            if (managedDirectory === undefined) invalidConfiguration();
+            if (!temporaryRemoved || !finalRemoved) invalidConfiguration();
+            revalidateHeldDirectory(
+              directoryDescriptor,
+              managedDirectory,
+              directoryIdentities,
+              userId,
+              fileSystem
+            );
+            rollbackDurable = true;
+          } catch {
+            rollbackDurable = false;
+          }
+        }
         const directoryDescriptorToClose = directoryDescriptor;
         directoryDescriptor = undefined;
         try {
           fileSystem.closeSync(directoryDescriptorToClose);
         } catch {
-          // Cleanup and identity checks above were still attempted.
+          rollbackCloseConfirmed = false;
         }
       }
-      if (failure instanceof PathIntegrityError || !temporaryRemoved || !finalRemoved) {
+      if (
+        failure instanceof PathIntegrityError ||
+        !temporaryRemoved ||
+        !finalRemoved ||
+        !rollbackDurable ||
+        !rollbackCloseConfirmed ||
+        !temporaryCloseConfirmed
+      ) {
         throw new IncompleteConfigurationError();
       }
       throw failure;
@@ -395,11 +469,17 @@ export async function runConfigureCommand(
       ...(tlsServerName === undefined ? {} : { tlsServerName })
     };
     validateOPNsenseConnectionConfigDocument(document);
-    writePrivateOPNsenseConfigFile(path, document, dependencies.platform);
+    (dependencies.writePrivateConfigFile ?? writePrivateOPNsenseConfigFile)(
+      path,
+      document,
+      dependencies.platform
+    );
     terminal.writeStdout('Configured.\n');
     return 0;
-  } catch {
-    terminal.writeStderr('Error\n');
+  } catch (error) {
+    terminal.writeStderr(
+      error instanceof IncompleteConfigurationError ? INCOMPLETE_CONFIGURATION_WARNING : 'Error\n'
+    );
     return 1;
   }
 }
