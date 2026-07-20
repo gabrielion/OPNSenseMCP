@@ -17,6 +17,7 @@ import type {
   CapabilityInvocationContext,
   CapabilityRequest,
   CapabilityResult,
+  MutationEnvelopeServices,
   TransportKind
 } from '../capabilities/types.js';
 import type { FeatureFlag } from '../config/feature-flags.js';
@@ -178,7 +179,8 @@ function requireCanonicalRequestState(state: string): void {
 
 export function createApplicationContext(
   config: RuntimeConfig,
-  catalog: CapabilityCatalog = CAPABILITY_CATALOG
+  catalog: CapabilityCatalog = CAPABILITY_CATALOG,
+  mutationServices?: MutationEnvelopeServices
 ): ApplicationContext {
   const snapshot = snapshotConfig(config);
   const lifecycle = createApplicationLifecycle();
@@ -199,7 +201,8 @@ export function createApplicationContext(
       retain: (settlement) => {
         lifecycle.retain(settlement);
       }
-    }
+    },
+    mutationServices
   );
   if (completion === undefined) throw new Error(INVALID_APPLICATION_MESSAGE);
 

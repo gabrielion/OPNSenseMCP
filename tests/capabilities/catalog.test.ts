@@ -4,11 +4,18 @@ import * as z from 'zod/v4';
 import {
   CAPABILITY_CATALOG,
   CapabilityCatalog,
+  createProductCapabilityCatalog,
   getCapability
 } from '../../src/capabilities/catalog.js';
 import { areDeclaredResourceScopesAllowed } from '../../src/capabilities/exposure.js';
-import { defineResourceCapability } from '../../src/capabilities/kernel.js';
+import {
+  createCapabilityDispatcher,
+  defineResourceCapability
+} from '../../src/capabilities/kernel.js';
 import type { FeatureFlag } from '../../src/config/feature-flags.js';
+import type { OPNsenseReadAdapter } from '../../src/opnsense/read-adapter.js';
+import type { OPNsenseAliasAdapter } from '../../src/opnsense/alias-adapter.js';
+import type { MutationEnvelopeServices } from '../../src/capabilities/types.js';
 import { createMutationFixture, createReadFixture } from '../fixtures/capabilities.js';
 
 describe('CapabilityCatalog', () => {
@@ -205,5 +212,76 @@ describe('CapabilityCatalog', () => {
       expect(getCapability(name)?.policy.effect).toBe('read');
     }
     expect(getCapability('missing')).toBeUndefined();
+  });
+});
+
+describe('product catalog write surface', () => {
+  const readAdapter: OPNsenseReadAdapter = {
+    available: true,
+    getSystemStatus: () => Promise.reject(new Error('unused')),
+    listServices: () => Promise.reject(new Error('unused'))
+  };
+  const aliasAdapter: OPNsenseAliasAdapter = {
+    available: true,
+    searchHostAliases: () => Promise.reject(new Error('unused')),
+    createHostAlias: () => Promise.reject(new Error('unused')),
+    deleteHostAlias: () => Promise.reject(new Error('unused'))
+  };
+  const services: MutationEnvelopeServices = {
+    lock: { acquire: () => Promise.resolve({ release: () => Promise.resolve() }) },
+    backup: {
+      create: () => Promise.resolve({ backupId: 'b' }),
+      exists: () => Promise.resolve(true)
+    },
+    audit: { record: () => undefined }
+  };
+  const options = {
+    readOnly: false,
+    allowedResourceScopes: null,
+    enabledFeatureFlags: new Set<never>()
+  };
+
+  it('registers the create and delete verbs when the alias adapter is available', () => {
+    expect(
+      createProductCapabilityCatalog(readAdapter, aliasAdapter).all.map((c) => c.mcpName)
+    ).toEqual(['server_status', 'opn_describe', 'opn_get', 'opn_list', 'opn_create', 'opn_delete']);
+  });
+
+  it('omits the write verbs when the alias adapter is unavailable', () => {
+    expect(createProductCapabilityCatalog(readAdapter).all.map((c) => c.mcpName)).toEqual([
+      'server_status',
+      'opn_describe',
+      'opn_get',
+      'opn_list'
+    ]);
+  });
+
+  it('hides the write verbs under READ_ONLY', () => {
+    const exposed = createProductCapabilityCatalog(readAdapter, aliasAdapter).listExposed({
+      readOnly: true,
+      transport: 'stdio',
+      enabledFeatureFlags: new Set(),
+      allowedResourceScopes: null
+    });
+    expect(exposed.map((c) => c.mcpName)).toEqual([
+      'server_status',
+      'opn_describe',
+      'opn_get',
+      'opn_list'
+    ]);
+  });
+
+  it('refuses to construct a dispatcher exposing write verbs without envelope services', () => {
+    const catalog = createProductCapabilityCatalog(readAdapter, aliasAdapter);
+    expect(() => createCapabilityDispatcher(catalog, options)).toThrow(
+      'Mutation envelope services are required to expose a write capability'
+    );
+  });
+
+  it('constructs a dispatcher exposing write verbs when services are provided', () => {
+    const catalog = createProductCapabilityCatalog(readAdapter, aliasAdapter);
+    expect(() =>
+      createCapabilityDispatcher(catalog, options, undefined, {}, {}, services)
+    ).not.toThrow();
   });
 });

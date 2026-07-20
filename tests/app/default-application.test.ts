@@ -442,7 +442,9 @@ describe('default application composition seam', () => {
     expect(factory).toContain('const config = loadRuntimeConfig()');
     expect(factory).toContain('createOwnedApplicationRuntime');
     expect(factory).toContain('loadOPNsenseConnectionConfig');
-    expect(factory).toContain('createProductCapabilityCatalog(adapter)');
+    expect(factory).toContain('createProductCapabilityCatalog(readAdapter, aliasAdapter)');
+    expect(factory).toContain('createInProcessMutationLockManager()');
+    expect(factory).toContain('createOPNsenseConfigBackupService(client');
     expect(factory).toContain('client?.close()');
     expect(main).toContain('startStdio');
     expect(httpEntrypoint).toContain('createDefaultApplicationRuntime');
@@ -464,7 +466,7 @@ describe('default application composition seam', () => {
     for (const path of await sourceFiles('src')) {
       if (
         (await readFile(path, 'utf8')).includes(
-          'createApplicationContext(config, createProductCapabilityCatalog(adapter))'
+          'createProductCapabilityCatalog(readAdapter, aliasAdapter)'
         )
       ) {
         matches.push(path);

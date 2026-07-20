@@ -9,11 +9,15 @@ import { loadRuntimeConfig } from '../config/runtime-config.js';
 import { createProductCapabilityCatalog } from '../capabilities/catalog.js';
 import { loadOPNsenseConnectionConfig } from '../opnsense/config.js';
 import { createOPNsenseHttpsClient, type OPNsenseHttpsClient } from '../opnsense/https-client.js';
-import {
-  createOPNsenseReadAdapter,
-  UNAVAILABLE_OPNSENSE_READ_ADAPTER
-} from '../opnsense/read-adapter.js';
-import { lstatSync } from 'node:fs';
+import { createOPNsenseReadAdapter } from '../opnsense/read-adapter.js';
+import { createOPNsenseAliasAdapter } from '../opnsense/alias-adapter.js';
+import { createInProcessMutationLockManager } from '../capabilities/envelope/lock.js';
+import { createBoundedAuditSink } from '../capabilities/envelope/audit.js';
+import { createOPNsenseConfigBackupService } from '../capabilities/envelope/config-backup.js';
+import type { MutationEnvelopeServices } from '../capabilities/types.js';
+import { lstatSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { resolveDefaultOPNsenseConfigPath } from '../config/runtime-config.js';
 
 export interface OwnedApplicationRuntime {
@@ -81,28 +85,42 @@ export function createDefaultApplicationRuntime(): OwnedApplicationRuntime {
     ...(process.env.APPDATA === undefined ? {} : { APPDATA: process.env.APPDATA })
   });
   const configPath = selectOPNsenseConfigFile(config.opnsenseConfigFile, defaultPath);
-  let client: OPNsenseHttpsClient | undefined;
-  try {
-    const adapter =
-      configPath === undefined
-        ? UNAVAILABLE_OPNSENSE_READ_ADAPTER
-        : (() => {
-            client = createOPNsenseHttpsClient(loadOPNsenseConnectionConfig(configPath));
-            return createOPNsenseReadAdapter(client);
-          })();
-    const application = createApplicationContext(config, createProductCapabilityCatalog(adapter));
+  if (configPath === undefined) {
     return createOwnedApplicationRuntime(
-      application,
-      client === undefined
-        ? []
-        : [
-            () => {
-              client?.close();
-            }
-          ]
+      createApplicationContext(config, createProductCapabilityCatalog())
     );
+  }
+
+  let client: OPNsenseHttpsClient | undefined;
+  let backupRoot: string | undefined;
+  try {
+    client = createOPNsenseHttpsClient(loadOPNsenseConnectionConfig(configPath));
+    const readAdapter = createOPNsenseReadAdapter(client);
+    const aliasAdapter = createOPNsenseAliasAdapter(client);
+    backupRoot = mkdtempSync(join(tmpdir(), 'opnsense-mcp-backup-'));
+    const services: MutationEnvelopeServices = {
+      lock: createInProcessMutationLockManager(),
+      backup: createOPNsenseConfigBackupService(client, join(backupRoot, 'store')),
+      audit: createBoundedAuditSink()
+    };
+    const application = createApplicationContext(
+      config,
+      createProductCapabilityCatalog(readAdapter, aliasAdapter),
+      services
+    );
+    const ownedClient = client;
+    const ownedBackupRoot = backupRoot;
+    return createOwnedApplicationRuntime(application, [
+      () => {
+        ownedClient.close();
+      },
+      () => {
+        rmSync(ownedBackupRoot, { recursive: true, force: true });
+      }
+    ]);
   } catch (error) {
     client?.close();
+    if (backupRoot !== undefined) rmSync(backupRoot, { recursive: true, force: true });
     throw error;
   }
 }
