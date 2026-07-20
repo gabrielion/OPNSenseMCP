@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { Buffer } from 'node:buffer';
 import { closeSync, constants, fstatSync, openSync, readSync, type Stats } from 'node:fs';
+import { isIP } from 'node:net';
 import { isAbsolute } from 'node:path';
 import * as z from 'zod/v4';
 
@@ -13,6 +14,7 @@ const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const INVALID_CONFIGURATION_MESSAGE = 'Invalid OPNsense configuration.';
 const BASIC_KEY = /^[\x20-\x39\x3b-\x7e]+$/u;
 const BASIC_SECRET = /^[\x20-\x7e]+$/u;
+const DNS_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/u;
 
 function isHttpsOrigin(value: string): boolean {
   try {
@@ -30,12 +32,22 @@ function isHttpsOrigin(value: string): boolean {
   }
 }
 
+function isDnsServerName(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 253 &&
+    isIP(value) === 0 &&
+    value.split('.').every((label) => DNS_LABEL.test(label))
+  );
+}
+
 const PrivateConfigurationSchema = z
   .object({
     url: z.string().refine(isHttpsOrigin),
     apiKey: z.string().min(1).max(1024).regex(BASIC_KEY),
     apiSecret: z.string().min(1).max(1024).regex(BASIC_SECRET),
     caFile: z.string().refine(isAbsolute).optional(),
+    tlsServerName: z.string().refine(isDnsServerName).optional(),
     timeoutMs: z.number().int().min(1).max(MAX_TIMEOUT_MS).optional(),
     maxResponseBytes: z.number().int().min(1).max(MAX_RESPONSE_BYTES).optional()
   })
@@ -46,6 +58,7 @@ export interface OPNsenseConnectionConfig {
   readonly apiKey: string;
   readonly apiSecret: string;
   readonly ca?: string;
+  readonly tlsServerName?: string;
   readonly timeoutMs: number;
   readonly maxResponseBytes: number;
 }
@@ -128,6 +141,7 @@ export function loadOPNsenseConnectionConfig(path: string): OPNsenseConnectionCo
       apiKey: parsed.apiKey,
       apiSecret: parsed.apiSecret,
       ...(ca === undefined ? {} : { ca }),
+      ...(parsed.tlsServerName === undefined ? {} : { tlsServerName: parsed.tlsServerName }),
       timeoutMs: parsed.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       maxResponseBytes: parsed.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES
     });

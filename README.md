@@ -1,7 +1,8 @@
 # OPNsense MCP
 
-> **Product 1A preview:** a small, useful, read-only MCP server that lets an AI assistant inspect an
-> OPNsense system without changing it.
+> **Product 1 preview:** a small, useful, read-only MCP server that lets an AI assistant inspect an
+> OPNsense system without changing it. The packaged server is exercised against both synthetic HTTPS and a
+> disposable OPNsense 26 VM.
 
 Ask in everyday language. The server tells the agent to start with facts, explain networking terms, ask one
 useful clarification at a time, and clearly separate observations from hypotheses.
@@ -45,14 +46,16 @@ Create a JSON file outside the repository and protect it with mode `0600`:
   "url": "https://192.0.2.1",
   "apiKey": "your-dedicated-read-only-api-key",
   "apiSecret": "your-api-secret",
-  "caFile": "/absolute/path/to/your-ca.pem"
+  "caFile": "/absolute/path/to/your-ca.pem",
+  "tlsServerName": "firewall.example.internal"
 }
 ```
 
 The file must be a regular, non-symlink file owned by the current user. `url` must be one exact HTTPS
-origin. `caFile` is optional when the firewall certificate already chains to a trusted CA. Use a dedicated
-OPNsense key with the least privileges needed for these reads; do not paste credentials into chat or command
-arguments.
+origin. `caFile` is optional when the firewall certificate already chains to a trusted CA.
+`tlsServerName` is optional when the URL uses an IP address but the verified certificate uses a DNS name.
+TLS verification always remains enabled. Use a dedicated least-privilege OPNsense key; do not paste
+credentials into chat or command arguments.
 
 To run the protocol-clean stdio server directly:
 
@@ -64,7 +67,29 @@ node -e "const [major, minor] = process.versions.node.split('.').map(Number); pr
 OPNSENSE_CONFIG_FILE="/absolute/path/to/opnsense.json" READ_ONLY=true node dist/main.js
 ```
 
-Never point development or tests at a production firewall. Product 1B will provide the disposable-VM path.
+Never point development or tests at a production firewall. Use the disposable-VM proof below for live work.
+
+## Disposable OPNsense 26 proof
+
+On macOS or Linux, install QEMU plus Node.js 22, then run:
+
+```bash
+npm run vm:doctor
+npm run test:product1b
+```
+
+`vm:doctor` reports each missing host dependency without changing the machine. `test:product1b` owns the
+whole live test: it verifies and caches the pinned official OPNsense 26.1.6 nano image, starts one local VM,
+asks for the factory password without echoing or storing it, creates a disposable least-privilege API user,
+packs and installs this npm package, calls `opn_get system.status` and `opn_list core.services`, then stops the
+VM and removes the overlay, API credentials, certificate, and temporary package. The first run downloads an
+approximately 557 MB archive and creates a 3 GiB read-only base image in the user cache.
+
+The observed OPNsense 26 contract is `GET /api/core/system/status` and a bounded
+`POST /api/core/service/search` Bootgrid request. This proves only these two reads on disposable local
+firmware; it does not test a production firewall or an Internet-facing deployment. The sanitized
+[machine-readable live evidence](tests/fixtures/product1b.live.json) records the exact host, QEMU, firmware,
+transport, cleanup checks, and non-claims without retaining firewall data or credentials.
 
 ## OpenCode
 
@@ -99,12 +124,14 @@ own versioned smoke passes.
 - Strict TypeScript, formatting, lint, license headers, and deterministic unit/integration tests.
 - Clean npm pack/install plus TLS, Basic authentication, response validation, secret redaction, shutdown,
   and cleanup against a synthetic target.
+- Clean npm pack/install against a disposable OPNsense 26.1.6 VM for the status and service-list reads,
+  including VM ownership, pinned image integrity, isolated credentials, TLS pinning, and reverse cleanup.
 - Targeted MCP interoperability checks for protocol versions `2025-11-25` and draft `2026-07-28`.
 - One real OpenCode 1.18.3 routing smoke using `opencode/north-mini-code-free`.
 
-These checks prove the package and synthetic read path. They do **not** yet prove:
+These checks prove the package, synthetic read path, and the two stated disposable-VM reads. They do **not**
+yet prove:
 
-- Product 1B's disposable OPNsense 26 VM or the real firmware's service-search GET/POST behavior;
 - public DNS, ACME, or HAProxy exposure on the Internet;
 - mutations, verified backups, restore, or audit behavior;
 - native Windows installation or client operation;
@@ -112,8 +139,8 @@ These checks prove the package and synthetic read path. They do **not** yet prov
 
 ## Product roadmap and example requests
 
-The next milestone is Product 1B: run this exact installed package against a disposable OPNsense 26 VM,
-observe the real API transport, and turn VM setup into a newcomer-friendly command.
+The next milestone is the central mutation safety envelope: verified backup, scoped authorization, redacted
+audit, outcome verification, and fail-closed cleanup before any public write tool exists.
 
 Later guided workflows are deliberately user-level goals, for example:
 

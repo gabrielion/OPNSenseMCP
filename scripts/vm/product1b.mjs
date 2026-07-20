@@ -7,6 +7,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { bootstrapProduct1b } from './product1b-bootstrap.mjs';
+import { createConnectionArtifacts } from './product1b-connection.mjs';
 import {
   Product1bVmError,
   formatVmFailure,
@@ -776,6 +778,146 @@ function userInstanceRoot() {
   return join(userCacheRoot(), 'instance');
 }
 
+export function readSecretLine({ input = process.stdin, output = process.stderr, signal } = {}) {
+  output.write('OPNsense factory password: ');
+  return new Promise((resolve, reject) => {
+    const interactive = input.isTTY === true && typeof input.setRawMode === 'function';
+    const previousRawMode = interactive ? input.isRaw === true : false;
+    let value = '';
+    let settled = false;
+
+    const cleanup = () => {
+      input.off('data', onData);
+      input.off('end', onEnd);
+      input.off('error', onError);
+      signal?.removeEventListener('abort', onAbort);
+      if (interactive) {
+        input.setRawMode(previousRawMode);
+        input.pause();
+        output.write('\n');
+      }
+    };
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+    const fail = () => finish(() => reject(new Error('Invalid secret input')));
+    const accept = () => {
+      if (!/^[\x20-\x7e]{1,256}$/u.test(value)) {
+        fail();
+        return;
+      }
+      finish(() => resolve(value));
+    };
+    const onData = (chunk) => {
+      const bytes = Buffer.from(chunk);
+      for (const byte of bytes) {
+        if (byte === 0x03) {
+          fail();
+          return;
+        }
+        if (byte === 0x0a || byte === 0x0d) {
+          accept();
+          return;
+        }
+        if (interactive && (byte === 0x08 || byte === 0x7f)) {
+          value = value.slice(0, -1);
+          continue;
+        }
+        if (byte < 0x20 || byte > 0x7e || value.length >= 256) {
+          fail();
+          return;
+        }
+        value += String.fromCharCode(byte);
+      }
+    };
+    const onEnd = () => accept();
+    const onError = () => fail();
+    const onAbort = () => fail();
+
+    if (interactive) {
+      input.setRawMode(true);
+      input.resume();
+    }
+    input.on('data', onData);
+    input.once('end', onEnd);
+    input.once('error', onError);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted === true) onAbort();
+  });
+}
+
+export async function runVmBootstrapCli({
+  instanceRoot = userInstanceRoot(),
+  input = process.stdin,
+  stdout = process.stdout,
+  stderr = process.stderr,
+  statusVm = statusDisposableVm,
+  stopVm = stopDisposableVm,
+  readPassword = () => readSecretLine({ input, output: stderr }),
+  bootstrap = bootstrapProduct1b,
+  createArtifacts = createConnectionArtifacts
+} = {}) {
+  let running = false;
+  let failureStage = 'input';
+  try {
+    const state = await statusVm({ instanceRoot });
+    if (state.state !== 'running') {
+      stderr.write('Product 1B bootstrap: FAILED; start a fresh disposable VM and retry\n');
+      return 2;
+    }
+    running = true;
+    const factoryPassword = await readPassword();
+    failureStage = 'bootstrap';
+    const credentials = await bootstrap({
+      consolePath: join(instanceRoot, 'console.sock'),
+      factoryPassword
+    });
+    failureStage = 'artifacts';
+    await createArtifacts({ instanceRoot, credentials });
+    stdout.write('Product 1B bootstrap: READY; private connection created\n');
+    return 0;
+  } catch (error) {
+    let cleanupConfirmed = false;
+    if (running) {
+      try {
+        const stopped = await stopVm({ instanceRoot });
+        cleanupConfirmed = stopped?.state === 'stopped' && stopped.cleaned === true;
+      } catch {
+        cleanupConfirmed = false;
+      }
+    }
+    const reportedStage =
+      typeof error === 'object' &&
+      error !== null &&
+      'stage' in error &&
+      typeof error.stage === 'string' &&
+      [
+        'connecting',
+        'login',
+        'password',
+        'menu',
+        'shell',
+        'umask',
+        'heredoc-open',
+        'heredoc-lines',
+        'heredoc-close',
+        'decode',
+        'result',
+        'frame'
+      ].includes(error.stage)
+        ? error.stage
+        : failureStage;
+    const cleanup = cleanupConfirmed
+      ? 'fresh VM discarded'
+      : 'cleanup unconfirmed; run npm run vm:stop';
+    stderr.write(`Product 1B bootstrap: FAILED during ${reportedStage}; ${cleanup}\n`);
+    return 2;
+  }
+}
+
 export async function runPrepareImageCli({
   cacheRoot = userCacheRoot(),
   spec = IMAGE_SPEC,
@@ -829,6 +971,10 @@ async function main() {
     process.exitCode = await runPrepareImageCli();
     return;
   }
+  if (command === 'bootstrap') {
+    process.exitCode = await runVmBootstrapCli();
+    return;
+  }
   if (command === 'start' || command === 'status' || command === 'stop') {
     try {
       const result =
@@ -845,7 +991,7 @@ async function main() {
     }
     return;
   }
-  process.stderr.write('Usage: product1b.mjs doctor|prepare-image|start|status|stop\n');
+  process.stderr.write('Usage: product1b.mjs doctor|prepare-image|start|bootstrap|status|stop\n');
   process.exitCode = 2;
 }
 

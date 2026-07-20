@@ -345,7 +345,8 @@ export function createOPNsenseHttpsClient(config: OPNsenseConnectionConfig): OPN
             path: resolved.operation.command.path,
             headers,
             agent,
-            rejectUnauthorized: true
+            rejectUnauthorized: true,
+            ...(config.tlsServerName === undefined ? {} : { servername: config.tlsServerName })
           });
           request.once('response', onResponse);
           request.once('error', onRequestError);

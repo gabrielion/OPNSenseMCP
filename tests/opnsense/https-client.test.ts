@@ -173,6 +173,36 @@ describe('closed OPNsense HTTPS client', () => {
     }
   });
 
+  it('uses an explicit DNS TLS name while keeping the HTTPS origin and Host on the IP', async () => {
+    const target = await startSyntheticOPNsenseTarget(() => ({ body: '{"ok":true}' }), {
+      dnsOnlyCertificateName: 'OPNsense.internal'
+    });
+    const withoutName = createOPNsenseHttpsClient(config(target.url, { ca: target.ca }));
+    const withoutCa = createOPNsenseHttpsClient(
+      config(target.url, { tlsServerName: 'OPNsense.internal' })
+    );
+    const explicitNameAndCa = createOPNsenseHttpsClient(
+      config(target.url, { ca: target.ca, tlsServerName: 'OPNsense.internal' })
+    );
+    try {
+      await expect(withoutName.request(statusRequest())).rejects.toThrow(
+        /^OPNsense request failed\.$/u
+      );
+      await expect(withoutCa.request(statusRequest())).rejects.toThrow(
+        /^OPNsense request failed\.$/u
+      );
+      await expect(explicitNameAndCa.request(statusRequest())).resolves.toEqual({ ok: true });
+
+      expect(target.requests).toHaveLength(1);
+      expect(target.requests[0]?.headers.host).toBe(new URL(target.url).host);
+    } finally {
+      withoutName.close();
+      withoutCa.close();
+      explicitNameAndCa.close();
+      await target.close();
+    }
+  });
+
   it('times out, honors caller cancellation, and refuses work after idempotent close', async () => {
     const target = await startSyntheticOPNsenseTarget(() => ({
       delayMs: 250,

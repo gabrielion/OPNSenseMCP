@@ -69,7 +69,13 @@ describe.each(MCP_ERAS)('$label Product 1A secure read composition', ({ connect 
   it('discovers and executes the two closed OPNsense reads against synthetic HTTPS', async () => {
     const target = await startSyntheticOPNsenseTarget((request) => {
       if (request.path === '/api/core/system/status') {
-        return { body: JSON.stringify({ status: 'ok', ignored: 'drop-me' }) };
+        return {
+          body: JSON.stringify({
+            metadata: { system: { status: 'ok' } },
+            subsystems: {},
+            ignored: 'drop-me'
+          })
+        };
       }
       return {
         body: JSON.stringify({
@@ -81,7 +87,8 @@ describe.each(MCP_ERAS)('$label Product 1A secure read composition', ({ connect 
               id: 'svc-1',
               name: 'dnsmasq',
               description: 'DNS forwarder',
-              status: 'running',
+              running: 1,
+              locked: 0,
               ignored: 'drop-me'
             }
           ],

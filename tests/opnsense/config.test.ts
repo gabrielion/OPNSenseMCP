@@ -23,6 +23,60 @@ async function privateFile(name: string, value: string | Uint8Array): Promise<st
 }
 
 describe('private OPNsense configuration', () => {
+  it('loads an explicit DNS TLS server name without changing the HTTPS origin', async () => {
+    const path = await privateFile(
+      'config.json',
+      JSON.stringify({
+        url: 'https://127.0.0.1:18443',
+        apiKey: 'key',
+        apiSecret: 'secret',
+        tlsServerName: 'OPNsense.internal'
+      })
+    );
+
+    expect(loadOPNsenseConnectionConfig(path)).toMatchObject({
+      url: 'https://127.0.0.1:18443',
+      tlsServerName: 'OPNsense.internal'
+    });
+  });
+
+  it.each([
+    { label: 'an empty name', tlsServerName: '' },
+    { label: 'an IPv4 address', tlsServerName: '127.0.0.1' },
+    { label: 'an IPv6 address', tlsServerName: '2001:db8::1' },
+    { label: 'a path', tlsServerName: 'firewall.example/path' },
+    { label: 'an underscore', tlsServerName: 'firewall_name.example' },
+    { label: 'a wildcard', tlsServerName: '*.example' },
+    { label: 'a non-ASCII name', tlsServerName: 'pare-feu.exemple\u00e9' },
+    { label: 'an empty label', tlsServerName: 'firewall..example' },
+    { label: 'a leading label hyphen', tlsServerName: '-firewall.example' },
+    { label: 'a trailing label hyphen', tlsServerName: 'firewall-.example' },
+    { label: 'an overlong label', tlsServerName: `${'a'.repeat(64)}.example` },
+    {
+      label: 'an overlong DNS name',
+      tlsServerName: Array.from({ length: 4 }, () => 'a'.repeat(63)).join('.')
+    }
+  ])('rejects $label as a TLS server name with one fixed error', async ({ tlsServerName }) => {
+    const path = await privateFile(
+      'config.json',
+      JSON.stringify({
+        url: 'https://127.0.0.1:18443',
+        apiKey: 'key',
+        apiSecret: 'secret',
+        tlsServerName
+      })
+    );
+
+    expect(() => loadOPNsenseConnectionConfig(path)).toThrow(INVALID);
+    try {
+      loadOPNsenseConnectionConfig(path);
+    } catch (error) {
+      expect(String(error)).toBe('Error: Invalid OPNsense configuration.');
+      if (tlsServerName.length > 0) expect(String(error)).not.toContain(tlsServerName);
+      expect(String(error)).not.toContain('secret');
+    }
+  });
+
   it('loads only the strict reviewed fields and an explicit bounded CA', async () => {
     const caFile = await privateFile('ca.pem', 'TEST CA');
     const path = await privateFile(

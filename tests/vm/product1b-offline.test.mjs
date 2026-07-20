@@ -167,6 +167,7 @@ describe('Product 1B host doctor', () => {
       'node scripts/vm/product1b.mjs prepare-image'
     );
     expect(packageJson.scripts['vm:start']).toBe('node scripts/vm/product1b.mjs start');
+    expect(packageJson.scripts['vm:bootstrap']).toBe('node scripts/vm/product1b.mjs bootstrap');
     expect(packageJson.scripts['vm:status']).toBe('node scripts/vm/product1b.mjs status');
     expect(packageJson.scripts['vm:stop']).toBe('node scripts/vm/product1b.mjs stop');
   });

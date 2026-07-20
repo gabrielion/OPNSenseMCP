@@ -2,12 +2,16 @@
 import * as z from 'zod/v4';
 import type { OPNsenseHttpsClient } from './https-client.js';
 
-const SystemStatusResponse = z.object({ status: z.string().min(1).max(64) });
+const SystemStatusResponse = z.object({
+  metadata: z.object({
+    system: z.object({ status: z.string().min(1).max(64) })
+  })
+});
 const ServiceRow = z.object({
   id: z.string().min(1).max(128),
   name: z.string().min(1).max(128),
   description: z.string().max(512),
-  status: z.string().min(1).max(64)
+  running: z.number().int().min(0).max(1)
 });
 const ServicesResponse = z.object({
   total: z.number().int().min(0).max(1_000_000),
@@ -60,7 +64,9 @@ export function createOPNsenseReadAdapter(client: OPNsenseHttpsClient): OPNsense
           signal
         })
       );
-      return Object.freeze({ item: Object.freeze({ status: response.status }) });
+      return Object.freeze({
+        item: Object.freeze({ status: response.metadata.system.status })
+      });
     },
     async listServices(input: ServiceListInput, signal: AbortSignal): Promise<ServiceListOutput> {
       const response = ServicesResponse.parse(
@@ -87,8 +93,13 @@ export function createOPNsenseReadAdapter(client: OPNsenseHttpsClient): OPNsense
         pageSize: response.rowCount,
         total: response.total,
         items: Object.freeze(
-          response.rows.map(({ id, name, description, status }) =>
-            Object.freeze({ id, name, description, status })
+          response.rows.map(({ id, name, description, running }) =>
+            Object.freeze({
+              id,
+              name,
+              description,
+              status: running === 1 ? 'running' : 'stopped'
+            })
           )
         )
       });

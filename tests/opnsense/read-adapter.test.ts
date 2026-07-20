@@ -7,7 +7,15 @@ describe('reviewed OPNsense read adapter', () => {
   it('normalizes status and service fields and sends the exact Bootgrid request', async () => {
     const request = vi
       .fn<OPNsenseHttpsClient['request']>()
-      .mockResolvedValueOnce({ status: 'ok', secret: 'SENTINEL_DROP' })
+      .mockResolvedValueOnce({
+        metadata: {
+          system: { status: 'ok', title: 'System status', message: 'Ready' },
+          translations: { dialogTitle: 'Details', dialogCloseButton: 'Close' },
+          subsystems: []
+        },
+        subsystems: {},
+        secret: 'SENTINEL_DROP'
+      })
       .mockResolvedValueOnce({
         total: 1,
         rowCount: 25,
@@ -17,7 +25,8 @@ describe('reviewed OPNsense read adapter', () => {
             id: 'svc-1',
             name: 'unbound',
             description: 'Resolver',
-            status: 'running',
+            running: 1,
+            locked: 0,
             secret: 'SENTINEL_DROP'
           }
         ],
@@ -54,8 +63,8 @@ describe('reviewed OPNsense read adapter', () => {
       rowCount: 1,
       current: 1,
       rows: [
-        { id: 'a', name: 'a', description: '', status: 'running' },
-        { id: 'b', name: 'b', description: '', status: 'running' }
+        { id: 'a', name: 'a', description: '', running: 1, locked: 0 },
+        { id: 'b', name: 'b', description: '', running: 1, locked: 0 }
       ]
     },
     { total: 1_000_001, rowCount: 10, current: 1, rows: [] }

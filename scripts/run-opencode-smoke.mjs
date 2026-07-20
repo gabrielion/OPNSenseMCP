@@ -218,7 +218,7 @@ async function startMock() {
       });
       const body =
         request.url === '/api/core/system/status'
-          ? { status: 'ok' }
+          ? { metadata: { system: { status: 'ok' } }, subsystems: {} }
           : {
               total: 1,
               rowCount: 10,
@@ -228,7 +228,8 @@ async function startMock() {
                   id: 'svc-1',
                   name: 'dnsmasq',
                   description: 'DNS forwarder',
-                  status: 'running'
+                  running: 1,
+                  locked: 0
                 }
               ]
             };

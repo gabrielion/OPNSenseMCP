@@ -109,6 +109,8 @@ async function writeRunningInstance(instanceRoot, { pid = 4242, nonce = NONCE } 
   await writeFile(join(instanceRoot, 'overlay.qcow2'), 'overlay', { mode: 0o600 });
   await writeFile(join(instanceRoot, 'console.sock'), 'socket', { mode: 0o600 });
   await writeFile(join(instanceRoot, 'qemu.pid'), `${pid}\n`, { mode: 0o600 });
+  await writeFile(join(instanceRoot, 'ca.pem'), 'owned lab CA', { mode: 0o600 });
+  await writeFile(join(instanceRoot, 'connection.json'), 'owned lab connection', { mode: 0o600 });
 }
 
 async function writeLaunchingInstance(
@@ -176,6 +178,7 @@ describe('Product 1B disposable VM lifecycle', () => {
     );
 
     expect(packageJson.scripts['vm:start']).toBe('node scripts/vm/product1b.mjs start');
+    expect(packageJson.scripts['vm:bootstrap']).toBe('node scripts/vm/product1b.mjs bootstrap');
     expect(packageJson.scripts['vm:status']).toBe('node scripts/vm/product1b.mjs status');
     expect(packageJson.scripts['vm:stop']).toBe('node scripts/vm/product1b.mjs stop');
   });

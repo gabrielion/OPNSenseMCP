@@ -29,10 +29,16 @@ export type SyntheticOPNsenseHandler = (
   request: RecordedHttpsRequest
 ) => SyntheticOPNsenseResponse | Promise<SyntheticOPNsenseResponse>;
 
+export interface SyntheticOPNsenseTargetOptions {
+  readonly dnsOnlyCertificateName?: string;
+}
+
 export async function startSyntheticOPNsenseTarget(
-  handler: SyntheticOPNsenseHandler
+  handler: SyntheticOPNsenseHandler,
+  options: SyntheticOPNsenseTargetOptions = {}
 ): Promise<SyntheticOPNsenseTarget> {
-  const certificate = await generate([{ name: 'commonName', value: 'localhost' }], {
+  const certificateName = options.dnsOnlyCertificateName ?? 'localhost';
+  const certificate = await generate([{ name: 'commonName', value: certificateName }], {
     algorithm: 'sha256',
     keyType: 'ec',
     extensions: [
@@ -42,8 +48,10 @@ export async function startSyntheticOPNsenseTarget(
       {
         name: 'subjectAltName',
         altNames: [
-          { type: 2, value: 'localhost' },
-          { type: 7, ip: '127.0.0.1' }
+          { type: 2, value: certificateName },
+          ...(options.dnsOnlyCertificateName === undefined
+            ? [{ type: 7 as const, ip: '127.0.0.1' }]
+            : [])
         ]
       }
     ]

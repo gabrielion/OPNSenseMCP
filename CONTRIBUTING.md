@@ -1,7 +1,7 @@
 # Contributing
 
-Use Node.js 22.19 or newer within major 22. Never develop or test against a production firewall. Product 1A
-uses only synthetic HTTPS fixtures; Product 1B will own the disposable OPNsense 26 VM workflow.
+Use Node.js 22.19 or newer within major 22. Never develop or test against a production firewall. Offline tests
+use synthetic HTTPS fixtures; the live gate owns a disposable OPNsense 26 VM.
 
 **Platform status:** macOS and Linux are the currently verified development hosts. Native Windows remains a required product target, but package and client support are not claimed until the later `windows-2025` gate passes.
 
@@ -24,6 +24,33 @@ git diff --check
 `test:product1a` is the fast product proof: clean pack, isolated install, synthetic TLS target, all Product
 1A reads, secret redaction, EOF shutdown, and residue cleanup. `verify` runs the complete deterministic
 offline suite. Both must exit `0`.
+
+## Live disposable-VM gate
+
+Requirements: macOS or Linux, Node.js 22, `qemu-system-x86_64`, `qemu-img`, `curl`, and `bzip2`. On macOS,
+Homebrew's `qemu` package provides the QEMU commands; the operating system already provides the download and
+decompression commands.
+
+```bash
+npm run vm:doctor
+npm run test:product1b
+```
+
+The first live run downloads the SHA-256-pinned official OPNsense 26.1.6 nano archive into the user cache.
+The test prompts for the disposable image's factory password without echoing it. It then owns start,
+least-privilege API bootstrap, TLS pinning, npm pack/install, the two MCP reads, stop, credential deletion,
+overlay deletion, and residue verification. A setup or read failure still runs cleanup and exits nonzero.
+
+For lifecycle diagnosis only, the same pieces are available separately:
+
+```bash
+npm run vm:start
+npm run vm:bootstrap
+npm run vm:status
+npm run vm:stop
+```
+
+Run only one managed VM at a time. These commands are for the disposable lab, never a real firewall.
 
 ## Protocol gates
 

@@ -90,7 +90,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
         outputSchemaDigest: '42f50ba17d0278f50a20b8a24cace495648f6164785e226597f9f83d7c36ab86'
       }
     ],
-    contractDigest: '8b63e403641036cd1cec37f3219509098764e556d9f03b385a650b5d9d2d845a',
+    contractDigest: '940aa164d9035dda6acaf238b5dcf1dae01122fe11473d44f8114f1c39b776f2',
     runtime: {
       module: 'core',
       controller: 'service',
@@ -108,7 +108,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
             method: 'POST',
             path: '/api/core/service/search'
           },
-          transportStatus: 'mock-candidate',
+          transportStatus: 'vm-observed-26.1.6',
           inputSchema: {
             type: 'object',
             additionalProperties: false,
@@ -194,8 +194,8 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
           evidence: {
             offline: 'required',
             mock: 'required',
-            vm: 'deferred-product-1b',
-            agentic: 'deferred-product-1b'
+            vm: 'verified-product1b',
+            agentic: 'not-run'
           }
         }
       ]
@@ -241,7 +241,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
         outputSchemaDigest: '11e1bc49417ca3079e04578cc82bb0a52b44dda433c678e444817591b8e7651f'
       }
     ],
-    contractDigest: '8b63e403641036cd1cec37f3219509098764e556d9f03b385a650b5d9d2d845a',
+    contractDigest: '940aa164d9035dda6acaf238b5dcf1dae01122fe11473d44f8114f1c39b776f2',
     runtime: {
       module: 'core',
       controller: 'system',
@@ -297,8 +297,8 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
           evidence: {
             offline: 'required',
             mock: 'required',
-            vm: 'deferred-product-1b',
-            agentic: 'deferred-product-1b'
+            vm: 'verified-product1b',
+            agentic: 'not-run'
           }
         }
       ]
@@ -307,4 +307,4 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
 ] as const;
 
 export const GENERATED_OPERATION_CONTRACT_DIGEST =
-  '8b63e403641036cd1cec37f3219509098764e556d9f03b385a650b5d9d2d845a';
+  '940aa164d9035dda6acaf238b5dcf1dae01122fe11473d44f8114f1c39b776f2';

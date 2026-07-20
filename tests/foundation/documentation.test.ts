@@ -49,12 +49,13 @@ function logicalCommandsAfterPreflight(block: string): readonly string[] {
 }
 
 describe('product documentation', () => {
-  it('states the useful Product 1A surface, evidence, and explicit non-claims', async () => {
-    const [readme, evidence] = await Promise.all([
+  it('states the useful Product 1 surface, evidence, and explicit non-claims', async () => {
+    const [readme, evidence, liveEvidence] = await Promise.all([
       readFile('README.md', 'utf8'),
-      readFile('tests/fixtures/opencode.product1a.json', 'utf8')
+      readFile('tests/fixtures/opencode.product1a.json', 'utf8'),
+      readFile('tests/fixtures/product1b.live.json', 'utf8')
     ]);
-    expect(readme).toContain('Product 1A preview');
+    expect(readme).toContain('Product 1 preview');
     for (const tool of ['`server_status`', '`opn_describe`', '`opn_get`', '`opn_list`']) {
       expect(readme).toContain(tool);
     }
@@ -63,8 +64,8 @@ describe('product documentation', () => {
     }
     expect(readme).toContain('No mutation tool is registered');
     expect(readme).toContain('verified backup and audit');
-    expect(readme).toContain('Product 1B');
-    expect(readme).toContain('GET/POST');
+    expect(readme).toContain('disposable OPNsense 26 VM');
+    expect(readme).toContain('POST /api/core/service/search');
     for (const nonClaim of ['public DNS, ACME, or HAProxy', 'Windows', 'agentic benchmark'])
       expect(readme).toContain(nonClaim);
     expect(readme).toContain('OpenCode 1.18.3');
@@ -77,6 +78,19 @@ describe('product documentation', () => {
       client: { name: 'OpenCode', version: '1.18.3' },
       model: 'opencode/north-mini-code-free',
       checks: { cleanupConfirmed: true, secretAbsent: true }
+    });
+    expect(JSON.parse(liveEvidence)).toMatchObject({
+      status: 'passed',
+      firmware: { name: 'OPNsense', version: '26.1.6' },
+      virtualization: { accelerator: 'tcg' },
+      checks: {
+        packageInstalled: true,
+        readOnlySurface: true,
+        systemStatus: true,
+        servicesPage: true,
+        vmStopped: true,
+        residueFree: true
+      }
     });
   });
 
@@ -95,6 +109,8 @@ describe('product documentation', () => {
     for (const exactCommand of [
       'npm ci --ignore-scripts',
       'npm run test:product1a',
+      'npm run vm:doctor',
+      'npm run test:product1b',
       'npm run verify',
       'npm run test:conformance:2025',
       'npm run test:conformance:2026',
@@ -104,6 +120,7 @@ describe('product documentation', () => {
     }
     for (const block of [...bashBlocks(readme), ...bashBlocks(contributing)]) {
       if (!/(?:^|\n)(?:node|npm|npx)\b/mu.test(block)) continue;
+      if (/npm run (?:vm:|test:product1b)/u.test(block)) continue;
       const lines = block.split('\n').map((line) => line.trim());
       for (const preflightLine of NODE_22_PREFLIGHT) {
         expect(lines).toContain(preflightLine);

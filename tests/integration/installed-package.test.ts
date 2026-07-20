@@ -200,7 +200,13 @@ describe('installed npm executable', () => {
       const apiSecret = 'PRODUCT_1A_PACKAGE_SECRET_SENTINEL';
       const target = await startSyntheticOPNsenseTarget((request) => {
         if (request.path === '/api/core/system/status') {
-          return { body: JSON.stringify({ status: 'ok', ignored: 'not-public' }) };
+          return {
+            body: JSON.stringify({
+              metadata: { system: { status: 'ok' } },
+              subsystems: {},
+              ignored: 'not-public'
+            })
+          };
         }
         return {
           body: JSON.stringify({
@@ -212,7 +218,8 @@ describe('installed npm executable', () => {
                 id: 'svc-1',
                 name: 'dnsmasq',
                 description: 'DNS forwarder',
-                status: 'running',
+                running: 1,
+                locked: 0,
                 ignored: 'not-public'
               }
             ]

@@ -12,7 +12,7 @@ const EXPECTED_REFERENCES = Object.freeze([
   'https://docs.opnsense.org/development/api/core/core.html'
 ]);
 const PRODUCT_1B_TRANSPORT_NOTE =
-  'The generated official table lists GET while the service-search example uses POST; Product 1B must observe and seal the OPNsense 26 transport.';
+  'Observed on the disposable OPNsense 26.1.6 nano VM: POST /api/core/service/search with current, rowCount, sort, and searchPhrase returned the Bootgrid service page used by Product 1B.';
 const EXPECTED_OPERATION_TUPLES = Object.freeze({
   'core.services': Object.freeze({
     name: 'list',
@@ -20,7 +20,7 @@ const EXPECTED_OPERATION_TUPLES = Object.freeze({
     capabilityId: 'opnsense.list',
     method: 'POST',
     path: '/api/core/service/search',
-    transportStatus: 'mock-candidate',
+    transportStatus: 'vm-observed-26.1.6',
     transportNote: PRODUCT_1B_TRANSPORT_NOTE
   }),
   'system.status': Object.freeze({

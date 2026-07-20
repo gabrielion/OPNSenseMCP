@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "status": "passed",
+  "failureStage": null,
+  "claim": "This evidence covers the installed Product 1B package performing only system.status and core.services reads against one disposable local OPNsense 26.1.6 VM.",
+  "host": {
+    "operatingSystem": "macOS 26.5.1",
+    "architecture": "arm64"
+  },
+  "virtualization": {
+    "qemuVersion": "11.0.2",
+    "guestArchitecture": "amd64",
+    "accelerator": "tcg"
+  },
+  "firmware": {
+    "name": "OPNsense",
+    "version": "26.1.6",
+    "image": "OPNsense-26.1.6-nano-amd64.img.bz2",
+    "archiveSha256": "3c16267c791abfc3e41d5249fcb0c245c03cb91e2f1aa4d53017f0f3454d03a1"
+  },
+  "transport": [
+    {
+      "operation": "opn_get system.status",
+      "method": "GET",
+      "path": "/api/core/system/status"
+    },
+    {
+      "operation": "opn_list core.services",
+      "method": "POST",
+      "path": "/api/core/service/search"
+    }
+  ],
+  "checks": {
+    "doctor": true,
+    "vmStarted": true,
+    "bootstrap": true,
+    "packageInstalled": true,
+    "readOnlySurface": true,
+    "systemStatus": true,
+    "servicesPage": true,
+    "vmStopped": true,
+    "residueFree": true
+  },
+  "limitations": [
+    "Disposable local VM only; no production firewall or Internet-facing deployment was used.",
+    "This is not evidence for public DNS, ACME, HAProxy, mutations, backups, restore, Windows, or the agentic benchmark.",
+    "No raw firewall response, API credential, certificate, or temporary package is retained."
+  ]
+}

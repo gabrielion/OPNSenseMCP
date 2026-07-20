@@ -117,7 +117,10 @@ describe('default application composition seam', () => {
     const started = deferred();
     const target = await startSyntheticOPNsenseTarget(() => {
       started.resolve();
-      return { delayMs: 40, body: JSON.stringify({ status: 'ok' }) };
+      return {
+        delayMs: 40,
+        body: JSON.stringify({ metadata: { system: { status: 'ok' } }, subsystems: {} })
+      };
     });
     const directory = await mkdtemp(join(tmpdir(), 'opnsense-runtime-drain-'));
     const caFile = join(directory, 'ca.pem');

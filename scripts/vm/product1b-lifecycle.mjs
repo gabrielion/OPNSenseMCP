@@ -63,6 +63,8 @@ function instancePaths(instanceRoot) {
     overlay: join(instanceRoot, OVERLAY_NAME),
     console: join(instanceRoot, 'console.sock'),
     pid: join(instanceRoot, 'qemu.pid'),
+    ca: join(instanceRoot, 'ca.pem'),
+    connection: join(instanceRoot, 'connection.json'),
     operation: join(instanceRoot, OPERATION_LOCK_NAME)
   };
 }
@@ -355,6 +357,8 @@ async function unlinkOwnedFile(path) {
 
 async function cleanupOwnedState(instanceRoot) {
   const paths = instancePaths(instanceRoot);
+  await unlinkOwnedFile(paths.connection);
+  await unlinkOwnedFile(paths.ca);
   await unlinkOwnedFile(paths.console);
   await unlinkOwnedFile(paths.pid);
   await unlinkOwnedFile(paths.overlay);
