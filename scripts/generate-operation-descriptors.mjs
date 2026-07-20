@@ -6,32 +6,76 @@ import { format } from 'prettier';
 
 const DEFAULT_CONTRACT = 'src/operations/operation-contract.v1.json';
 const DEFAULT_OUTPUT = 'src/operations/generated/descriptors.ts';
-const EXPECTED_RESOURCES = Object.freeze(['core.services', 'system.status']);
+const EXPECTED_RESOURCES = Object.freeze(['core.services', 'system.status', 'firewall.alias']);
 const EXPECTED_REFERENCES = Object.freeze([
   'https://docs.opnsense.org/development/api.html',
   'https://docs.opnsense.org/development/api/core/core.html'
 ]);
+const FIREWALL_REFERENCE = 'https://docs.opnsense.org/development/api/core/firewall.html';
+const ALLOWED_REFERENCES = Object.freeze(new Set([...EXPECTED_REFERENCES, FIREWALL_REFERENCE]));
+const ALIAS_APPLY_COMMAND = Object.freeze({
+  method: 'POST',
+  path: '/api/firewall/alias/reconfigure'
+});
 const PRODUCT_1B_TRANSPORT_NOTE =
   'Observed on the disposable OPNsense 26.1.6 nano VM: POST /api/core/service/search with current, rowCount, sort, and searchPhrase returned the Bootgrid service page used by Product 1B.';
 const EXPECTED_OPERATION_TUPLES = Object.freeze({
-  'core.services': Object.freeze({
-    name: 'list',
-    effect: 'read',
-    capabilityId: 'opnsense.list',
-    method: 'POST',
-    path: '/api/core/service/search',
-    transportStatus: 'vm-observed-26.1.6',
-    transportNote: PRODUCT_1B_TRANSPORT_NOTE
-  }),
-  'system.status': Object.freeze({
-    name: 'get',
-    effect: 'read',
-    capabilityId: 'opnsense.get',
-    method: 'GET',
-    path: '/api/core/system/status',
-    transportStatus: 'documented',
-    transportNote: undefined
-  })
+  'core.services': Object.freeze([
+    Object.freeze({
+      name: 'list',
+      effect: 'read',
+      capabilityId: 'opnsense.list',
+      method: 'POST',
+      path: '/api/core/service/search',
+      transportStatus: 'vm-observed-26.1.6',
+      transportNote: PRODUCT_1B_TRANSPORT_NOTE,
+      applyCommand: undefined
+    })
+  ]),
+  'system.status': Object.freeze([
+    Object.freeze({
+      name: 'get',
+      effect: 'read',
+      capabilityId: 'opnsense.get',
+      method: 'GET',
+      path: '/api/core/system/status',
+      transportStatus: 'documented',
+      transportNote: undefined,
+      applyCommand: undefined
+    })
+  ]),
+  'firewall.alias': Object.freeze([
+    Object.freeze({
+      name: 'list',
+      effect: 'read',
+      capabilityId: 'opnsense.list',
+      method: 'POST',
+      path: '/api/firewall/alias/searchItem',
+      transportStatus: 'documented',
+      transportNote: undefined,
+      applyCommand: undefined
+    }),
+    Object.freeze({
+      name: 'create',
+      effect: 'firewall-write',
+      capabilityId: 'opnsense.create',
+      method: 'POST',
+      path: '/api/firewall/alias/addItem',
+      transportStatus: 'documented',
+      transportNote: undefined,
+      applyCommand: ALIAS_APPLY_COMMAND
+    }),
+    Object.freeze({
+      name: 'delete',
+      effect: 'firewall-write',
+      capabilityId: 'opnsense.delete',
+      method: 'POST',
+      path: '/api/firewall/alias/delItem',
+      transportStatus: 'documented',
+      transportNote: undefined,
+      applyCommand: ALIAS_APPLY_COMMAND
+    })
+  ])
 });
 const FORBIDDEN_SCHEMA_PROPERTY_NAMES = new Set([
   'apikey',
@@ -195,14 +239,14 @@ function validateEvidence(value) {
 function validateContract(value) {
   const contract = requireRecord(value);
   if (contract.schemaVersion !== 1) invalidContract();
-  if (requireString(contract.contractId) !== 'opnsense-product-1a-read-contract') invalidContract();
+  if (requireString(contract.contractId) !== 'opnsense-product-contract') invalidContract();
   requireString(contract.firmwareTarget);
   const references = requireStringArray(contract.sourceReferences);
   if (JSON.stringify(references) !== JSON.stringify(EXPECTED_REFERENCES)) invalidContract();
   const defs = requireRecord(contract.$defs);
   for (const schema of Object.values(defs)) validateSchemaNode(schema);
 
-  if (!Array.isArray(contract.resources) || contract.resources.length !== 2) invalidContract();
+  if (!Array.isArray(contract.resources) || contract.resources.length !== 3) invalidContract();
   const resources = contract.resources.map(requireRecord);
   const keys = resources.map((resource) => requireString(resource.key));
   if (
@@ -225,28 +269,46 @@ function validateContract(value) {
       requireString(resource[field]);
     }
     requireStringArray(resource.requiredFeatures);
+    const resourceReferences = requireStringArray(resource.sourceReferences);
     if (
-      JSON.stringify(requireStringArray(resource.sourceReferences)) !==
-      JSON.stringify(EXPECTED_REFERENCES)
+      resourceReferences.length === 0 ||
+      resourceReferences.some((reference) => !ALLOWED_REFERENCES.has(reference))
     ) {
       invalidContract();
     }
     if (resource.requiredPlugin !== null && !isRecord(resource.requiredPlugin)) invalidContract();
-    if (!Array.isArray(resource.operations) || resource.operations.length !== 1) invalidContract();
+    const expectedTuples = EXPECTED_OPERATION_TUPLES[resource.key];
+    if (expectedTuples === undefined) invalidContract();
+    if (
+      !Array.isArray(resource.operations) ||
+      resource.operations.length !== expectedTuples.length
+    ) {
+      invalidContract();
+    }
 
     for (const operationValue of resource.operations) {
       const operation = requireRecord(operationValue);
-      const expectedTuple = EXPECTED_OPERATION_TUPLES[resource.key];
+      const expectedTuple = expectedTuples.find((tuple) => tuple.name === operation.name);
       if (expectedTuple === undefined) invalidContract();
-      if (operation.name !== expectedTuple.name || operation.effect !== expectedTuple.effect) {
-        invalidContract();
-      }
+      if (operation.effect !== expectedTuple.effect) invalidContract();
       if (operation.resourceScope !== resource.key) invalidContract();
       if (operation.capabilityId !== expectedTuple.capabilityId) invalidContract();
       const command = requireRecord(operation.command);
       if (!hasExactKeys(command, ['method', 'path'])) invalidContract();
       if (command.method !== expectedTuple.method || command.path !== expectedTuple.path) {
         invalidContract();
+      }
+      if (expectedTuple.applyCommand === undefined) {
+        if (operation.applyCommand !== undefined) invalidContract();
+      } else {
+        const applyCommand = requireRecord(operation.applyCommand);
+        if (!hasExactKeys(applyCommand, ['method', 'path'])) invalidContract();
+        if (
+          applyCommand.method !== expectedTuple.applyCommand.method ||
+          applyCommand.path !== expectedTuple.applyCommand.path
+        ) {
+          invalidContract();
+        }
       }
       if (operation.documentedTransport !== `${expectedTuple.method} ${expectedTuple.path}`) {
         invalidContract();
@@ -285,6 +347,7 @@ function runtimeOperation(operation, defs) {
     name: operation.name,
     effect: operation.effect,
     command: operation.command,
+    ...(operation.applyCommand === undefined ? {} : { applyCommand: operation.applyCommand }),
     transportStatus: operation.transportStatus,
     inputSchema: localSchema(operation.inputSchemaRef, defs),
     outputSchema: localSchema(operation.outputSchemaRef, defs),

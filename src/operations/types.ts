@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-export type OperationEffect = 'read';
+export type OperationEffect = 'read' | 'firewall-write';
 
 export interface PublicOperationDescriptor {
   readonly name: string;
@@ -42,6 +42,7 @@ export interface RuntimeOperationDescriptor {
   readonly name: string;
   readonly effect: OperationEffect;
   readonly command: OperationCommand;
+  readonly applyCommand?: OperationCommand;
   readonly resourceScope: string;
   readonly capabilityId: string;
   readonly limits: OperationLimits;

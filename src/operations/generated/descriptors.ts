@@ -90,7 +90,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
         outputSchemaDigest: '42f50ba17d0278f50a20b8a24cace495648f6164785e226597f9f83d7c36ab86'
       }
     ],
-    contractDigest: '940aa164d9035dda6acaf238b5dcf1dae01122fe11473d44f8114f1c39b776f2',
+    contractDigest: '7c741048b72b9c618cce955c7a01241dc0e7259b6eae996a56d8ac061b32eb67',
     runtime: {
       module: 'core',
       controller: 'service',
@@ -241,7 +241,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
         outputSchemaDigest: '11e1bc49417ca3079e04578cc82bb0a52b44dda433c678e444817591b8e7651f'
       }
     ],
-    contractDigest: '940aa164d9035dda6acaf238b5dcf1dae01122fe11473d44f8114f1c39b776f2',
+    contractDigest: '7c741048b72b9c618cce955c7a01241dc0e7259b6eae996a56d8ac061b32eb67',
     runtime: {
       module: 'core',
       controller: 'system',
@@ -303,8 +303,481 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
         }
       ]
     }
+  },
+  {
+    key: 'firewall.alias',
+    label: 'Firewall alias',
+    category: 'Firewall',
+    description: 'Create, read, and delete a bounded firewall host alias.',
+    requiredPlugin: null,
+    requiredFeatures: [],
+    operations: [
+      {
+        name: 'list',
+        effect: 'read',
+        inputSchema: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['page', 'pageSize', 'query'],
+          properties: {
+            page: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 1000
+            },
+            pageSize: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100
+            },
+            query: {
+              type: 'string',
+              maxLength: 128
+            }
+          }
+        },
+        outputSchema: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['page', 'pageSize', 'total', 'items'],
+          properties: {
+            page: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 1000
+            },
+            pageSize: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100
+            },
+            total: {
+              type: 'integer',
+              minimum: 0,
+              maximum: 1000000
+            },
+            items: {
+              type: 'array',
+              maxItems: 100,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['uuid', 'name', 'type', 'description'],
+                properties: {
+                  uuid: {
+                    type: 'string',
+                    minLength: 1,
+                    maxLength: 64
+                  },
+                  name: {
+                    type: 'string',
+                    minLength: 1,
+                    maxLength: 32
+                  },
+                  type: {
+                    type: 'string',
+                    minLength: 1,
+                    maxLength: 32
+                  },
+                  description: {
+                    type: 'string',
+                    maxLength: 255
+                  }
+                }
+              }
+            }
+          }
+        },
+        inputSchemaDigest: 'fba46577eeaf6390339c35d1d83b1707f18309faf38b8001423b1327dd80ab60',
+        outputSchemaDigest: '598955058e7d221ed97f58bdf03d0195e7614975865ab430319fc60026cb6ddc'
+      },
+      {
+        name: 'create',
+        effect: 'firewall-write',
+        inputSchema: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['name', 'type', 'content', 'description'],
+          properties: {
+            name: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 32
+            },
+            type: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 32
+            },
+            content: {
+              type: 'array',
+              maxItems: 64,
+              items: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 253
+              }
+            },
+            description: {
+              type: 'string',
+              maxLength: 255
+            }
+          }
+        },
+        outputSchema: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['item'],
+          properties: {
+            item: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['uuid', 'name', 'type', 'content', 'description'],
+              properties: {
+                uuid: {
+                  type: 'string',
+                  minLength: 1,
+                  maxLength: 64
+                },
+                name: {
+                  type: 'string',
+                  minLength: 1,
+                  maxLength: 32
+                },
+                type: {
+                  type: 'string',
+                  minLength: 1,
+                  maxLength: 32
+                },
+                content: {
+                  type: 'array',
+                  maxItems: 64,
+                  items: {
+                    type: 'string',
+                    minLength: 1,
+                    maxLength: 253
+                  }
+                },
+                description: {
+                  type: 'string',
+                  maxLength: 255
+                }
+              }
+            }
+          }
+        },
+        inputSchemaDigest: '9c608def1a4d7ccf5e46418727c3d672d6e81b72bdac5d2a205b75265e96743c',
+        outputSchemaDigest: 'c993215ea4a22f296c8dc183d1891aeb949935beb5fb3bed021b4aa4a430a5b5'
+      },
+      {
+        name: 'delete',
+        effect: 'firewall-write',
+        inputSchema: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['id'],
+          properties: {
+            id: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 64
+            }
+          }
+        },
+        outputSchema: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['item'],
+          properties: {
+            item: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['id'],
+              properties: {
+                id: {
+                  type: 'string',
+                  minLength: 1,
+                  maxLength: 64
+                }
+              }
+            }
+          }
+        },
+        inputSchemaDigest: 'daa0624882329974c338bd69056eb7343891b3a60dba3fe1e73c97d3f9150210',
+        outputSchemaDigest: '8d65daa21b441142abd0acc8ba8964ee0b4097eaae8ccf94927bbc4389bf8c97'
+      }
+    ],
+    contractDigest: '7c741048b72b9c618cce955c7a01241dc0e7259b6eae996a56d8ac061b32eb67',
+    runtime: {
+      module: 'firewall',
+      controller: 'alias',
+      wrapper: 'alias',
+      firmwareTarget: '26',
+      sourceReferences: [
+        'https://docs.opnsense.org/development/api.html',
+        'https://docs.opnsense.org/development/api/core/firewall.html'
+      ],
+      operations: [
+        {
+          name: 'list',
+          effect: 'read',
+          command: {
+            method: 'POST',
+            path: '/api/firewall/alias/searchItem'
+          },
+          transportStatus: 'documented',
+          inputSchema: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['page', 'pageSize', 'query'],
+            properties: {
+              page: {
+                type: 'integer',
+                minimum: 1,
+                maximum: 1000
+              },
+              pageSize: {
+                type: 'integer',
+                minimum: 1,
+                maximum: 100
+              },
+              query: {
+                type: 'string',
+                maxLength: 128
+              }
+            }
+          },
+          outputSchema: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['page', 'pageSize', 'total', 'items'],
+            properties: {
+              page: {
+                type: 'integer',
+                minimum: 1,
+                maximum: 1000
+              },
+              pageSize: {
+                type: 'integer',
+                minimum: 1,
+                maximum: 100
+              },
+              total: {
+                type: 'integer',
+                minimum: 0,
+                maximum: 1000000
+              },
+              items: {
+                type: 'array',
+                maxItems: 100,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['uuid', 'name', 'type', 'description'],
+                  properties: {
+                    uuid: {
+                      type: 'string',
+                      minLength: 1,
+                      maxLength: 64
+                    },
+                    name: {
+                      type: 'string',
+                      minLength: 1,
+                      maxLength: 32
+                    },
+                    type: {
+                      type: 'string',
+                      minLength: 1,
+                      maxLength: 32
+                    },
+                    description: {
+                      type: 'string',
+                      maxLength: 255
+                    }
+                  }
+                }
+              }
+            }
+          },
+          inputSchemaDigest: 'fba46577eeaf6390339c35d1d83b1707f18309faf38b8001423b1327dd80ab60',
+          outputSchemaDigest: '598955058e7d221ed97f58bdf03d0195e7614975865ab430319fc60026cb6ddc',
+          resourceScope: 'firewall.alias',
+          capabilityId: 'opnsense.list',
+          limits: {
+            maxInputBytes: 2048,
+            maxOutputBytes: 131072,
+            maxItems: 100
+          },
+          evidence: {
+            offline: 'required',
+            mock: 'required',
+            vm: 'pending',
+            agentic: 'not-run'
+          }
+        },
+        {
+          name: 'create',
+          effect: 'firewall-write',
+          command: {
+            method: 'POST',
+            path: '/api/firewall/alias/addItem'
+          },
+          applyCommand: {
+            method: 'POST',
+            path: '/api/firewall/alias/reconfigure'
+          },
+          transportStatus: 'documented',
+          inputSchema: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['name', 'type', 'content', 'description'],
+            properties: {
+              name: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 32
+              },
+              type: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 32
+              },
+              content: {
+                type: 'array',
+                maxItems: 64,
+                items: {
+                  type: 'string',
+                  minLength: 1,
+                  maxLength: 253
+                }
+              },
+              description: {
+                type: 'string',
+                maxLength: 255
+              }
+            }
+          },
+          outputSchema: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['item'],
+            properties: {
+              item: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['uuid', 'name', 'type', 'content', 'description'],
+                properties: {
+                  uuid: {
+                    type: 'string',
+                    minLength: 1,
+                    maxLength: 64
+                  },
+                  name: {
+                    type: 'string',
+                    minLength: 1,
+                    maxLength: 32
+                  },
+                  type: {
+                    type: 'string',
+                    minLength: 1,
+                    maxLength: 32
+                  },
+                  content: {
+                    type: 'array',
+                    maxItems: 64,
+                    items: {
+                      type: 'string',
+                      minLength: 1,
+                      maxLength: 253
+                    }
+                  },
+                  description: {
+                    type: 'string',
+                    maxLength: 255
+                  }
+                }
+              }
+            }
+          },
+          inputSchemaDigest: '9c608def1a4d7ccf5e46418727c3d672d6e81b72bdac5d2a205b75265e96743c',
+          outputSchemaDigest: 'c993215ea4a22f296c8dc183d1891aeb949935beb5fb3bed021b4aa4a430a5b5',
+          resourceScope: 'firewall.alias',
+          capabilityId: 'opnsense.create',
+          limits: {
+            maxInputBytes: 8192,
+            maxOutputBytes: 8192,
+            maxItems: 1
+          },
+          evidence: {
+            offline: 'required',
+            mock: 'required',
+            vm: 'pending',
+            agentic: 'not-run'
+          }
+        },
+        {
+          name: 'delete',
+          effect: 'firewall-write',
+          command: {
+            method: 'POST',
+            path: '/api/firewall/alias/delItem'
+          },
+          applyCommand: {
+            method: 'POST',
+            path: '/api/firewall/alias/reconfigure'
+          },
+          transportStatus: 'documented',
+          inputSchema: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['id'],
+            properties: {
+              id: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 64
+              }
+            }
+          },
+          outputSchema: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['item'],
+            properties: {
+              item: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['id'],
+                properties: {
+                  id: {
+                    type: 'string',
+                    minLength: 1,
+                    maxLength: 64
+                  }
+                }
+              }
+            }
+          },
+          inputSchemaDigest: 'daa0624882329974c338bd69056eb7343891b3a60dba3fe1e73c97d3f9150210',
+          outputSchemaDigest: '8d65daa21b441142abd0acc8ba8964ee0b4097eaae8ccf94927bbc4389bf8c97',
+          resourceScope: 'firewall.alias',
+          capabilityId: 'opnsense.delete',
+          limits: {
+            maxInputBytes: 256,
+            maxOutputBytes: 4096,
+            maxItems: 1
+          },
+          evidence: {
+            offline: 'required',
+            mock: 'required',
+            vm: 'pending',
+            agentic: 'not-run'
+          }
+        }
+      ]
+    }
   }
 ] as const;
 
 export const GENERATED_OPERATION_CONTRACT_DIGEST =
-  '940aa164d9035dda6acaf238b5dcf1dae01122fe11473d44f8114f1c39b776f2';
+  '7c741048b72b9c618cce955c7a01241dc0e7259b6eae996a56d8ac061b32eb67';

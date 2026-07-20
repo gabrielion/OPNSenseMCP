@@ -134,6 +134,17 @@ describe('opn_describe', () => {
             category: 'System',
             description: 'Read the bounded health status reported by the OPNsense system API.',
             operations: [{ name: 'get', effect: 'read' }]
+          },
+          {
+            key: 'firewall.alias',
+            label: 'Firewall alias',
+            category: 'Firewall',
+            description: 'Create, read, and delete a bounded firewall host alias.',
+            operations: [
+              { name: 'list', effect: 'read' },
+              { name: 'create', effect: 'firewall-write' },
+              { name: 'delete', effect: 'firewall-write' }
+            ]
           }
         ]
       }
@@ -231,9 +242,9 @@ describe('opn_describe', () => {
     expect(unknown).toMatchObject({
       kind: 'refused',
       code: 'UNKNOWN_RESOURCE',
-      details: { suggestions: ['core.services', 'system.status'] }
+      details: { suggestions: ['core.services', 'firewall.alias', 'system.status'] }
     });
     expect(JSON.stringify(unknown)).not.toContain(sentinel);
-    expect(Reflect.get(Reflect.get(unknown, 'details'), 'suggestions')).toHaveLength(2);
+    expect(Reflect.get(Reflect.get(unknown, 'details'), 'suggestions')).toHaveLength(3);
   });
 });

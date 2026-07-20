@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "contractId": "opnsense-product-1a-read-contract",
+  "contractId": "opnsense-product-contract",
   "firmwareTarget": "26",
   "sourceReferences": [
     "https://docs.opnsense.org/development/api.html",
@@ -59,6 +59,102 @@
           "required": ["status"],
           "properties": {
             "status": { "type": "string", "minLength": 1, "maxLength": 64 }
+          }
+        }
+      }
+    },
+    "firewallAliasListInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["page", "pageSize", "query"],
+      "properties": {
+        "page": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "pageSize": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "query": { "type": "string", "maxLength": 128 }
+      }
+    },
+    "firewallAliasListOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["page", "pageSize", "total", "items"],
+      "properties": {
+        "page": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "pageSize": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "total": { "type": "integer", "minimum": 0, "maximum": 1000000 },
+        "items": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["uuid", "name", "type", "description"],
+            "properties": {
+              "uuid": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+              "type": { "type": "string", "minLength": 1, "maxLength": 32 },
+              "description": { "type": "string", "maxLength": 255 }
+            }
+          }
+        }
+      }
+    },
+    "firewallAliasCreateInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "content", "description"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "type": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "content": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 253 }
+        },
+        "description": { "type": "string", "maxLength": 255 }
+      }
+    },
+    "firewallAliasCreateOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item"],
+      "properties": {
+        "item": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["uuid", "name", "type", "content", "description"],
+          "properties": {
+            "uuid": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+            "type": { "type": "string", "minLength": 1, "maxLength": 32 },
+            "content": {
+              "type": "array",
+              "maxItems": 64,
+              "items": { "type": "string", "minLength": 1, "maxLength": 253 }
+            },
+            "description": { "type": "string", "maxLength": 255 }
+          }
+        }
+      }
+    },
+    "firewallAliasDeleteInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "firewallAliasDeleteOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item"],
+      "properties": {
+        "item": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 64 }
           }
         }
       }
@@ -147,6 +243,107 @@
             "offline": "required",
             "mock": "required",
             "vm": "verified-product1b",
+            "agentic": "not-run"
+          }
+        }
+      ]
+    },
+    {
+      "key": "firewall.alias",
+      "label": "Firewall alias",
+      "category": "Firewall",
+      "description": "Create, read, and delete a bounded firewall host alias.",
+      "module": "firewall",
+      "controller": "alias",
+      "wrapper": "alias",
+      "firmwareTarget": "26",
+      "requiredPlugin": null,
+      "requiredFeatures": [],
+      "sourceReferences": [
+        "https://docs.opnsense.org/development/api.html",
+        "https://docs.opnsense.org/development/api/core/firewall.html"
+      ],
+      "operations": [
+        {
+          "name": "list",
+          "effect": "read",
+          "command": {
+            "method": "POST",
+            "path": "/api/firewall/alias/searchItem"
+          },
+          "documentedTransport": "POST /api/firewall/alias/searchItem",
+          "transportStatus": "documented",
+          "inputSchemaRef": "#/$defs/firewallAliasListInput",
+          "outputSchemaRef": "#/$defs/firewallAliasListOutput",
+          "resourceScope": "firewall.alias",
+          "capabilityId": "opnsense.list",
+          "limits": {
+            "maxInputBytes": 2048,
+            "maxOutputBytes": 131072,
+            "maxItems": 100
+          },
+          "evidence": {
+            "offline": "required",
+            "mock": "required",
+            "vm": "pending",
+            "agentic": "not-run"
+          }
+        },
+        {
+          "name": "create",
+          "effect": "firewall-write",
+          "command": {
+            "method": "POST",
+            "path": "/api/firewall/alias/addItem"
+          },
+          "applyCommand": {
+            "method": "POST",
+            "path": "/api/firewall/alias/reconfigure"
+          },
+          "documentedTransport": "POST /api/firewall/alias/addItem",
+          "transportStatus": "documented",
+          "inputSchemaRef": "#/$defs/firewallAliasCreateInput",
+          "outputSchemaRef": "#/$defs/firewallAliasCreateOutput",
+          "resourceScope": "firewall.alias",
+          "capabilityId": "opnsense.create",
+          "limits": {
+            "maxInputBytes": 8192,
+            "maxOutputBytes": 8192,
+            "maxItems": 1
+          },
+          "evidence": {
+            "offline": "required",
+            "mock": "required",
+            "vm": "pending",
+            "agentic": "not-run"
+          }
+        },
+        {
+          "name": "delete",
+          "effect": "firewall-write",
+          "command": {
+            "method": "POST",
+            "path": "/api/firewall/alias/delItem"
+          },
+          "applyCommand": {
+            "method": "POST",
+            "path": "/api/firewall/alias/reconfigure"
+          },
+          "documentedTransport": "POST /api/firewall/alias/delItem",
+          "transportStatus": "documented",
+          "inputSchemaRef": "#/$defs/firewallAliasDeleteInput",
+          "outputSchemaRef": "#/$defs/firewallAliasDeleteOutput",
+          "resourceScope": "firewall.alias",
+          "capabilityId": "opnsense.delete",
+          "limits": {
+            "maxInputBytes": 256,
+            "maxOutputBytes": 4096,
+            "maxItems": 1
+          },
+          "evidence": {
+            "offline": "required",
+            "mock": "required",
+            "vm": "pending",
             "agentic": "not-run"
           }
         }

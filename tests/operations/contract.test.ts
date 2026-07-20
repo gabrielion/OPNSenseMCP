@@ -21,6 +21,7 @@ interface OperationContract {
       effect?: string;
       capabilityId: string;
       command: { method: string; path: string };
+      applyCommand?: { method: string; path: string };
       transportStatus: string;
       transportNote?: string;
       resourceScope?: string;
@@ -77,14 +78,18 @@ function runGenerator(args: readonly string[] = []) {
   });
 }
 
-describe('two-resource operation contract', () => {
-  it('is versioned, contains exactly the two approved read tuples, and preserves official sources', () => {
+describe('three-resource operation contract', () => {
+  it('is versioned, contains the approved read and firewall-write tuples, and preserves official sources', () => {
     const contract = readContract();
     expect(contract).toBeDefined();
     if (contract === undefined) return;
 
     expect(contract.schemaVersion).toBe(1);
-    expect(contract.resources.map(({ key }) => key)).toEqual(['core.services', 'system.status']);
+    expect(contract.resources.map(({ key }) => key)).toEqual([
+      'core.services',
+      'system.status',
+      'firewall.alias'
+    ]);
     expect(
       contract.resources.flatMap(({ key, operations }) =>
         operations.map((operation) => ({
@@ -118,6 +123,36 @@ describe('two-resource operation contract', () => {
         path: '/api/core/system/status',
         transportStatus: 'documented',
         transportNote: null
+      },
+      {
+        key: 'firewall.alias',
+        name: 'list',
+        effect: 'read',
+        capabilityId: 'opnsense.list',
+        method: 'POST',
+        path: '/api/firewall/alias/searchItem',
+        transportStatus: 'documented',
+        transportNote: null
+      },
+      {
+        key: 'firewall.alias',
+        name: 'create',
+        effect: 'firewall-write',
+        capabilityId: 'opnsense.create',
+        method: 'POST',
+        path: '/api/firewall/alias/addItem',
+        transportStatus: 'documented',
+        transportNote: null
+      },
+      {
+        key: 'firewall.alias',
+        name: 'delete',
+        effect: 'firewall-write',
+        capabilityId: 'opnsense.delete',
+        method: 'POST',
+        path: '/api/firewall/alias/delItem',
+        transportStatus: 'documented',
+        transportNote: null
       }
     ]);
     expect(contract.sourceReferences).toEqual([
@@ -127,6 +162,26 @@ describe('two-resource operation contract', () => {
     expect(JSON.stringify(contract)).toContain('vm-observed-26.1.6');
     expect(JSON.stringify(contract)).toContain('GET /api/core/system/status');
     expect(JSON.stringify(contract)).toContain('POST /api/core/service/search');
+    expect(JSON.stringify(contract)).toContain('/api/firewall/alias/reconfigure');
+  });
+
+  it('marks firewall-alias writes with a reconfigure apply command and pending VM evidence', () => {
+    const contract = readContract();
+    expect(contract).toBeDefined();
+    if (contract === undefined) return;
+
+    const alias = contract.resources.find(({ key }) => key === 'firewall.alias');
+    expect(alias).toBeDefined();
+    const writes =
+      alias?.operations.filter((operation) => operation.effect === 'firewall-write') ?? [];
+    expect(writes.map(({ name }) => name)).toEqual(['create', 'delete']);
+    for (const operation of writes) {
+      expect(operation.applyCommand).toEqual({
+        method: 'POST',
+        path: '/api/firewall/alias/reconfigure'
+      });
+      expect(operation.evidence).toMatchObject({ vm: 'pending' });
+    }
   });
 
   it('defines bounded schemas for the later read envelopes', () => {

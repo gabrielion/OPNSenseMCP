@@ -10,7 +10,7 @@ const JsonSchema: z.ZodType<Readonly<Record<string, unknown>>> = z.record(z.stri
 const PublicOperation = z
   .object({
     name: z.string().min(1).max(64),
-    effect: z.literal('read'),
+    effect: z.enum(['read', 'firewall-write']),
     inputSchema: JsonSchema,
     outputSchema: JsonSchema,
     inputSchemaDigest: z.string().regex(/^[a-f0-9]{64}$/u),
