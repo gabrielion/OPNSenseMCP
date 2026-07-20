@@ -46,7 +46,7 @@ interface Keypress {
   readonly ctrl?: boolean;
 }
 
-type KeypressListener = (character: string, key: Keypress) => void;
+type KeypressListener = (character: string | undefined, key: Keypress) => void;
 type VoidListener = () => void;
 type ErrorListener = (error: unknown) => void;
 
@@ -144,7 +144,7 @@ export function askMasked(message: string, primitives: MaskedPromptPrimitives): 
       settled = true;
       reject(cleanup() ?? unavailable());
     };
-    const onKeypress = (character: string, key: Keypress) => {
+    const onKeypress = (character: string | undefined, key: Keypress) => {
       if (character === '\u0003' || (key.ctrl === true && key.name === 'c')) {
         rejectUnavailable();
         return;
@@ -164,7 +164,12 @@ export function askMasked(message: string, primitives: MaskedPromptPrimitives): 
         }
         return;
       }
-      if (key.ctrl !== true && character.length > 0 && !/[\r\n]/u.test(character)) {
+      if (
+        key.ctrl !== true &&
+        typeof character === 'string' &&
+        character.length > 0 &&
+        !/[\r\n]/u.test(character)
+      ) {
         value += character;
         primitives.writeOutput('*');
       }

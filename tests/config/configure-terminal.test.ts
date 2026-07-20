@@ -116,6 +116,20 @@ describe('configure terminal adapter', () => {
     expect(controlled.listenerTotal()).toBe(0);
   });
 
+  it('ignores keypress events without a character and still restores terminal state', async () => {
+    const controlled = new ControlledMaskedPrompt();
+    const pending = askMasked('Secret: ', controlled.primitives);
+
+    controlled.emit('keypress', undefined, { name: 'up' });
+    controlled.emit('keypress', 's', { name: 's' });
+    controlled.emit('keypress', '\r', { name: 'return' });
+
+    await expect(pending).resolves.toBe('s');
+    expect(controlled.output.join('')).toBe('Secret: *\n');
+    expect(controlled.stateChanges).toEqual(['raw:true', 'resume', 'raw:false', 'pause']);
+    expect(controlled.listenerTotal()).toBe(0);
+  });
+
   it.each([
     [
       'raw Ctrl-C',
