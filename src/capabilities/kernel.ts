@@ -89,6 +89,23 @@ const WRITE_CAPABILITY_DEFINITION_KEYS = Object.freeze([
   'handler',
   'verifyOutcome'
 ]);
+const WRITE_RESOURCE_CAPABILITY_DEFINITION_KEYS = Object.freeze([
+  'id',
+  'mcpName',
+  'title',
+  'description',
+  'inputSchema',
+  'outputSchema',
+  'annotations',
+  'transports',
+  'policy',
+  'selectableResourceScopes',
+  'refusalDetailVocabulary',
+  'resolver',
+  'preflight',
+  'handler',
+  'verifyOutcome'
+]);
 const CAPABILITY_POLICY_KEYS = Object.freeze([
   'effect',
   'resourceScopes',
@@ -930,6 +947,192 @@ export function defineWriteCapability<
   }
 }
 
+export interface TypedWriteResourceCapabilityDefinition<
+  TParsedInput extends Record<string, unknown>,
+  TResolvedInput extends Record<string, unknown>,
+  TOutput extends Record<string, unknown>
+> {
+  readonly id: string;
+  readonly mcpName: string;
+  readonly title: string;
+  readonly description: string;
+  readonly inputSchema: z.ZodType<TParsedInput>;
+  readonly outputSchema: z.ZodType<TOutput>;
+  readonly annotations: ToolAnnotations;
+  readonly transports: readonly TransportKind[];
+  readonly selectableResourceScopes: readonly string[];
+  readonly refusalDetailVocabulary: {
+    readonly operations: readonly string[];
+    readonly fields: readonly string[];
+  };
+  readonly policy: Omit<CapabilityPolicy, 'resourceScopes'>;
+  readonly resolver: (
+    input: TParsedInput,
+    context: ResourceResolutionContext
+  ) => ResourceResolution<TResolvedInput>;
+  readonly preflight: (
+    input: TResolvedInput,
+    context: ResourceCapabilityExecutionContext
+  ) => Promise<PreflightResult>;
+  readonly handler: (
+    input: TResolvedInput,
+    context: ResourceCapabilityExecutionContext
+  ) => Promise<TOutput>;
+  readonly verifyOutcome: (
+    input: TResolvedInput,
+    output: TOutput,
+    context: ResourceCapabilityExecutionContext
+  ) => Promise<boolean>;
+}
+
+// A write-resource capability resolves a visible resource exactly like a read resource capability and then
+// runs the fixed mutation envelope. It captures the resolver, refusal vocabulary, and selectable scopes in the
+// resource maps and the preflight/verifyOutcome in the envelope maps, so authorizeRequest resolves the resource
+// and executeAuthorized routes it through executeMutationEnvelope. It enforces the write policy matrix.
+export function defineWriteResourceCapability<
+  TParsedInput extends Record<string, unknown>,
+  TResolvedInput extends Record<string, unknown>,
+  TOutput extends Record<string, unknown>
+>(
+  definition: TypedWriteResourceCapabilityDefinition<TParsedInput, TResolvedInput, TOutput>
+): CapabilityDefinition {
+  try {
+    const source = readPlainOwnDataProperties(
+      definition,
+      WRITE_RESOURCE_CAPABILITY_DEFINITION_KEYS,
+      true
+    );
+    const selectableResourceScopes = copyDenseArray(
+      readRequiredProperty(source, 'selectableResourceScopes'),
+      isPublicDetailName
+    );
+    if (
+      selectableResourceScopes.length === 0 ||
+      new Set(selectableResourceScopes).size !== selectableResourceScopes.length
+    ) {
+      return invalidCapabilityDefinition();
+    }
+    const vocabularySource = readPlainOwnDataProperties(
+      readRequiredProperty(source, 'refusalDetailVocabulary'),
+      RESOURCE_REFUSAL_DETAIL_VOCABULARY_KEYS,
+      true
+    );
+    const operations = copyDenseArray(
+      readRequiredProperty(vocabularySource, 'operations'),
+      isPublicDetailName
+    );
+    const fields = copyDenseArray(
+      readRequiredProperty(vocabularySource, 'fields'),
+      isPublicDetailName
+    );
+    if (new Set(operations).size !== operations.length || new Set(fields).size !== fields.length) {
+      return invalidCapabilityDefinition();
+    }
+    const refusalDetailVocabulary: SealedResourceRefusalDetailVocabulary = Object.freeze({
+      operations: new Set(operations),
+      fields: new Set(fields)
+    });
+    const resolverValue = readRequiredProperty(source, 'resolver');
+    const handlerValue = readRequiredProperty(source, 'handler');
+    const preflightValue = readRequiredProperty(source, 'preflight');
+    const verifyOutcomeValue = readRequiredProperty(source, 'verifyOutcome');
+    if (
+      typeof resolverValue !== 'function' ||
+      isProxy(resolverValue) ||
+      typeof handlerValue !== 'function' ||
+      isProxy(handlerValue) ||
+      typeof preflightValue !== 'function' ||
+      isProxy(preflightValue) ||
+      typeof verifyOutcomeValue !== 'function' ||
+      isProxy(verifyOutcomeValue)
+    ) {
+      return invalidCapabilityDefinition();
+    }
+    const sourcePolicy = readPlainOwnDataProperties(
+      readRequiredProperty(source, 'policy'),
+      RESOURCE_CAPABILITY_POLICY_KEYS,
+      true
+    );
+    const effect = readRequiredProperty(sourcePolicy, 'effect');
+    const backup = readRequiredProperty(sourcePolicy, 'backup');
+    const audit = readRequiredProperty(sourcePolicy, 'audit');
+    if (
+      !isCapabilityEffect(effect) ||
+      effect === 'read' ||
+      audit !== 'required' ||
+      (effect === 'firewall-write' && backup !== 'strict')
+    ) {
+      return invalidCapabilityDefinition();
+    }
+    const resolver = resolverValue as TypedWriteResourceCapabilityDefinition<
+      TParsedInput,
+      TResolvedInput,
+      TOutput
+    >['resolver'];
+    const handler = handlerValue as TypedWriteResourceCapabilityDefinition<
+      TParsedInput,
+      TResolvedInput,
+      TOutput
+    >['handler'];
+    const preflight = preflightValue as TypedWriteResourceCapabilityDefinition<
+      TParsedInput,
+      TResolvedInput,
+      TOutput
+    >['preflight'];
+    const verifyOutcome = verifyOutcomeValue as TypedWriteResourceCapabilityDefinition<
+      TParsedInput,
+      TResolvedInput,
+      TOutput
+    >['verifyOutcome'];
+    const capability = defineCapability<Record<string, unknown>, TOutput>({
+      id: readRequiredProperty(source, 'id') as string,
+      mcpName: readRequiredProperty(source, 'mcpName') as string,
+      title: readRequiredProperty(source, 'title') as string,
+      description: readRequiredProperty(source, 'description') as string,
+      inputSchema: readRequiredProperty(source, 'inputSchema') as z.ZodType<
+        Record<string, unknown>
+      >,
+      outputSchema: readRequiredProperty(source, 'outputSchema') as z.ZodType<TOutput>,
+      annotations: readRequiredProperty(source, 'annotations') as ToolAnnotations,
+      transports: readRequiredProperty(source, 'transports') as readonly TransportKind[],
+      policy: {
+        effect,
+        resourceScopes: selectableResourceScopes,
+        requiredFeatureFlags: readRequiredProperty(
+          sourcePolicy,
+          'requiredFeatureFlags'
+        ) as readonly FeatureFlag[],
+        backup: backup as CapabilityPolicy['backup'],
+        audit: audit as CapabilityPolicy['audit'],
+        confirmation: readRequiredProperty(
+          sourcePolicy,
+          'confirmation'
+        ) as CapabilityPolicy['confirmation'],
+        timeoutMs: readRequiredProperty(sourcePolicy, 'timeoutMs') as number,
+        redactFields: readRequiredProperty(sourcePolicy, 'redactFields') as readonly string[]
+      },
+      handler: (input, context) =>
+        handler(input as TResolvedInput, context as ResourceCapabilityExecutionContext)
+    });
+    resourceResolvers.set(capability, (input, context) => resolver(input as TParsedInput, context));
+    resourceSelectableScopes.set(capability, selectableResourceScopes);
+    resourceRefusalDetailVocabularies.set(capability, refusalDetailVocabulary);
+    writeEnvelopePreflights.set(capability, (input, context) =>
+      preflight(input as TResolvedInput, context as ResourceCapabilityExecutionContext)
+    );
+    writeEnvelopeVerifiers.set(capability, (input, output, context) =>
+      verifyOutcome(
+        input as TResolvedInput,
+        output as TOutput,
+        context as ResourceCapabilityExecutionContext
+      )
+    );
+    return capability;
+  } catch {
+    return invalidCapabilityDefinition();
+  }
+}
+
 function isMutationEnvelopeCapability(capability: CapabilityDefinition): boolean {
   return writeEnvelopePreflights.has(capability);
 }
@@ -1322,7 +1525,10 @@ async function executeMutationEnvelope(
       signal,
       readOnly: options.readOnly,
       transport: context.transport,
-      ...(context.principalId === undefined ? {} : { principalId: context.principalId })
+      ...(context.principalId === undefined ? {} : { principalId: context.principalId }),
+      ...(resourceResolvers.has(capability)
+        ? { effectiveResourceScopes: authorization.effectiveResourceScopes }
+        : {})
     });
 
   const recordAudit = (phase: AuditPhase, outcome: string, backupId?: string): boolean => {
