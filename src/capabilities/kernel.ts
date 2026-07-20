@@ -9,6 +9,8 @@ import type { FeatureFlag } from '../config/feature-flags.js';
 import { createCanonicalJsonSnapshot } from '../security/canonical-json.js';
 import { areDeclaredResourceScopesAllowed } from './exposure.js';
 import type {
+  AuditPhase,
+  AuditRecord,
   CapabilityDefinition,
   CapabilityDispatcher,
   CapabilityEffect,
@@ -1225,18 +1227,246 @@ async function runOperation(
   return { kind: 'aborted-write' };
 }
 
+const MUTATION_TARGET_KEY = 'opnsense-config';
+
+type BoundedOutcome<T> =
+  | { readonly kind: 'value'; readonly value: T }
+  | { readonly kind: 'rejected' }
+  | { readonly kind: 'aborted'; readonly cause: AbortCause };
+
+// Generic bounded runner for the envelope's read-only preflight/verify callbacks and its sealed apply phase.
+// Like runOperation it always awaits the in-flight settlement before reporting an abort, so a cancelled or
+// timed-out mutation never leaves an unobserved write in flight.
+async function runBounded<T>(
+  timeoutMs: number,
+  callerSignal: AbortSignal | undefined,
+  thunk: (signal: AbortSignal) => Promise<T>
+): Promise<BoundedOutcome<T>> {
+  if (callerSignal?.aborted === true) return { kind: 'aborted', cause: 'caller' };
+  const controller = new AbortController();
+  let observedCause: AbortCause | undefined;
+  let resolveAbort: ((cause: AbortCause) => void) | undefined;
+  const aborted = new Promise<AbortCause>((resolve) => {
+    resolveAbort = resolve;
+  });
+  const observeAbort = (cause: AbortCause) => {
+    if (observedCause !== undefined) return;
+    observedCause = cause;
+    resolveAbort?.(cause);
+    controller.abort();
+  };
+  const onCallerAbort = () => {
+    observeAbort('caller');
+  };
+  callerSignal?.addEventListener('abort', onCallerAbort);
+  const timeout = setTimeout(() => {
+    observeAbort('timeout');
+  }, timeoutMs);
+  const cleanup = () => {
+    clearTimeout(timeout);
+    callerSignal?.removeEventListener('abort', onCallerAbort);
+  };
+  let settled: Promise<{ readonly ok: true; readonly value: T } | { readonly ok: false }>;
+  try {
+    settled = Promise.resolve(thunk(controller.signal)).then(
+      (value) => ({ ok: true as const, value }),
+      () => ({ ok: false as const })
+    );
+  } catch {
+    cleanup();
+    return observedCause === undefined
+      ? { kind: 'rejected' }
+      : { kind: 'aborted', cause: observedCause };
+  }
+  const first = await Promise.race([
+    settled.then((value) => ({ kind: 'settled' as const, value })),
+    aborted.then((cause) => ({ kind: 'aborted' as const, cause }))
+  ]);
+  if (first.kind === 'settled') {
+    cleanup();
+    return first.value.ok ? { kind: 'value', value: first.value.value } : { kind: 'rejected' };
+  }
+  await settled;
+  cleanup();
+  return { kind: 'aborted', cause: first.cause };
+}
+
+function isPreflightResult(value: unknown): value is PreflightResult {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    typeof (value as PreflightResult).effectPlanDigest === 'string' &&
+    typeof (value as PreflightResult).observedStateDigest === 'string'
+  );
+}
+
+// The fixed write-path safety envelope. The order — target lock, sealed preflight, redacted audit intent,
+// strict verified backup, state revalidation, bounded execution, outcome verification, final audit, lock
+// release — is normative and every post-backup failure preserves the backup and never blind-restores.
+async function executeMutationEnvelope(
+  authorization: AuthorizedRequest,
+  options: SealedPolicyOptions,
+  context: CapabilityInvocationContext,
+  services: MutationEnvelopeServices
+): Promise<CapabilityResult> {
+  const { capability } = authorization;
+  const preflightCallback = writeEnvelopePreflights.get(capability);
+  const verifyCallback = writeEnvelopeVerifiers.get(capability);
+  if (preflightCallback === undefined || verifyCallback === undefined) {
+    return refusal('EXECUTION_FAILED');
+  }
+  const { timeoutMs, effect } = capability.policy;
+
+  const makeContext = (signal: AbortSignal): CapabilityExecutionContext =>
+    Object.freeze({
+      signal,
+      readOnly: options.readOnly,
+      transport: context.transport,
+      ...(context.principalId === undefined ? {} : { principalId: context.principalId })
+    });
+
+  const recordAudit = (phase: AuditPhase, outcome: string, backupId?: string): boolean => {
+    try {
+      const record: AuditRecord = Object.freeze({
+        capabilityId: capability.id,
+        mcpName: capability.mcpName,
+        effect,
+        argumentsSha256: authorization.argumentsSha256,
+        effectiveResourceScopes: authorization.effectiveResourceScopes,
+        phase,
+        outcome,
+        ...(backupId === undefined ? {} : { backupId })
+      });
+      services.audit.record(record);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  if (context.signal?.aborted === true) return refusal('CANCELLED');
+
+  // Step 1: acquire the target's exclusive mutation lock.
+  let lock: Awaited<ReturnType<typeof services.lock.acquire>>;
+  try {
+    lock = await services.lock.acquire(
+      MUTATION_TARGET_KEY,
+      context.signal ?? new AbortController().signal
+    );
+  } catch {
+    return refusal('LOCK_UNAVAILABLE');
+  }
+  if (lock === null) return refusal('LOCK_UNAVAILABLE');
+
+  try {
+    // Step 2: sealed, side-effect-free, bounded preflight.
+    const preflight = await runBounded(timeoutMs, context.signal, (signal) =>
+      preflightCallback(authorization.input, makeContext(signal))
+    );
+    if (preflight.kind !== 'value' || !isPreflightResult(preflight.value)) {
+      return refusal(
+        preflight.kind === 'aborted'
+          ? preflight.cause === 'caller'
+            ? 'CANCELLED'
+            : 'TIMEOUT'
+          : 'PREFLIGHT_FAILED'
+      );
+    }
+    const sealed = preflight.value;
+
+    // Step 3: redacted audit intent (a failure here is itself fail-closed).
+    if (!recordAudit('intent', 'intent')) return refusal('EXECUTION_FAILED');
+
+    // Step 4: strict verified backup precedes the first write.
+    let backupId: string | undefined;
+    if (capability.policy.backup === 'strict') {
+      try {
+        const created = await services.backup.create(
+          MUTATION_TARGET_KEY,
+          context.signal ?? new AbortController().signal
+        );
+        backupId = created.backupId;
+        if (backupId.length === 0 || !(await services.backup.exists(backupId))) {
+          recordAudit('result', 'BACKUP_FAILED', backupId);
+          return refusal('BACKUP_FAILED');
+        }
+      } catch {
+        recordAudit('result', 'BACKUP_FAILED');
+        return refusal('BACKUP_FAILED');
+      }
+    }
+
+    // Step 5: revalidate the sealed state before the first write.
+    const revalidation = await runBounded(timeoutMs, context.signal, (signal) =>
+      preflightCallback(authorization.input, makeContext(signal))
+    );
+    if (
+      revalidation.kind !== 'value' ||
+      !isPreflightResult(revalidation.value) ||
+      revalidation.value.observedStateDigest !== sealed.observedStateDigest ||
+      revalidation.value.effectPlanDigest !== sealed.effectPlanDigest
+    ) {
+      recordAudit('result', 'STATE_REVALIDATION_FAILED', backupId);
+      return refusal('STATE_REVALIDATION_FAILED');
+    }
+
+    // Step 6: bounded execution of the sealed apply phase.
+    const applied = await runBounded(timeoutMs, context.signal, (signal) =>
+      invokeHandler(capability, authorization.input, makeContext(signal))
+    );
+    if (applied.kind === 'aborted') {
+      recordAudit('result', 'OUTCOME_INDETERMINATE', backupId);
+      return refusal('OUTCOME_INDETERMINATE');
+    }
+    if (applied.kind === 'rejected') {
+      recordAudit('result', 'EXECUTION_FAILED', backupId);
+      return refusal('EXECUTION_FAILED');
+    }
+
+    // Step 7: verify the declared outcome; an unverifiable result is never a success.
+    const verified = await runBounded(timeoutMs, context.signal, (signal) =>
+      verifyCallback(authorization.input, applied.value, makeContext(signal))
+    );
+    if (verified.kind !== 'value' || !verified.value) {
+      recordAudit('result', 'OUTCOME_UNVERIFIED', backupId);
+      return refusal('OUTCOME_UNVERIFIED');
+    }
+
+    let parsedOutput: unknown;
+    try {
+      parsedOutput = capability.parseOutput(applied.value);
+      const snapshot = createCanonicalJsonSnapshot(parsedOutput).value;
+      if (!isRecord(snapshot)) {
+        recordAudit('result', 'INVALID_OUTPUT', backupId);
+        return refusal('INVALID_OUTPUT');
+      }
+      // Step 8: final audit, then step 9 (lock release) runs in finally.
+      recordAudit('result', 'success', backupId);
+      return Object.freeze({ kind: 'success', output: snapshot });
+    } catch {
+      recordAudit('result', 'INVALID_OUTPUT', backupId);
+      return refusal('INVALID_OUTPUT');
+    }
+  } finally {
+    // Step 9: release the lock on every path.
+    try {
+      await lock.release();
+    } catch {
+      // A synthetic release cannot fail; a real release failure is a later reconciliation concern.
+    }
+  }
+}
+
 async function executeAuthorized(
   authorization: AuthorizedRequest,
   options: SealedPolicyOptions,
   context: CapabilityInvocationContext,
-  internalHooks: CapabilityKernelInternalHooks
+  internalHooks: CapabilityKernelInternalHooks,
+  services: MutationEnvelopeServices | undefined
 ): Promise<CapabilityResult> {
   if (isMutationEnvelopeCapability(authorization.capability)) {
-    // Product 2 Tasks 2-4 install the fixed target-lock / sealed-preflight / redacted-audit /
-    // strict-verified-backup / state-revalidation / bounded-execution / outcome-verification /
-    // final-audit / lock-release lifecycle here. Until then a routed mutation fails closed and never
-    // reaches an unenveloped handler.
-    return refusal('EXECUTION_FAILED');
+    if (services === undefined) return refusal('EXECUTION_FAILED');
+    return executeMutationEnvelope(authorization, options, context, services);
   }
   const executionContext: CapabilityExecutionContext = Object.freeze({
     signal: new AbortController().signal,
@@ -1428,7 +1658,13 @@ export function createCapabilityDispatcher(
     if (decision === 'decline') {
       return Promise.resolve(refusal('CONFIRMATION_DECLINED'));
     }
-    return executeAuthorized(authorization.authorization, options, context, sealedInternalHooks);
+    return executeAuthorized(
+      authorization.authorization,
+      options,
+      context,
+      sealedInternalHooks,
+      mutationServices
+    );
   };
 
   const completionInstalled = installCompletion !== undefined;
@@ -1453,7 +1689,8 @@ export function createCapabilityDispatcher(
           authorization.authorization,
           options,
           context,
-          sealedInternalHooks
+          sealedInternalHooks,
+          mutationServices
         );
       }
       if (!completionInstalled) {
