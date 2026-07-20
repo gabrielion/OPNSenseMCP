@@ -27,7 +27,55 @@ export interface CoreServicesHttpsRequest {
   readonly signal: AbortSignal;
 }
 
-export type ClosedOPNsenseRequest = SystemStatusHttpsRequest | CoreServicesHttpsRequest;
+export interface FirewallAliasListPayload {
+  readonly current: number;
+  readonly rowCount: number;
+  readonly sort: Readonly<Record<string, never>>;
+  readonly searchPhrase: string;
+}
+
+export interface FirewallAliasListRequest {
+  readonly operation: 'firewall.alias/list';
+  readonly payload: FirewallAliasListPayload;
+  readonly signal: AbortSignal;
+}
+
+export interface FirewallAliasAttributes {
+  readonly enabled: string;
+  readonly name: string;
+  readonly type: string;
+  readonly content: string;
+  readonly description: string;
+}
+
+export interface FirewallAliasCreatePayload {
+  readonly alias: FirewallAliasAttributes;
+}
+
+export interface FirewallAliasCreateRequest {
+  readonly operation: 'firewall.alias/create';
+  readonly payload: FirewallAliasCreatePayload;
+  readonly signal: AbortSignal;
+}
+
+export interface FirewallAliasReconfigureRequest {
+  readonly operation: 'firewall.alias/reconfigure';
+  readonly signal: AbortSignal;
+}
+
+export interface FirewallAliasDeleteRequest {
+  readonly operation: 'firewall.alias/delete';
+  readonly id: string;
+  readonly signal: AbortSignal;
+}
+
+export type ClosedOPNsenseRequest =
+  | SystemStatusHttpsRequest
+  | CoreServicesHttpsRequest
+  | FirewallAliasListRequest
+  | FirewallAliasCreateRequest
+  | FirewallAliasReconfigureRequest
+  | FirewallAliasDeleteRequest;
 
 export interface OPNsenseHttpsClient {
   request(request: ClosedOPNsenseRequest): Promise<unknown>;
@@ -35,8 +83,11 @@ export interface OPNsenseHttpsClient {
 }
 
 interface ResolvedRequest {
-  readonly operation: RuntimeOperationDescriptor;
-  readonly body?: CoreServicesListPayload;
+  readonly method: 'GET' | 'POST';
+  readonly path: string;
+  readonly maxInputBytes: number;
+  readonly maxOutputBytes: number;
+  readonly body?: object;
   readonly signal: AbortSignal;
 }
 
@@ -127,43 +178,170 @@ const CORE_SERVICES_OPERATION = requireOperation('core.services', 'list', {
   maxOutputBytes: 131072,
   maxItems: 100
 });
+const FIREWALL_ALIAS_LIST_OPERATION = requireOperation('firewall.alias', 'list', {
+  method: 'POST',
+  path: '/api/firewall/alias/searchItem',
+  maxInputBytes: 2048,
+  maxOutputBytes: 131072,
+  maxItems: 100
+});
+const FIREWALL_ALIAS_CREATE_OPERATION = requireOperation('firewall.alias', 'create', {
+  method: 'POST',
+  path: '/api/firewall/alias/addItem',
+  maxInputBytes: 8192,
+  maxOutputBytes: 8192,
+  maxItems: 1
+});
+const FIREWALL_ALIAS_DELETE_OPERATION = requireOperation('firewall.alias', 'delete', {
+  method: 'POST',
+  path: '/api/firewall/alias/delItem',
+  maxInputBytes: 256,
+  maxOutputBytes: 4096,
+  maxItems: 1
+});
+
+const RECONFIGURE_MAX_OUTPUT_BYTES = 4096;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+
+function requireReconfigureCommand(operation: RuntimeOperationDescriptor): string {
+  const apply = operation.applyCommand;
+  if (apply?.method !== 'POST' || apply.path !== '/api/firewall/alias/reconfigure') {
+    throw new Error('Invalid OPNsense write contract');
+  }
+  return apply.path;
+}
+
+const FIREWALL_ALIAS_RECONFIGURE_PATH = requireReconfigureCommand(FIREWALL_ALIAS_CREATE_OPERATION);
+
+function resolveBootgridPayload(payload: unknown): FirewallAliasListPayload | undefined {
+  if (
+    !isPlainRecord(payload) ||
+    !hasExactKeys(payload, ['current', 'rowCount', 'sort', 'searchPhrase']) ||
+    !Number.isInteger(payload.current) ||
+    (payload.current as number) < 1 ||
+    (payload.current as number) > 1000 ||
+    !Number.isInteger(payload.rowCount) ||
+    (payload.rowCount as number) < 1 ||
+    (payload.rowCount as number) > 100 ||
+    !isPlainRecord(payload.sort) ||
+    !hasExactKeys(payload.sort, []) ||
+    typeof payload.searchPhrase !== 'string' ||
+    payload.searchPhrase.length > 128
+  ) {
+    return undefined;
+  }
+  return {
+    current: payload.current as number,
+    rowCount: payload.rowCount as number,
+    sort: {},
+    searchPhrase: payload.searchPhrase
+  };
+}
+
+function resolveAliasCreatePayload(payload: unknown): FirewallAliasCreatePayload | undefined {
+  if (!isPlainRecord(payload) || !hasExactKeys(payload, ['alias'])) return undefined;
+  const alias = payload.alias;
+  if (
+    !isPlainRecord(alias) ||
+    !hasExactKeys(alias, ['enabled', 'name', 'type', 'content', 'description']) ||
+    alias.enabled !== '1' ||
+    typeof alias.name !== 'string' ||
+    alias.name.length < 1 ||
+    alias.name.length > 32 ||
+    alias.type !== 'host' ||
+    typeof alias.content !== 'string' ||
+    alias.content.length > 8192 ||
+    typeof alias.description !== 'string' ||
+    alias.description.length > 255
+  ) {
+    return undefined;
+  }
+  return {
+    alias: {
+      enabled: '1',
+      name: alias.name,
+      type: 'host',
+      content: alias.content,
+      description: alias.description
+    }
+  };
+}
 
 function resolveClosedRequest(request: unknown): ResolvedRequest | undefined {
   try {
     if (!isPlainRecord(request) || !(request.signal instanceof AbortSignal)) return undefined;
+    const { signal } = request;
     if (request.operation === 'system.status/get') {
       if (!hasExactKeys(request, ['operation', 'signal'])) return undefined;
-      return { operation: SYSTEM_STATUS_OPERATION, signal: request.signal };
+      return {
+        method: 'GET',
+        path: SYSTEM_STATUS_OPERATION.command.path,
+        maxInputBytes: SYSTEM_STATUS_OPERATION.limits.maxInputBytes,
+        maxOutputBytes: SYSTEM_STATUS_OPERATION.limits.maxOutputBytes,
+        signal
+      };
     }
-    if (request.operation !== 'core.services/list') return undefined;
-    if (!hasExactKeys(request, ['operation', 'payload', 'signal'])) return undefined;
-    const payload = request.payload;
-    if (
-      !isPlainRecord(payload) ||
-      !hasExactKeys(payload, ['current', 'rowCount', 'sort', 'searchPhrase']) ||
-      !Number.isInteger(payload.current) ||
-      (payload.current as number) < 1 ||
-      (payload.current as number) > 1000 ||
-      !Number.isInteger(payload.rowCount) ||
-      (payload.rowCount as number) < 1 ||
-      (payload.rowCount as number) > 100 ||
-      !isPlainRecord(payload.sort) ||
-      !hasExactKeys(payload.sort, []) ||
-      typeof payload.searchPhrase !== 'string' ||
-      payload.searchPhrase.length > 128
-    ) {
-      return undefined;
+    if (request.operation === 'core.services/list') {
+      if (!hasExactKeys(request, ['operation', 'payload', 'signal'])) return undefined;
+      const body = resolveBootgridPayload(request.payload);
+      if (body === undefined) return undefined;
+      return {
+        method: 'POST',
+        path: CORE_SERVICES_OPERATION.command.path,
+        maxInputBytes: CORE_SERVICES_OPERATION.limits.maxInputBytes,
+        maxOutputBytes: CORE_SERVICES_OPERATION.limits.maxOutputBytes,
+        body,
+        signal
+      };
     }
-    return {
-      operation: CORE_SERVICES_OPERATION,
-      body: {
-        current: payload.current as number,
-        rowCount: payload.rowCount as number,
-        sort: {},
-        searchPhrase: payload.searchPhrase
-      },
-      signal: request.signal
-    };
+    if (request.operation === 'firewall.alias/list') {
+      if (!hasExactKeys(request, ['operation', 'payload', 'signal'])) return undefined;
+      const body = resolveBootgridPayload(request.payload);
+      if (body === undefined) return undefined;
+      return {
+        method: 'POST',
+        path: FIREWALL_ALIAS_LIST_OPERATION.command.path,
+        maxInputBytes: FIREWALL_ALIAS_LIST_OPERATION.limits.maxInputBytes,
+        maxOutputBytes: FIREWALL_ALIAS_LIST_OPERATION.limits.maxOutputBytes,
+        body,
+        signal
+      };
+    }
+    if (request.operation === 'firewall.alias/create') {
+      if (!hasExactKeys(request, ['operation', 'payload', 'signal'])) return undefined;
+      const body = resolveAliasCreatePayload(request.payload);
+      if (body === undefined) return undefined;
+      return {
+        method: 'POST',
+        path: FIREWALL_ALIAS_CREATE_OPERATION.command.path,
+        maxInputBytes: FIREWALL_ALIAS_CREATE_OPERATION.limits.maxInputBytes,
+        maxOutputBytes: FIREWALL_ALIAS_CREATE_OPERATION.limits.maxOutputBytes,
+        body,
+        signal
+      };
+    }
+    if (request.operation === 'firewall.alias/reconfigure') {
+      if (!hasExactKeys(request, ['operation', 'signal'])) return undefined;
+      return {
+        method: 'POST',
+        path: FIREWALL_ALIAS_RECONFIGURE_PATH,
+        maxInputBytes: 0,
+        maxOutputBytes: RECONFIGURE_MAX_OUTPUT_BYTES,
+        signal
+      };
+    }
+    if (request.operation === 'firewall.alias/delete') {
+      if (!hasExactKeys(request, ['operation', 'id', 'signal'])) return undefined;
+      if (typeof request.id !== 'string' || !UUID_PATTERN.test(request.id)) return undefined;
+      return {
+        method: 'POST',
+        path: `${FIREWALL_ALIAS_DELETE_OPERATION.command.path}/${request.id}`,
+        maxInputBytes: FIREWALL_ALIAS_DELETE_OPERATION.limits.maxInputBytes,
+        maxOutputBytes: FIREWALL_ALIAS_DELETE_OPERATION.limits.maxOutputBytes,
+        signal
+      };
+    }
+    return undefined;
   } catch {
     return undefined;
   }
@@ -192,14 +370,11 @@ export function createOPNsenseHttpsClient(config: OPNsenseConnectionConfig): OPN
       } catch {
         return Promise.reject(requestFailure());
       }
-      if (body !== undefined && body.byteLength > resolved.operation.limits.maxInputBytes) {
+      if (body !== undefined && body.byteLength > resolved.maxInputBytes) {
         return Promise.reject(requestFailure());
       }
       if (resolved.signal.aborted) return Promise.reject(requestFailure());
-      const responseLimit = Math.min(
-        config.maxResponseBytes,
-        resolved.operation.limits.maxOutputBytes
-      );
+      const responseLimit = Math.min(config.maxResponseBytes, resolved.maxOutputBytes);
       const settlement = new Promise<unknown>((resolve, reject) => {
         let settled = false;
         let failing = false;
@@ -341,8 +516,8 @@ export function createOPNsenseHttpsClient(config: OPNsenseConnectionConfig): OPN
             protocol: origin.protocol,
             hostname: origin.hostname,
             port: origin.port,
-            method: resolved.operation.command.method,
-            path: resolved.operation.command.path,
+            method: resolved.method,
+            path: resolved.path,
             headers,
             agent,
             rejectUnauthorized: true,
