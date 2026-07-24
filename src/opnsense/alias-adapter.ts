@@ -15,7 +15,7 @@ const AliasRow = z.object({
 });
 const SearchResponse = z.object({
   total: z.number().int().min(0).max(1_000_000),
-  rowCount: z.number().int().min(1).max(100),
+  rowCount: z.number().int().min(0).max(100),
   current: z.number().int().min(1).max(1000),
   rows: z.array(AliasRow).max(100)
 });
@@ -89,21 +89,22 @@ export function createOPNsenseAliasAdapter(client: OPNsenseHttpsClient): OPNsens
             current: input.page,
             rowCount: input.pageSize,
             sort: {},
-            searchPhrase: input.query
+            searchPhrase: input.query,
+            type: ['host']
           },
           signal
         })
       );
       if (
         response.current !== input.page ||
-        response.rowCount !== input.pageSize ||
+        (response.rowCount !== response.rows.length && response.rowCount !== input.pageSize) ||
         response.rows.length > input.pageSize
       ) {
         throw new Error('Invalid OPNsense response');
       }
       return Object.freeze({
         page: response.current,
-        pageSize: response.rowCount,
+        pageSize: input.pageSize,
         total: response.total,
         items: Object.freeze(
           response.rows.map((row) =>

@@ -2,7 +2,10 @@
 import { Buffer } from 'node:buffer';
 import { ClientRequest, type IncomingMessage } from 'node:http';
 import { describe, expect, it, vi } from 'vitest';
-import { createOPNsenseHttpsClient } from '../../src/opnsense/https-client.js';
+import {
+  createOPNsenseHttpsClient,
+  type FirewallAliasListPayload
+} from '../../src/opnsense/https-client.js';
 import type { OPNsenseConnectionConfig } from '../../src/opnsense/config.js';
 import { startSyntheticOPNsenseTarget } from '../support/https-opnsense-mock.js';
 
@@ -38,6 +41,19 @@ function servicesRequest(
   signal = new AbortController().signal
 ): ClientRequestInput {
   return { operation: 'core.services/list', payload, signal };
+}
+
+function aliasListRequest(
+  payload: FirewallAliasListPayload = {
+    current: 1,
+    rowCount: 10,
+    sort: {},
+    searchPhrase: '',
+    type: ['host']
+  },
+  signal = new AbortController().signal
+): ClientRequestInput {
+  return { operation: 'firewall.alias/list', payload, signal };
 }
 
 describe('closed OPNsense HTTPS client', () => {
@@ -147,6 +163,61 @@ describe('closed OPNsense HTTPS client', () => {
     try {
       await expect(
         client.request(forgedRequest({ ...fields, signal: new AbortController().signal }))
+      ).rejects.toThrow(/^OPNsense request failed\.$/u);
+      expect(target.requests).toHaveLength(0);
+    } finally {
+      client.close();
+      await target.close();
+    }
+  });
+
+  it('forwards the firewall alias list bootgrid body with the host type filter', async () => {
+    const target = await startSyntheticOPNsenseTarget(() => ({
+      body: '{"total":0,"rowCount":10,"current":1,"rows":[]}'
+    }));
+    const client = createOPNsenseHttpsClient(config(target.url, { ca: target.ca }));
+    try {
+      await client.request(aliasListRequest());
+      expect(target.requests).toHaveLength(1);
+      expect(target.requests[0]).toMatchObject({
+        method: 'POST',
+        path: '/api/firewall/alias/searchItem',
+        body: JSON.stringify({
+          current: 1,
+          rowCount: 10,
+          sort: {},
+          searchPhrase: '',
+          type: ['host']
+        })
+      });
+    } finally {
+      client.close();
+      await target.close();
+    }
+  });
+
+  it.each([
+    ['missing type filter', { current: 1, rowCount: 10, sort: {}, searchPhrase: '' }],
+    [
+      'a non-host type filter',
+      { current: 1, rowCount: 10, sort: {}, searchPhrase: '', type: ['network'] }
+    ],
+    [
+      'a widened type filter',
+      { current: 1, rowCount: 10, sort: {}, searchPhrase: '', type: ['host', 'network'] }
+    ]
+  ])('refuses a firewall alias list payload with %s', async (_label, payload) => {
+    const target = await startSyntheticOPNsenseTarget(() => ({ body: '{"ok":true}' }));
+    const client = createOPNsenseHttpsClient(config(target.url, { ca: target.ca }));
+    try {
+      await expect(
+        client.request(
+          forgedRequest({
+            operation: 'firewall.alias/list',
+            payload,
+            signal: new AbortController().signal
+          })
+        )
       ).rejects.toThrow(/^OPNsense request failed\.$/u);
       expect(target.requests).toHaveLength(0);
     } finally {

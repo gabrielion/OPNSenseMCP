@@ -32,6 +32,7 @@ export interface FirewallAliasListPayload {
   readonly rowCount: number;
   readonly sort: Readonly<Record<string, never>>;
   readonly searchPhrase: string;
+  readonly type: readonly ['host'];
 }
 
 export interface FirewallAliasListRequest {
@@ -228,7 +229,7 @@ function requireReconfigureCommand(operation: RuntimeOperationDescriptor): strin
 
 const FIREWALL_ALIAS_RECONFIGURE_PATH = requireReconfigureCommand(FIREWALL_ALIAS_CREATE_OPERATION);
 
-function resolveBootgridPayload(payload: unknown): FirewallAliasListPayload | undefined {
+function resolveBootgridPayload(payload: unknown): CoreServicesListPayload | undefined {
   if (
     !isPlainRecord(payload) ||
     !hasExactKeys(payload, ['current', 'rowCount', 'sort', 'searchPhrase']) ||
@@ -250,6 +251,35 @@ function resolveBootgridPayload(payload: unknown): FirewallAliasListPayload | un
     rowCount: payload.rowCount as number,
     sort: {},
     searchPhrase: payload.searchPhrase
+  };
+}
+
+function resolveAliasListPayload(payload: unknown): FirewallAliasListPayload | undefined {
+  if (
+    !isPlainRecord(payload) ||
+    !hasExactKeys(payload, ['current', 'rowCount', 'sort', 'searchPhrase', 'type']) ||
+    !Number.isInteger(payload.current) ||
+    (payload.current as number) < 1 ||
+    (payload.current as number) > 1000 ||
+    !Number.isInteger(payload.rowCount) ||
+    (payload.rowCount as number) < 1 ||
+    (payload.rowCount as number) > 100 ||
+    !isPlainRecord(payload.sort) ||
+    !hasExactKeys(payload.sort, []) ||
+    typeof payload.searchPhrase !== 'string' ||
+    payload.searchPhrase.length > 128 ||
+    !Array.isArray(payload.type) ||
+    payload.type.length !== 1 ||
+    payload.type[0] !== 'host'
+  ) {
+    return undefined;
+  }
+  return {
+    current: payload.current as number,
+    rowCount: payload.rowCount as number,
+    sort: {},
+    searchPhrase: payload.searchPhrase,
+    type: ['host']
   };
 }
 
@@ -311,7 +341,7 @@ function resolveClosedRequest(request: unknown): ResolvedRequest | undefined {
     }
     if (request.operation === 'firewall.alias/list') {
       if (!hasExactKeys(request, ['operation', 'payload', 'signal'])) return undefined;
-      const body = resolveBootgridPayload(request.payload);
+      const body = resolveAliasListPayload(request.payload);
       if (body === undefined) return undefined;
       return {
         method: 'POST',

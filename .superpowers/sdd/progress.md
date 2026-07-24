@@ -33,3 +33,23 @@ Product 2 CLOSED (commit 4fcf605): OpenCode Product 1A evidence regenerated via 
 genuine new tarball sha256 6fe2183...). Full `npm run verify` green: 49 files / 924 tests, plus
 operations/format/lint/typecheck/license. Conformance 2025+2026 = 13/13. The mutation envelope is
 complete and every gate passes with no outstanding red. Next: Product 3 (first reversible mutation).
+
+=== PRODUCT 3 (first reversible mutation) — deterministic vertical COMPLETE ===
+Spec: docs/superpowers/specs/2026-07-20-product-3-first-mutation-design.md (commit cf8996c)
+Plan: docs/superpowers/plans/2026-07-20-product-3-first-mutation.md (commit c0e19e4)
+Executed inline (subagents broken). Commits:
+  6b7f510 T1 admit firewall.alias to catalogue/contract (OperationEffect+firewall-write, generator/contract widened, describe advertises writes)
+  154c63a T2 alias write adapter + closed client arms (add/del/reconfigure/search)
+  31f08f9 T3 kernel defineWriteResourceCapability + effectiveResourceScopes threading
+  0fd64ed T4 opn_list genuine multi-resource dispatch (union output)
+  843f057 T5 opn_create/opn_delete verbs + elicitation (alias-schema.ts)
+  046e0b5 T6 OPNsense config-backup service + raw client byte-path
+  e2cf524 T7 production composition wiring (catalog+services+backup root)
+  03cfeab T8 MCP-to-mock full lifecycle (both eras) + failure paths + OpenCode evidence reseal (sha e055d9e0)
+Gate: npm run verify GREEN (56 files / 963 tests + operations/format/lint/typecheck/license).
+      test:conformance 2025+2026 = 13/13. No outstanding red.
+Deviations from plan (all recorded): none material; delete output simplified to {item:{id}} (no boolean in
+  JSON-schema contract); write-verb selectableResourceScopes = resourcesSupporting(op) (firewall.alias only).
+OPEN: T9 disposable-VM seal (exit gate). transportStatus still 'documented', evidence.vm 'pending'.
+  T9 step 1 offline runner is committed with alias-ACL bootstrap, installed-package MCP lifecycle and cleanup
+  coverage. Live VM boot (T9 step 2) remains owner/env (M3 READY via TCG, slow).

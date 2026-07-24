@@ -4,9 +4,39 @@ import { createConnection } from 'node:net';
 export const PRODUCT1B_BOOTSTRAP_FRAME_BEGIN = '__OPNSENSE_MCP_BOOTSTRAP_V1_7E3F1A09_BEGIN__';
 export const PRODUCT1B_BOOTSTRAP_FRAME_END = '__OPNSENSE_MCP_BOOTSTRAP_V1_7E3F1A09_END__';
 
+// Product 1B provisions a strictly read-only automation account.
+export const READONLY_BOOTSTRAP_PRIVILEGES = Object.freeze([
+  'page-system-status',
+  'page-status-services',
+  'user-config-readonly'
+]);
+
+// Product 3 adds the stock "Firewall: Alias: Edit" ACL (page-firewall-alias-edit); its
+// api/firewall/alias/* pattern authorises addItem/delItem/reconfigure on OPNsense 26.1.6.
+export const FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES = Object.freeze([
+  ...READONLY_BOOTSTRAP_PRIVILEGES,
+  'page-firewall-alias-edit'
+]);
+
+function buildBootstrapPrivilegeLiteral(privileges) {
+  if (!Array.isArray(privileges) || privileges.length === 0) {
+    throw new TypeError('bootstrap privileges must be a non-empty array');
+  }
+  const tokens = privileges.map((privilege) => {
+    if (typeof privilege !== 'string' || !/^[a-z][a-z0-9-]*$/u.test(privilege)) {
+      throw new TypeError('bootstrap privilege is not a stock ACL token');
+    }
+    return `'${privilege}'`;
+  });
+  return `[${tokens.join(', ')}]`;
+}
+
 // Fixed guest-side program derived from OPNsense's 26.1.6 add_user.php model flow:
 // https://github.com/opnsense/core/blob/26.1.6/src/opnsense/scripts/auth/add_user.php
-export const PRODUCT1B_BOOTSTRAP_HELPER = String.raw`<?php
+// Only the privilege list varies between profiles; every other instruction is byte-identical.
+export function buildProduct1bBootstrapHelper(privileges) {
+  const privilegeLiteral = buildBootstrapPrivilegeLiteral(privileges);
+  return String.raw`<?php
 require_once('legacy_bindings.inc');
 
 use OPNsense\Core\Config;
@@ -49,7 +79,7 @@ try {
     $user->name = $username;
     $user->scope = 'automation';
     $user->shell = '';
-    $user->priv = implode(',', ['page-system-status', 'page-status-services', 'user-config-readonly']);
+    $user->priv = implode(',', ${privilegeLiteral});
 
     // The account must not have a usable interactive password. The model still
     // requires a valid password hash, so mirror the stock add_user.php behavior.
@@ -105,6 +135,11 @@ try {
     @unlink(__FILE__);
 }
 ?>`;
+}
+
+export const PRODUCT1B_BOOTSTRAP_HELPER = buildProduct1bBootstrapHelper(
+  READONLY_BOOTSTRAP_PRIVILEGES
+);
 
 const FAILURE_CODE = 'PRODUCT1B_BOOTSTRAP_FAILED';
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -201,8 +236,8 @@ function parseResult(payload) {
   return Object.freeze({ key: result.key, secret: result.secret, serverName: result.serverName });
 }
 
-function helperLines() {
-  const encoded = Buffer.from(PRODUCT1B_BOOTSTRAP_HELPER, 'utf8').toString('base64');
+function helperLines(helper) {
+  const encoded = Buffer.from(helper, 'utf8').toString('base64');
   const lines = encoded.match(/.{1,76}/gu);
   if (lines === null) fail();
   return lines;
@@ -217,10 +252,15 @@ function matchAfter(transcript, offset, expression) {
 export async function bootstrapProduct1b({
   consolePath,
   factoryPassword,
+  privileges = READONLY_BOOTSTRAP_PRIVILEGES,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   maxTranscriptBytes = DEFAULT_MAX_TRANSCRIPT_BYTES
 }) {
   validateOptions({ consolePath, factoryPassword, timeoutMs, maxTranscriptBytes });
+  const helper =
+    privileges === READONLY_BOOTSTRAP_PRIVILEGES
+      ? PRODUCT1B_BOOTSTRAP_HELPER
+      : buildProduct1bBootstrapHelper(privileges);
 
   return new Promise((resolve, reject) => {
     const socket = createConnection({ path: consolePath });
@@ -229,7 +269,7 @@ export async function bootstrapProduct1b({
     let offset = 0;
     let state = 'connecting';
     let settled = false;
-    const uploadLines = helperLines();
+    const uploadLines = helperLines(helper);
     let uploadLine = 0;
 
     const cleanup = () => {

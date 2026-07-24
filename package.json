@@ -47,6 +47,7 @@
     "vm:bootstrap": "node scripts/vm/product1b.mjs bootstrap",
     "vm:status": "node scripts/vm/product1b.mjs status",
     "vm:stop": "node scripts/vm/product1b.mjs stop",
+    "vm:product3": "node scripts/vm/product3-alias.mjs",
     "test:product1b": "node scripts/vm/product1b-live.mjs",
     "test:watch": "vitest",
     "smoke:opencode": "node scripts/run-opencode-smoke.mjs",

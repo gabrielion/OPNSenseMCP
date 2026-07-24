@@ -6,10 +6,13 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES,
   PRODUCT1B_BOOTSTRAP_FRAME_BEGIN,
   PRODUCT1B_BOOTSTRAP_FRAME_END,
   PRODUCT1B_BOOTSTRAP_HELPER,
-  bootstrapProduct1b
+  READONLY_BOOTSTRAP_PRIVILEGES,
+  bootstrapProduct1b,
+  buildProduct1bBootstrapHelper
 } from '../../scripts/vm/product1b-bootstrap.mjs';
 
 const roots = [];
@@ -212,5 +215,42 @@ describe('Product 1B serial bootstrap', () => {
     expect(visibleFailure).not.toContain(leakedTranscript);
 
     await new Promise((resolve) => server.close(resolve));
+  });
+});
+
+describe('bootstrap privilege scoping', () => {
+  it('keeps the read-only privilege set as the default helper', () => {
+    expect(READONLY_BOOTSTRAP_PRIVILEGES).toEqual([
+      'page-system-status',
+      'page-status-services',
+      'user-config-readonly'
+    ]);
+    expect(PRODUCT1B_BOOTSTRAP_HELPER).toBe(
+      buildProduct1bBootstrapHelper(READONLY_BOOTSTRAP_PRIVILEGES)
+    );
+    expect(PRODUCT1B_BOOTSTRAP_HELPER).toContain(
+      "implode(',', ['page-system-status', 'page-status-services', 'user-config-readonly'])"
+    );
+  });
+
+  it('extends the read-only set with the firewall-alias edit privilege for Product 3', () => {
+    expect(FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES).toEqual([
+      'page-system-status',
+      'page-status-services',
+      'user-config-readonly',
+      'page-firewall-alias-edit'
+    ]);
+    const helper = buildProduct1bBootstrapHelper(FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES);
+    expect(helper).toContain(
+      "implode(',', ['page-system-status', 'page-status-services', 'user-config-readonly', 'page-firewall-alias-edit'])"
+    );
+    // Only the privilege list changes; every other guest instruction stays byte-identical.
+    expect(helper.replace(", 'page-firewall-alias-edit']", ']')).toBe(PRODUCT1B_BOOTSTRAP_HELPER);
+  });
+
+  it('rejects privilege identifiers that are not stock ACL tokens', () => {
+    expect(() => buildProduct1bBootstrapHelper(['page-system-status', "x'] )); evil"])).toThrow();
+    expect(() => buildProduct1bBootstrapHelper([])).toThrow();
+    expect(() => buildProduct1bBootstrapHelper('page-system-status')).toThrow();
   });
 });

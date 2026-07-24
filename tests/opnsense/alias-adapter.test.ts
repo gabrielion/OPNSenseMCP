@@ -121,7 +121,7 @@ describe('reviewed OPNsense firewall-alias adapter', () => {
   it('searches host aliases into a bounded page and drops upstream extras', async () => {
     const request = vi.fn<OPNsenseHttpsClient['request']>().mockResolvedValueOnce({
       total: 1,
-      rowCount: 25,
+      rowCount: 1,
       current: 2,
       rows: [
         {
@@ -151,9 +151,63 @@ describe('reviewed OPNsense firewall-alias adapter', () => {
     });
     expect(request).toHaveBeenNthCalledWith(1, {
       operation: 'firewall.alias/list',
-      payload: { current: 2, rowCount: 25, sort: {}, searchPhrase: 'lab' },
+      payload: { current: 2, rowCount: 25, sort: {}, searchPhrase: 'lab', type: ['host'] },
       signal
     });
+  });
+
+  it('accepts an empty host-alias page and echoes the requested page size', async () => {
+    const request = vi.fn<OPNsenseHttpsClient['request']>().mockResolvedValueOnce({
+      total: 0,
+      rowCount: 0,
+      current: 1,
+      rows: []
+    });
+    const adapter = createOPNsenseAliasAdapter({
+      request,
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
+    });
+
+    await expect(
+      adapter.searchHostAliases({ page: 1, pageSize: 100, query: '' }, new AbortController().signal)
+    ).resolves.toEqual({ page: 1, pageSize: 100, total: 0, items: [] });
+  });
+
+  it('accepts OPNsense empty pages whose row count echoes the requested bound', async () => {
+    const request = vi.fn<OPNsenseHttpsClient['request']>().mockResolvedValueOnce({
+      total: 0,
+      rowCount: 25,
+      current: 1,
+      rows: []
+    });
+    const adapter = createOPNsenseAliasAdapter({
+      request,
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
+    });
+
+    await expect(
+      adapter.searchHostAliases({ page: 1, pageSize: 25, query: '' }, new AbortController().signal)
+    ).resolves.toEqual({ page: 1, pageSize: 25, total: 0, items: [] });
+  });
+
+  it('rejects a page whose row count disagrees with the returned rows', async () => {
+    const request = vi.fn<OPNsenseHttpsClient['request']>().mockResolvedValueOnce({
+      total: 3,
+      rowCount: 3,
+      current: 1,
+      rows: [{ uuid: UUID, name: 'lab_hosts', type: 'host', description: 'lab' }]
+    });
+    const adapter = createOPNsenseAliasAdapter({
+      request,
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
+    });
+
+    await expect(
+      adapter.searchHostAliases({ page: 1, pageSize: 25, query: '' }, new AbortController().signal)
+    ).rejects.toThrow('Invalid OPNsense response');
   });
 
   it('rejects a malformed alias row without exposing it', async () => {
