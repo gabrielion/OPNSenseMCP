@@ -233,19 +233,18 @@ describe('bootstrap privilege scoping', () => {
     );
   });
 
-  it('extends the read-only set with the firewall-alias edit privilege for Product 3', () => {
+  it('uses only the granular backup and alias-edit privileges for Product 3', () => {
     expect(FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES).toEqual([
       'page-system-status',
       'page-status-services',
-      'user-config-readonly',
+      'page-diagnostics-configurationhistory',
       'page-firewall-alias-edit'
     ]);
     const helper = buildProduct1bBootstrapHelper(FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES);
     expect(helper).toContain(
-      "implode(',', ['page-system-status', 'page-status-services', 'user-config-readonly', 'page-firewall-alias-edit'])"
+      "implode(',', ['page-system-status', 'page-status-services', 'page-diagnostics-configurationhistory', 'page-firewall-alias-edit'])"
     );
-    // Only the privilege list changes; every other guest instruction stays byte-identical.
-    expect(helper.replace(", 'page-firewall-alias-edit']", ']')).toBe(PRODUCT1B_BOOTSTRAP_HELPER);
+    expect(helper).not.toContain('user-config-readonly');
   });
 
   it('rejects privilege identifiers that are not stock ACL tokens', () => {

@@ -11,10 +11,13 @@ export const READONLY_BOOTSTRAP_PRIVILEGES = Object.freeze([
   'user-config-readonly'
 ]);
 
-// Product 3 adds the stock "Firewall: Alias: Edit" ACL (page-firewall-alias-edit); its
-// api/firewall/alias/* pattern authorises addItem/delItem/reconfigure on OPNsense 26.1.6.
+// The disposable Product 3 account deliberately does not inherit user-config-readonly: that flag makes
+// ApiMutableModelControllerBase reject alias mutations. Grant only the stock configuration-history ACL
+// needed for the strict backup and the stock alias-edit ACL needed for addItem/delItem/reconfigure.
 export const FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES = Object.freeze([
-  ...READONLY_BOOTSTRAP_PRIVILEGES,
+  'page-system-status',
+  'page-status-services',
+  'page-diagnostics-configurationhistory',
   'page-firewall-alias-edit'
 ]);
 
