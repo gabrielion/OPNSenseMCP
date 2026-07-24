@@ -68,3 +68,17 @@ Cutover Task 1B: complete (Product 3 disposable-VM seal).
     the three expected read tools were observed, with secret redaction and cleanup confirmed.
 
 Cutover Task 1: complete (Task 1A + Task 1B).
+
+Repository cutover: complete (2026-07-24).
+  - `gabrielion/OPNSenseMCP` is the canonical PUBLIC repository. Its `main` history was replaced,
+    with an exact force-with-lease, by the sealed Product 3 tip `2722bedc4f9229e4b886e362675d8ff15cd40589`.
+  - A fresh public clone has root `1f809e645232dc58226cef5edf9e81906c6e13a8` and tree
+    `01966da758e3192fcef55865a762a5cbc7b1af05`; the former public tip is absent and no legacy tag
+    was published.
+  - The legacy repository is preserved separately on GitHub as PRIVATE, with its recovery tag
+    verified. Pre-cutover committed and uncommitted work is also retained in local recovery refs
+    and verified bundles; no private path or bundle digest is published here.
+  - Final canonical gates: `npm run verify` = 57 files / 990 tests; conformance in both protocol
+    eras = 13/13; OpenCode smoke passed against the synthetic target; disposable OPNsense 26.1.6
+    Product 3 lifecycle and cleanup passed. No production firewall was contacted.
+  - Fresh-clone post-push gates under Node 22: operation descriptors and license headers passed.
