@@ -37,7 +37,7 @@ complete and every gate passes with no outstanding red. Next: Product 3 (first r
 === PRODUCT 3 (first reversible mutation) — deterministic vertical COMPLETE ===
 Spec: docs/superpowers/specs/2026-07-20-product-3-first-mutation-design.md (commit cf8996c)
 Plan: docs/superpowers/plans/2026-07-20-product-3-first-mutation.md (commit c0e19e4)
-Executed inline (subagents broken). Commits:
+Executed inline. Commits:
   6b7f510 T1 admit firewall.alias to catalogue/contract (OperationEffect+firewall-write, generator/contract widened, describe advertises writes)
   154c63a T2 alias write adapter + closed client arms (add/del/reconfigure/search)
   31f08f9 T3 kernel defineWriteResourceCapability + effectiveResourceScopes threading

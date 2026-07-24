@@ -96,13 +96,16 @@ describe('Product 3 disposable-VM alias runner', () => {
       factoryPassword: 'SENTINEL_FACTORY_PASSWORD',
       privileges: FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES
     });
-    expect(deps.runInstalled).toHaveBeenCalledWith({
-      invocation: {
-        command: '/private/SENTINEL_TEMPORARY/consumer/node_modules/.bin/opnsense-mcp',
-        arguments: []
-      },
-      configPath: `${deps.instanceRoot}/SENTINEL_CONNECTION.json`
-    });
+    expect(deps.runInstalled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        invocation: {
+          command: '/private/SENTINEL_TEMPORARY/consumer/node_modules/.bin/opnsense-mcp',
+          arguments: []
+        },
+        configPath: `${deps.instanceRoot}/SENTINEL_CONNECTION.json`,
+        signal: expect.any(AbortSignal)
+      })
+    );
     expect(deps.calls).toEqual(['start', 'stop', 'remove']);
 
     const output = stdout.output();
@@ -224,6 +227,88 @@ describe('Product 3 disposable-VM alias runner', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it.each(['invalid writable surface', 'alias already present'])(
+    'refuses before creation when the %s',
+    async (condition) => {
+      const callTool = vi.fn(async ({ name }) => {
+        if (name === 'opn_list') {
+          return toolResult({
+            page: 1,
+            pageSize: 10,
+            total: condition === 'alias already present' ? 1 : 0,
+            items:
+              condition === 'alias already present'
+                ? [{ uuid: UUID, name: 'existing', type: 'host', description: 'existing' }]
+                : []
+          });
+        }
+        throw new Error('opn_create must not be called');
+      });
+      const openClient = vi.fn(async () => ({
+        listTools: vi.fn(async () => ({
+          tools:
+            condition === 'invalid writable surface'
+              ? []
+              : [
+                  'server_status',
+                  'opn_describe',
+                  'opn_get',
+                  'opn_list',
+                  'opn_create',
+                  'opn_delete'
+                ].map((name) => ({ name, annotations: { readOnlyHint: false } }))
+        })),
+        callTool,
+        close: vi.fn(async () => undefined)
+      }));
+
+      const result = await runInstalledAliasLifecycle({
+        invocation: { command: '/private/SENTINEL_INSTALLED_MCP', arguments: [] },
+        configPath: '/private/SENTINEL_CONNECTION.json',
+        openClient
+      });
+
+      expect(result.aliasCreated).toBe(false);
+      expect(callTool).toHaveBeenCalledTimes(1);
+      expect(callTool).toHaveBeenCalledWith(
+        {
+          name: 'opn_list',
+          arguments: { resource: 'firewall.alias', page: 1, pageSize: 10, query: '' }
+        },
+        expect.any(AbortSignal)
+      );
+    }
+  );
+
+  it('cancels an in-flight MCP operation without waiting for the held operation to settle', async () => {
+    const stdout = captureStream();
+    const signalSource = new EventEmitter();
+    let started;
+    const lifecycleStarted = new Promise((resolve) => {
+      started = resolve;
+    });
+    const deps = dependencies({
+      signalSource,
+      runInstalled: vi.fn(
+        ({ signal }) =>
+          new Promise((_resolve, reject) => {
+            started();
+            signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true });
+          })
+      )
+    });
+
+    const run = runProduct3Alias({ ...deps, stdout: stdout.stream });
+    await lifecycleStarted;
+    signalSource.emit('SIGTERM');
+
+    await expect(run).resolves.toBe(3);
+    expect(deps.calls).toEqual(['start', 'stop', 'remove']);
+    expect(deps.runInstalled).toHaveBeenCalledWith(
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
+  });
+
   it('fails closed before startup when the VM is not freshly stopped', async () => {
     const stdout = captureStream();
     const deps = dependencies({ statusVm: vi.fn(async () => ({ state: 'running' })) });
@@ -318,6 +403,70 @@ describe('Product 3 disposable-VM alias runner', () => {
       checks: { vmStopped: true, residueFree: true }
     });
     expect(stdout.output()).not.toMatch(/SIGTERM|SENTINEL|\/private/iu);
+  });
+
+  it.each([
+    ['start', { startVm: vi.fn(async () => ({ state: 'failed' })) }, [], undefined],
+    [
+      'password',
+      { readPassword: vi.fn(async () => Promise.reject(new Error('secret'))) },
+      ['start', 'stop'],
+      undefined
+    ],
+    [
+      'connection',
+      { createArtifacts: vi.fn(async () => Promise.reject(new Error('connection'))) },
+      ['start', 'stop'],
+      undefined
+    ],
+    [
+      'private root',
+      { createTemporaryRoot: vi.fn(async () => Promise.reject(new Error('root'))) },
+      ['start', 'stop'],
+      undefined
+    ],
+    [
+      'package',
+      { installPackage: vi.fn(async () => Promise.reject(new Error('package'))) },
+      ['start', 'stop', 'remove'],
+      '/private/SENTINEL_TEMPORARY'
+    ],
+    [
+      'client open',
+      { runInstalled: vi.fn(async () => Promise.reject(new Error('client'))) },
+      ['start', 'stop', 'remove'],
+      '/private/SENTINEL_TEMPORARY'
+    ]
+  ])(
+    'cleans up the owned resources when %s fails',
+    async (_stage, overrides, expectedCalls, temporaryRoot) => {
+      const stdout = captureStream();
+      const deps = dependencies(overrides);
+
+      await expect(runProduct3Alias({ ...deps, stdout: stdout.stream })).resolves.toBe(2);
+
+      expect(deps.calls).toEqual(expectedCalls);
+      expect(deps.verifyResidue).toHaveBeenCalledWith({
+        instanceRoot: deps.instanceRoot,
+        temporaryRoot
+      });
+    }
+  );
+
+  it('reports cleanup failure and refuses to claim residue-free state', async () => {
+    const stdout = captureStream();
+    const deps = dependencies({
+      removeTemporaryRoot: vi.fn(async () => Promise.reject(new Error('cleanup'))),
+      verifyResidue: vi.fn(async () => false)
+    });
+
+    await expect(runProduct3Alias({ ...deps, stdout: stdout.stream })).resolves.toBe(2);
+
+    expect(JSON.parse(stdout.output())).toMatchObject({
+      status: 'failed',
+      failureStage: 'cleanup',
+      checks: { vmStopped: true, residueFree: false }
+    });
   });
 
   it('wires vm:product3 to the disposable alias runner', async () => {

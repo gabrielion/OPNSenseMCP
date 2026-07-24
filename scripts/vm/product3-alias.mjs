@@ -122,7 +122,7 @@ function lifecycleEnvironment(configPath) {
   });
 }
 
-async function openSdkClient({ invocation, environment }) {
+async function openSdkClient({ invocation, environment, signal }) {
   const transport = new StdioClientTransport({
     command: invocation.command,
     args: [...invocation.arguments],
@@ -139,31 +139,63 @@ async function openSdkClient({ invocation, environment }) {
   client.setRequestHandler('elicitation/create', () =>
     Promise.resolve({ action: 'accept', content: { confirm: true } })
   );
-  await client.connect(transport);
+  const abort = () => {
+    void client.close();
+  };
+  signal.addEventListener('abort', abort, { once: true });
+  try {
+    await client.connect(transport);
+    if (signal.aborted) throw new Error('Interrupted');
+  } catch (error) {
+    signal.removeEventListener('abort', abort);
+    await client.close().catch(() => undefined);
+    throw error;
+  }
   return Object.freeze({
-    listTools: () => client.listTools(),
-    callTool: (request) => client.callTool(request),
-    close: () => client.close()
+    listTools: () => client.listTools(undefined, { signal }),
+    callTool: (request) => client.callTool(request, { signal }),
+    close: async () => {
+      signal.removeEventListener('abort', abort);
+      await client.close();
+    }
   });
 }
 
 export async function runInstalledAliasLifecycle({
   invocation,
   configPath,
+  signal = new AbortController().signal,
   openClient = openSdkClient
 }) {
-  const client = await openClient({ invocation, environment: lifecycleEnvironment(configPath) });
+  const client = await openClient({
+    invocation,
+    environment: lifecycleEnvironment(configPath),
+    signal
+  });
   try {
-    const writableSurface = writableToolSurface(await client.listTools());
+    const writableSurface = writableToolSurface(await client.listTools(signal));
     const listArguments = { resource: 'firewall.alias', page: 1, pageSize: 10, query: '' };
     const absentBefore = isAliasPage(
-      await client.callTool({ name: 'opn_list', arguments: listArguments }),
+      await client.callTool({ name: 'opn_list', arguments: listArguments }, signal),
       0
     );
-    const created = await client.callTool({
-      name: 'opn_create',
-      arguments: { resource: 'firewall.alias', attributes: ALIAS_ATTRIBUTES }
-    });
+    if (!writableSurface || !absentBefore) {
+      return Object.freeze({
+        writableSurface,
+        aliasAbsentBefore: absentBefore,
+        aliasCreated: false,
+        aliasPresent: false,
+        aliasDeleted: false,
+        aliasAbsentAfter: false
+      });
+    }
+    const created = await client.callTool(
+      {
+        name: 'opn_create',
+        arguments: { resource: 'firewall.alias', attributes: ALIAS_ATTRIBUTES }
+      },
+      signal
+    );
     const item = successfulToolResult(created) ? created.structuredContent.item : undefined;
     const createdUuid =
       isRecord(item) &&
@@ -180,16 +212,19 @@ export async function runInstalledAliasLifecycle({
     const aliasPresent =
       createdUuid !== undefined &&
       isAliasPage(
-        await client.callTool({ name: 'opn_list', arguments: listArguments }),
+        await client.callTool({ name: 'opn_list', arguments: listArguments }, signal),
         1,
         createdUuid
       );
     const deleted =
       createdUuid !== undefined
-        ? await client.callTool({
-            name: 'opn_delete',
-            arguments: { resource: 'firewall.alias', id: createdUuid }
-          })
+        ? await client.callTool(
+            {
+              name: 'opn_delete',
+              arguments: { resource: 'firewall.alias', id: createdUuid }
+            },
+            signal
+          )
         : undefined;
     const aliasDeleted =
       successfulToolResult(deleted) &&
@@ -197,7 +232,7 @@ export async function runInstalledAliasLifecycle({
       deleted.structuredContent.item.id === createdUuid;
     const aliasAbsentAfter =
       aliasDeleted &&
-      isAliasPage(await client.callTool({ name: 'opn_list', arguments: listArguments }), 0);
+      isAliasPage(await client.callTool({ name: 'opn_list', arguments: listArguments }, signal), 0);
     return Object.freeze({
       writableSurface,
       aliasAbsentBefore: absentBefore,
@@ -285,10 +320,10 @@ export async function runProduct3Alias(options = {}) {
         factoryPassword,
         privileges: FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES
       });
+      checks.bootstrap = true;
       throwIfInterrupted();
       failureStage = 'connection';
       const artifacts = await createArtifacts({ instanceRoot, credentials });
-      checks.bootstrap = true;
       throwIfInterrupted();
       failureStage = 'package';
       temporaryRoot = await createTemporaryRoot();
@@ -297,7 +332,11 @@ export async function runProduct3Alias(options = {}) {
       checks.packageInstalled = true;
       throwIfInterrupted();
       failureStage = 'lifecycle';
-      const lifecycleChecks = await runInstalled({ invocation, configPath: artifacts.configPath });
+      const lifecycleChecks = await runInstalled({
+        invocation,
+        configPath: artifacts.configPath,
+        signal: interruption.signal
+      });
       Object.assign(checks, lifecycleChecks);
       if (Object.values(lifecycleChecks).every(Boolean)) failureStage = null;
     } catch {
