@@ -53,3 +53,18 @@ Deviations from plan (all recorded): none material; delete output simplified to 
 OPEN: T9 disposable-VM seal (exit gate). transportStatus still 'documented', evidence.vm 'pending'.
   T9 step 1 offline runner is committed with alias-ACL bootstrap, installed-package MCP lifecycle and cleanup
   coverage. Live VM boot (T9 step 2) remains owner/env (M3 READY via TCG, slow).
+
+Cutover Task 1A: complete (commits 03cfeab..c61d305, review clean).
+
+Cutover Task 1B: complete (Product 3 disposable-VM seal).
+  - Live runner PASS on the disposable local OPNsense 26.1.6 VM: the bounded firewall.alias
+    list → create → list → delete → list lifecycle completed, and cleanup reported the VM stopped
+    with no residue. No production target was contacted.
+  - The observed firewall.alias list/create/delete transports are sealed as vm-observed-26.1.6 with
+    verified-product3 evidence; reconfigure remains an apply command, not a separately sealed operation.
+  - Bootstrap ACL correction: the disposable mutation account uses the granular configuration-history
+    and alias-edit stock ACLs, not user-config-readonly, which would reject mutable model saves.
+  - OpenCode Product 1A evidence was regenerated against the resealed package and synthetic HTTPS target;
+    the three expected read tools were observed, with secret redaction and cleanup confirmed.
+
+Cutover Task 1: complete (Task 1A + Task 1B).

@@ -272,7 +272,7 @@
             "path": "/api/firewall/alias/searchItem"
           },
           "documentedTransport": "POST /api/firewall/alias/searchItem",
-          "transportStatus": "documented",
+          "transportStatus": "vm-observed-26.1.6",
           "inputSchemaRef": "#/$defs/firewallAliasListInput",
           "outputSchemaRef": "#/$defs/firewallAliasListOutput",
           "resourceScope": "firewall.alias",
@@ -285,7 +285,7 @@
           "evidence": {
             "offline": "required",
             "mock": "required",
-            "vm": "pending",
+            "vm": "verified-product3",
             "agentic": "not-run"
           }
         },
@@ -301,7 +301,7 @@
             "path": "/api/firewall/alias/reconfigure"
           },
           "documentedTransport": "POST /api/firewall/alias/addItem",
-          "transportStatus": "documented",
+          "transportStatus": "vm-observed-26.1.6",
           "inputSchemaRef": "#/$defs/firewallAliasCreateInput",
           "outputSchemaRef": "#/$defs/firewallAliasCreateOutput",
           "resourceScope": "firewall.alias",
@@ -314,7 +314,7 @@
           "evidence": {
             "offline": "required",
             "mock": "required",
-            "vm": "pending",
+            "vm": "verified-product3",
             "agentic": "not-run"
           }
         },
@@ -330,7 +330,7 @@
             "path": "/api/firewall/alias/reconfigure"
           },
           "documentedTransport": "POST /api/firewall/alias/delItem",
-          "transportStatus": "documented",
+          "transportStatus": "vm-observed-26.1.6",
           "inputSchemaRef": "#/$defs/firewallAliasDeleteInput",
           "outputSchemaRef": "#/$defs/firewallAliasDeleteOutput",
           "resourceScope": "firewall.alias",
@@ -343,7 +343,7 @@
           "evidence": {
             "offline": "required",
             "mock": "required",
-            "vm": "pending",
+            "vm": "verified-product3",
             "agentic": "not-run"
           }
         }

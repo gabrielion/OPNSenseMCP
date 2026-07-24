@@ -90,7 +90,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
         outputSchemaDigest: '42f50ba17d0278f50a20b8a24cace495648f6164785e226597f9f83d7c36ab86'
       }
     ],
-    contractDigest: '7c741048b72b9c618cce955c7a01241dc0e7259b6eae996a56d8ac061b32eb67',
+    contractDigest: '23946c5283a23e8952ee39049285b255d0ab5ad06d1c7cd41f28baccb32e85da',
     runtime: {
       module: 'core',
       controller: 'service',
@@ -241,7 +241,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
         outputSchemaDigest: '11e1bc49417ca3079e04578cc82bb0a52b44dda433c678e444817591b8e7651f'
       }
     ],
-    contractDigest: '7c741048b72b9c618cce955c7a01241dc0e7259b6eae996a56d8ac061b32eb67',
+    contractDigest: '23946c5283a23e8952ee39049285b255d0ab5ad06d1c7cd41f28baccb32e85da',
     runtime: {
       module: 'core',
       controller: 'system',
@@ -507,7 +507,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
         outputSchemaDigest: '8d65daa21b441142abd0acc8ba8964ee0b4097eaae8ccf94927bbc4389bf8c97'
       }
     ],
-    contractDigest: '7c741048b72b9c618cce955c7a01241dc0e7259b6eae996a56d8ac061b32eb67',
+    contractDigest: '23946c5283a23e8952ee39049285b255d0ab5ad06d1c7cd41f28baccb32e85da',
     runtime: {
       module: 'firewall',
       controller: 'alias',
@@ -525,7 +525,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
             method: 'POST',
             path: '/api/firewall/alias/searchItem'
           },
-          transportStatus: 'documented',
+          transportStatus: 'vm-observed-26.1.6',
           inputSchema: {
             type: 'object',
             additionalProperties: false,
@@ -611,7 +611,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
           evidence: {
             offline: 'required',
             mock: 'required',
-            vm: 'pending',
+            vm: 'verified-product3',
             agentic: 'not-run'
           }
         },
@@ -626,7 +626,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
             method: 'POST',
             path: '/api/firewall/alias/reconfigure'
           },
-          transportStatus: 'documented',
+          transportStatus: 'vm-observed-26.1.6',
           inputSchema: {
             type: 'object',
             additionalProperties: false,
@@ -711,7 +711,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
           evidence: {
             offline: 'required',
             mock: 'required',
-            vm: 'pending',
+            vm: 'verified-product3',
             agentic: 'not-run'
           }
         },
@@ -726,7 +726,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
             method: 'POST',
             path: '/api/firewall/alias/reconfigure'
           },
-          transportStatus: 'documented',
+          transportStatus: 'vm-observed-26.1.6',
           inputSchema: {
             type: 'object',
             additionalProperties: false,
@@ -770,7 +770,7 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
           evidence: {
             offline: 'required',
             mock: 'required',
-            vm: 'pending',
+            vm: 'verified-product3',
             agentic: 'not-run'
           }
         }
@@ -780,4 +780,4 @@ export const GENERATED_OPERATION_DESCRIPTORS = [
 ] as const;
 
 export const GENERATED_OPERATION_CONTRACT_DIGEST =
-  '7c741048b72b9c618cce955c7a01241dc0e7259b6eae996a56d8ac061b32eb67';
+  '23946c5283a23e8952ee39049285b255d0ab5ad06d1c7cd41f28baccb32e85da';

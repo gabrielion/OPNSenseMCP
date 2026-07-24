@@ -51,7 +51,7 @@ const EXPECTED_OPERATION_TUPLES = Object.freeze({
       capabilityId: 'opnsense.list',
       method: 'POST',
       path: '/api/firewall/alias/searchItem',
-      transportStatus: 'documented',
+      transportStatus: 'vm-observed-26.1.6',
       transportNote: undefined,
       applyCommand: undefined
     }),
@@ -61,7 +61,7 @@ const EXPECTED_OPERATION_TUPLES = Object.freeze({
       capabilityId: 'opnsense.create',
       method: 'POST',
       path: '/api/firewall/alias/addItem',
-      transportStatus: 'documented',
+      transportStatus: 'vm-observed-26.1.6',
       transportNote: undefined,
       applyCommand: ALIAS_APPLY_COMMAND
     }),
@@ -71,7 +71,7 @@ const EXPECTED_OPERATION_TUPLES = Object.freeze({
       capabilityId: 'opnsense.delete',
       method: 'POST',
       path: '/api/firewall/alias/delItem',
-      transportStatus: 'documented',
+      transportStatus: 'vm-observed-26.1.6',
       transportNote: undefined,
       applyCommand: ALIAS_APPLY_COMMAND
     })

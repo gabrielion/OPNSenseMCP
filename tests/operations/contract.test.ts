@@ -131,7 +131,7 @@ describe('three-resource operation contract', () => {
         capabilityId: 'opnsense.list',
         method: 'POST',
         path: '/api/firewall/alias/searchItem',
-        transportStatus: 'documented',
+        transportStatus: 'vm-observed-26.1.6',
         transportNote: null
       },
       {
@@ -141,7 +141,7 @@ describe('three-resource operation contract', () => {
         capabilityId: 'opnsense.create',
         method: 'POST',
         path: '/api/firewall/alias/addItem',
-        transportStatus: 'documented',
+        transportStatus: 'vm-observed-26.1.6',
         transportNote: null
       },
       {
@@ -151,7 +151,7 @@ describe('three-resource operation contract', () => {
         capabilityId: 'opnsense.delete',
         method: 'POST',
         path: '/api/firewall/alias/delItem',
-        transportStatus: 'documented',
+        transportStatus: 'vm-observed-26.1.6',
         transportNote: null
       }
     ]);
@@ -165,22 +165,27 @@ describe('three-resource operation contract', () => {
     expect(JSON.stringify(contract)).toContain('/api/firewall/alias/reconfigure');
   });
 
-  it('marks firewall-alias writes with a reconfigure apply command and pending VM evidence', () => {
+  it('marks the observed firewall-alias lifecycle with Product 3 VM evidence', () => {
     const contract = readContract();
     expect(contract).toBeDefined();
     if (contract === undefined) return;
 
     const alias = contract.resources.find(({ key }) => key === 'firewall.alias');
     expect(alias).toBeDefined();
-    const writes =
-      alias?.operations.filter((operation) => operation.effect === 'firewall-write') ?? [];
+    const operations = alias?.operations ?? [];
+    expect(operations.map(({ name }) => name)).toEqual(['list', 'create', 'delete']);
+    for (const operation of operations) {
+      expect(operation.transportStatus).toBe('vm-observed-26.1.6');
+      expect(operation.evidence).toMatchObject({ vm: 'verified-product3' });
+    }
+    const writes = operations.filter((operation) => operation.effect === 'firewall-write');
     expect(writes.map(({ name }) => name)).toEqual(['create', 'delete']);
     for (const operation of writes) {
       expect(operation.applyCommand).toEqual({
         method: 'POST',
         path: '/api/firewall/alias/reconfigure'
       });
-      expect(operation.evidence).toMatchObject({ vm: 'pending' });
+      expect(operation.evidence).toMatchObject({ vm: 'verified-product3' });
     }
   });
 
