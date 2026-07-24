@@ -1,4 +1,4 @@
-# Product 2 Mutation Envelope — progress ledger
+# OPNSenseMCP — progress ledger
 
 BASE before Task 1: 8d7aa59
 Windows WIP parked: git stash "windows-distribution-wip-paused"
@@ -82,3 +82,30 @@ Repository cutover: complete (2026-07-24).
     eras = 13/13; OpenCode smoke passed against the synthetic target; disposable OPNsense 26.1.6
     Product 3 lifecycle and cleanup passed. No production firewall was contacted.
   - Fresh-clone post-push gates under Node 22: operation descriptors and license headers passed.
+
+Post-cutover P0 hardening program: design checkpoint in progress (2026-07-25).
+  - Owner direction: reuse is permitted only for assets already approved by the provenance contract; every
+    reuse still crosses private preflight, exact copy, independent destination review, public digest/verdict,
+    and the normal provenance/license/verification gates.
+  - Selected approach: no broad legacy merge. Continue on the clean public repository with vertical
+    reimplementation; the private archive remains a behavioural inventory and recovery source.
+  - P0-A: recover the three public CI failure groups (configure, installed-package, OpenCode output-limit)
+    from causal reproductions without weakening assertions or evidence.
+    Diagnosed: configure fixtures cross Linux `/tmp` (`01777`) and are correctly refused by the secure
+    ancestor policy; installed-package and the nominal output-limit test both depend on an incomplete user
+    npm cache, with the latter failing before it reaches the fake client. No production security policy is
+    to be relaxed; package installation will use a lock-derived loopback-only npm registry with isolated
+    home/config/cache, and process cleanup must be confirmed.
+  - P0-B: align docs and the standalone boundary, keep alias writes explicitly experimental and require a
+    non-empty `firewall.alias` allow-list. Exact flag: `experimental-alias-write`; an empty allow-list keeps
+    all reads but authorizes zero writes. Add a real VM-produced, commit-bound attestation and exact
+    ACL/evidence/non-claim documentation.
+  - P0-C: persist backup/audit/locking safely across processes and restarts, then close host-alias syntax,
+    target identity, local reconciliation, indeterminate-write classification, pagination, full-state
+    identity, exact create/delete verification, and 201-row coverage.
+  - Approved-asset selection for these P0s: `none`. The approved legacy audit candidate failed the new
+    durability/concurrency review, so P0-C is a clean implementation; future reuse remains allowed only via
+    the recorded provenance workflow.
+  - Draft spec:
+    docs/superpowers/specs/2026-07-25-post-cutover-p0-hardening-design.md
+  - Status: awaiting owner review of the written spec before the TDD implementation plan and code changes.
