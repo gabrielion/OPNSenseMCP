@@ -176,9 +176,21 @@ describe('OpenCode Product 1A smoke evidence', () => {
         throw new BoundedCommandFailure(kind);
       });
 
-      expect(outcome).toEqual({ status: 'blocked' });
+      expect(outcome).toEqual({ status: 'blocked', failure: kind, groupCleanupConfirmed: false });
     }
   );
+
+  it('carries a confirmed process-group cleanup through the model command seam', async () => {
+    const outcome = await runModelCommand(async () => {
+      throw new BoundedCommandFailure('output-limit', true);
+    });
+
+    expect(outcome).toEqual({
+      status: 'blocked',
+      failure: 'output-limit',
+      groupCleanupConfirmed: true
+    });
+  });
 
   it('classifies a non-zero model result as external unavailability', async () => {
     const outcome = await runModelCommand(async () => ({

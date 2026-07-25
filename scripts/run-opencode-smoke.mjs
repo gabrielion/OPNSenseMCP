@@ -12,7 +12,10 @@ import { generate } from 'selfsigned';
 
 const MODEL = 'opencode/north-mini-code-free';
 const EVIDENCE_PATH = 'tests/fixtures/opencode.product1a.json';
-const OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024;
+export const OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024;
+const GROUP_EXIT_DEADLINE_MS = 5_000;
+const CHILD_CLOSE_DEADLINE_MS = 5_000;
+const PROCESS_LIST_OUTPUT_LIMIT = 4 * 1024 * 1024;
 const EXPECTED_TOOLS = ['opn_describe', 'opn_get', 'opn_list'];
 const OPENCODE_TOOL_NAMES = new Map(EXPECTED_TOOLS.map((name) => [`opnsense_${name}`, name]));
 const API_KEY = 'product1a-opencode-key';
@@ -119,11 +122,12 @@ function terminateGroup(pid) {
 const BOUNDED_COMMAND_FAILURES = new Set(['spawn', 'timeout', 'output-limit']);
 
 export class BoundedCommandFailure extends Error {
-  constructor(kind) {
+  constructor(kind, groupCleanupConfirmed = false) {
     if (!BOUNDED_COMMAND_FAILURES.has(kind)) throw new Error('Invalid bounded command failure');
     super('Bounded command failed');
     this.name = 'BoundedCommandFailure';
     this.kind = kind;
+    this.groupCleanupConfirmed = groupCleanupConfirmed === true;
   }
 }
 
@@ -134,13 +138,81 @@ export async function runModelCommand(execute) {
       ? { status: 'completed', result }
       : { status: 'blocked' };
   } catch (error) {
-    if (error instanceof BoundedCommandFailure) return { status: 'blocked' };
+    if (error instanceof BoundedCommandFailure) {
+      return {
+        status: 'blocked',
+        failure: error.kind,
+        groupCleanupConfirmed: error.groupCleanupConfirmed === true
+      };
+    }
     throw error;
   }
 }
 
+function processGroupHasMembers(group) {
+  return new Promise((resolveInspection, rejectInspection) => {
+    const inspector = spawn('/bin/ps', ['-axo', 'pgid='], {
+      shell: false,
+      stdio: ['ignore', 'pipe', 'ignore']
+    });
+    let output = '';
+    let exceeded = false;
+    inspector.stdout.on('data', (chunk) => {
+      if (output.length + chunk.length > PROCESS_LIST_OUTPUT_LIMIT) {
+        exceeded = true;
+        inspector.kill('SIGKILL');
+        return;
+      }
+      output = `${output}${chunk.toString('utf8')}`;
+    });
+    inspector.once('error', () => rejectInspection(new Error('Process group status failed')));
+    inspector.once('close', (code, signal) => {
+      if (exceeded || code !== 0 || signal !== null) {
+        rejectInspection(new Error('Process group status failed'));
+        return;
+      }
+      resolveInspection(
+        output.split(/\r?\n/u).some((line) => line.trim() === String(Math.abs(group)))
+      );
+    });
+  });
+}
+
+/**
+ * A bounded failure may only be reported after the owned process group is proven empty. A child
+ * that was never spawned owns no group, so its cleanup is vacuously confirmed.
+ */
+async function confirmGroupExit(pid, deadlineMs = GROUP_EXIT_DEADLINE_MS) {
+  if (process.platform === 'win32') return false;
+  if (pid === undefined) return true;
+  const started = process.hrtime.bigint();
+  while (Number(process.hrtime.bigint() - started) / 1e6 < deadlineMs) {
+    try {
+      if (!(await processGroupHasMembers(-pid))) return true;
+    } catch {
+      return false;
+    }
+    await new Promise((wait) => {
+      const timer = setTimeout(wait, 25);
+      timer.unref();
+    });
+  }
+  return false;
+}
+
+function awaitChildClose(child) {
+  return Promise.race([
+    once(child, 'close').then(() => true),
+    new Promise((resolveClose) => {
+      const timer = setTimeout(() => resolveClose(false), CHILD_CLOSE_DEADLINE_MS);
+      timer.unref();
+    })
+  ]);
+}
+
 function runBounded(command, arguments_, options) {
   return new Promise((resolveCommand, rejectCommand) => {
+    const outputLimitBytes = options.outputLimitBytes ?? OUTPUT_LIMIT_BYTES;
     const child = spawn(command, arguments_, {
       cwd: options.cwd,
       env: options.environment,
@@ -159,17 +231,30 @@ function runBounded(command, arguments_, options) {
       terminateGroup(child.pid);
       callback();
     };
+    // A bounded failure is only reported after the child closed and its process group is proven
+    // empty, so terminated evidence can never be finalized over a surviving descendant.
+    const failBounded = (kind) => {
+      finish(() => {
+        const owned = child.pid;
+        void awaitChildClose(child)
+          .then((closed) => (closed ? confirmGroupExit(owned) : false))
+          .then(
+            (confirmed) => rejectCommand(new BoundedCommandFailure(kind, confirmed)),
+            () => rejectCommand(new BoundedCommandFailure(kind, false))
+          );
+      });
+    };
     const capture = (target, chunk) => {
       bytes += chunk.length;
-      if (bytes > OUTPUT_LIMIT_BYTES) {
-        finish(() => rejectCommand(new BoundedCommandFailure('output-limit')));
+      if (bytes > outputLimitBytes) {
+        failBounded('output-limit');
         return;
       }
       target.push(Buffer.from(chunk));
     };
     child.stdout.on('data', (chunk) => capture(stdout, chunk));
     child.stderr.on('data', (chunk) => capture(stderr, chunk));
-    child.once('error', () => finish(() => rejectCommand(new BoundedCommandFailure('spawn'))));
+    child.once('error', () => failBounded('spawn'));
     child.once('close', (code, signal) =>
       finish(() =>
         resolveCommand({
@@ -181,7 +266,7 @@ function runBounded(command, arguments_, options) {
       )
     );
     const deadline = setTimeout(() => {
-      finish(() => rejectCommand(new BoundedCommandFailure('timeout')));
+      failBounded('timeout');
     }, options.timeoutMs);
     deadline.unref();
     child.stdin.end(options.input ?? '');
