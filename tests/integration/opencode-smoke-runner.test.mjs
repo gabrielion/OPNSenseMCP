@@ -15,13 +15,20 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   BoundedCommandFailure,
+  OUTPUT_LIMIT_BYTES,
   buildOpenCodeEvidence,
   collectToolEvidence,
-  runModelCommand
+  runModelCommand,
+  runSmoke
 } from '../../scripts/run-opencode-smoke.mjs';
+import {
+  createPrivateFixtureRoot,
+  removePrivateFixtureRoot
+} from '../../scripts/testing/private-fixture-root.mjs';
+import { prepareInstalledPackage } from '../../scripts/testing/prepare-installed-package.mjs';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const runner = join(repository, 'scripts', 'run-opencode-smoke.mjs');
@@ -64,6 +71,68 @@ function runCli(arguments_, environment, runnerPath = runner) {
 async function smokeRoots() {
   return (await readdir(tmpdir())).filter((entry) => entry.startsWith(smokePrefix)).sort();
 }
+
+function runFixtureCommand(command, argumentsList, options) {
+  return new Promise((resolveRun, rejectRun) => {
+    const child = spawn(command, [...argumentsList], {
+      cwd: options.cwd,
+      env: { ...options.environment },
+      detached: true,
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    const stdout = [];
+    const stderr = [];
+    let settled = false;
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      callback();
+    };
+    child.stdout.on('data', (chunk) => stdout.push(Buffer.from(chunk)));
+    child.stderr.on('data', (chunk) => stderr.push(Buffer.from(chunk)));
+    child.once('error', () =>
+      finish(() => rejectRun(new Error('Fixture command failed to start')))
+    );
+    child.once('close', (code, signal) =>
+      finish(() =>
+        resolveRun({
+          code,
+          signal,
+          stdout: Buffer.concat(stdout).toString('utf8'),
+          stderr: Buffer.concat(stderr).toString('utf8')
+        })
+      )
+    );
+    const deadline = setTimeout(() => {
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        // The rejection below remains authoritative.
+      }
+      finish(() => rejectRun(new Error('Fixture command timed out')));
+    }, options.timeoutMs);
+    deadline.unref();
+  });
+}
+
+let preparationRoot;
+let prepared;
+
+beforeAll(async () => {
+  preparationRoot = await createPrivateFixtureRoot('opnsense-opencode-package');
+  prepared = await prepareInstalledPackage({
+    repositoryRoot: repository,
+    workRoot: preparationRoot,
+    run: runFixtureCommand
+  });
+}, 600_000);
+
+afterAll(async () => {
+  if (prepared !== undefined) await prepared.cleanup();
+  if (preparationRoot !== undefined) await removePrivateFixtureRoot(preparationRoot);
+});
 
 async function createIsolatedRunner(fixtureRoot) {
   const packageCopy = join(fixtureRoot, 'runner-package');
@@ -211,13 +280,12 @@ describe('OpenCode Product 1A smoke evidence', () => {
     ).rejects.toThrow('local-programming-failure');
   });
 
-  it('writes blocked evidence and removes temporary state when model output exceeds the bound', async () => {
-    const fixtureRoot = await mkdtemp(join(tmpdir(), 'opnsense-opencode-test-'));
+  it('reaches the fake client, exceeds the configured cap, and confirms group cleanup', async () => {
+    const fixtureRoot = await createPrivateFixtureRoot('opnsense-opencode-output-limit');
     const fakeOpenCode = join(fixtureRoot, 'opencode');
     const evidencePath = join(fixtureRoot, 'evidence.json');
     const rootsBefore = await smokeRoots();
     try {
-      const isolatedRunner = await createIsolatedRunner(fixtureRoot);
       await writeFile(
         fakeOpenCode,
         `#!/usr/bin/env node
@@ -227,7 +295,7 @@ if (command[0] === '--version') {
 } else if (command[0] === 'mcp' && command[1] === 'list') {
   process.stdout.write('opnsense connected\\n');
 } else if (command[0] === 'run') {
-  process.stdout.write('x'.repeat(4 * 1024 * 1024 + 1));
+  process.stdout.write('x'.repeat(4096));
   setInterval(() => {}, 1_000);
 } else {
   process.exitCode = 64;
@@ -237,26 +305,34 @@ if (command[0] === '--version') {
       );
       await chmod(fakeOpenCode, 0o700);
 
-      const result = await runCli(
-        ['--evidence-out', evidencePath],
-        {
-          OPENCODE_BIN: fakeOpenCode
-        },
-        isolatedRunner
-      );
+      const result = await runSmoke({
+        evidencePath,
+        preparePackage: () => Promise.resolve(prepared),
+        openCodeBinary: fakeOpenCode,
+        outputLimitBytes: 64,
+        workRoot: fixtureRoot
+      });
       const evidence = JSON.parse(await readFile(evidencePath, 'utf8'));
 
-      expect(result).toMatchObject({ code: 3, signal: null, stderr: '' });
+      expect(result).toEqual({
+        status: 'blocked',
+        exitCode: 3,
+        blockedReason: 'model-service-unavailable',
+        modelFailure: 'output-limit',
+        groupCleanupConfirmed: true
+      });
+      expect(OUTPUT_LIMIT_BYTES).toBe(4 * 1024 * 1024);
       expect(evidence).toMatchObject({
         status: 'blocked',
         blockedReason: 'model-service-unavailable',
-        checks: { cleanupConfirmed: true }
+        checks: { mcpConnected: true, cleanupConfirmed: true }
       });
+      expect(JSON.stringify(evidence)).not.toContain(fixtureRoot);
       expect(await smokeRoots()).toEqual(rootsBefore);
     } finally {
-      await rm(fixtureRoot, { recursive: true, force: true });
+      await removePrivateFixtureRoot(fixtureRoot);
     }
-  }, 30_000);
+  }, 120_000);
 
   it('leaves existing evidence untouched and exits locally after a configuration failure', async () => {
     const fixtureRoot = await mkdtemp(join(tmpdir(), 'opnsense-opencode-test-'));

@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:https';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { generate } from 'selfsigned';
+import {
+  createPrivateFixtureRoot,
+  removePrivateFixtureRoot
+} from './testing/private-fixture-root.mjs';
+import { prepareInstalledPackage } from './testing/prepare-installed-package.mjs';
 
 const MODEL = 'opencode/north-mini-code-free';
 const EVIDENCE_PATH = 'tests/fixtures/opencode.product1a.json';
@@ -372,12 +377,45 @@ async function pathIsAbsent(path) {
   }
 }
 
-async function run() {
+function boundedRunner(outputLimitBytes) {
+  return (command, argumentsList, options) =>
+    runBounded(command, [...argumentsList], {
+      cwd: options.cwd,
+      environment: { ...options.environment },
+      timeoutMs: options.timeoutMs,
+      outputLimitBytes
+    });
+}
+
+/**
+ * The real smoke prepares its own installed package. A focused scenario may inject an
+ * already-prepared invocation so that a packaging failure can never mask the behaviour it proves.
+ */
+async function defaultPreparePackage(repository, workRoot, outputLimitBytes) {
+  return prepareInstalledPackage({
+    repositoryRoot: repository,
+    workRoot,
+    run: boundedRunner(outputLimitBytes)
+  });
+}
+
+export async function runSmoke(options = {}) {
   if (process.versions.node.split('.')[0] !== '22') throw new Error('Node.js 22 is required');
-  const evidencePath = parseArguments(process.argv.slice(2));
+  const evidencePath = resolve(options.evidencePath ?? EVIDENCE_PATH);
+  const outputLimitBytes = options.outputLimitBytes ?? OUTPUT_LIMIT_BYTES;
   const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const temporaryRoot = await mkdtemp(join(tmpdir(), 'opnsense-opencode-smoke-'));
-  const packageRoot = join(temporaryRoot, 'package');
+  const openCode =
+    options.openCodeBinary ??
+    process.env.OPENCODE_BIN ??
+    join(homedir(), '.opencode', 'bin', 'opencode');
+  // Validated before any packaging so a configuration failure never depends on npm.
+  if (!isAbsolute(openCode)) throw new Error('OPENCODE_BIN must be absolute');
+  const preparationRoot =
+    options.workRoot === undefined
+      ? await createPrivateFixtureRoot('opnsense-opencode-smoke')
+      : options.workRoot;
+  const ownsPreparationRoot = options.workRoot === undefined;
+  const temporaryRoot = join(preparationRoot, `smoke-${randomBytes(8).toString('hex')}`);
   const projectRoot = join(temporaryRoot, 'project');
   const xdgConfig = join(temporaryRoot, 'xdg-config');
   const xdgData = join(temporaryRoot, 'xdg-data');
@@ -385,50 +423,31 @@ async function run() {
   const mock = await startMock();
   let packageMetadata;
   let packageDigest;
+  let prepared;
+  let ownsPrepared = false;
   let clientVersion = 'unavailable';
   let tools = [];
   let mcpConnected = false;
   let expectedReadsObserved = false;
   let secretAbsent = true;
   let blockedReason = 'client-unavailable';
+  let modelFailure = null;
+  let groupCleanupConfirmed = true;
   let localFailure;
   try {
     await Promise.all(
-      [packageRoot, projectRoot, xdgConfig, xdgData, xdgCache].map((path) =>
-        mkdir(path, { recursive: true })
+      [projectRoot, xdgConfig, xdgData, xdgCache].map((path) =>
+        mkdir(path, { mode: 0o700, recursive: true })
       )
     );
     packageMetadata = JSON.parse(await readFile(join(repository, 'package.json'), 'utf8'));
-    const packed = await runBounded('npm', ['pack', '--json', '--pack-destination', packageRoot], {
-      cwd: repository,
-      environment: minimalEnvironment(),
-      timeoutMs: 60_000
-    });
-    if (packed.code !== 0 || packed.signal !== null) throw new Error('npm pack failed');
-    const archives = (await readdir(packageRoot)).filter((entry) => entry.endsWith('.tgz'));
-    if (archives.length !== 1) throw new Error('npm pack output was not unique');
-    const archive = join(packageRoot, archives[0]);
-    packageDigest = sha256(await readFile(archive));
-    await writeFile(join(projectRoot, 'package.json'), '{"private":true}\n', { mode: 0o600 });
-    const installed = await runBounded(
-      'npm',
-      [
-        'install',
-        '--ignore-scripts',
-        '--offline',
-        '--no-audit',
-        '--no-fund',
-        '--no-package-lock',
-        '--no-save',
-        archive
-      ],
-      {
-        cwd: projectRoot,
-        environment: minimalEnvironment(),
-        timeoutMs: 60_000
-      }
-    );
-    if (installed.code !== 0 || installed.signal !== null) throw new Error('npm install failed');
+    if (options.preparePackage === undefined) {
+      ownsPrepared = true;
+      prepared = await defaultPreparePackage(repository, temporaryRoot, outputLimitBytes);
+    } else {
+      prepared = await options.preparePackage();
+    }
+    packageDigest = prepared.archiveSha256;
     const caFile = join(temporaryRoot, 'ca.pem');
     const connectionFile = join(temporaryRoot, 'opnsense.json');
     await writeFile(caFile, mock.ca, { mode: 0o600 });
@@ -437,7 +456,6 @@ async function run() {
       `${JSON.stringify({ url: mock.url, apiKey: API_KEY, apiSecret: API_SECRET, caFile })}\n`,
       { mode: 0o600 }
     );
-    const installedCommand = join(projectRoot, 'node_modules', '.bin', 'opnsense-mcp');
     await writeFile(
       join(projectRoot, 'opencode.json'),
       `${JSON.stringify(
@@ -446,7 +464,7 @@ async function run() {
           mcp: {
             opnsense: {
               type: 'local',
-              command: [installedCommand],
+              command: [prepared.installedCommand.command, ...prepared.installedCommand.arguments],
               environment: { READ_ONLY: 'true', OPNSENSE_CONFIG_FILE: connectionFile }
             }
           }
@@ -456,8 +474,6 @@ async function run() {
       )}\n`,
       { mode: 0o600 }
     );
-    const openCode = process.env.OPENCODE_BIN ?? join(homedir(), '.opencode', 'bin', 'opencode');
-    if (!isAbsolute(openCode)) throw new Error('OPENCODE_BIN must be absolute');
     const openCodeEnvironment = minimalEnvironment({
       XDG_CONFIG_HOME: xdgConfig,
       XDG_DATA_HOME: xdgData,
@@ -469,7 +485,8 @@ async function run() {
       version = await runBounded(openCode, ['--version'], {
         cwd: projectRoot,
         environment: openCodeEnvironment,
-        timeoutMs: 10_000
+        timeoutMs: 10_000,
+        outputLimitBytes
       });
     } catch {
       version = undefined;
@@ -479,7 +496,8 @@ async function run() {
       const listed = await runBounded(openCode, ['mcp', 'list', '--pure'], {
         cwd: projectRoot,
         environment: openCodeEnvironment,
-        timeoutMs: 30_000
+        timeoutMs: 30_000,
+        outputLimitBytes
       });
       const listedOutput = `${listed.stdout}\n${listed.stderr}`;
       secretAbsent =
@@ -497,12 +515,18 @@ async function run() {
             {
               cwd: projectRoot,
               environment: openCodeEnvironment,
-              timeoutMs: 180_000
+              timeoutMs: 180_000,
+              outputLimitBytes
             }
           )
         );
         if (routedOutcome.status === 'blocked') {
           blockedReason = 'model-service-unavailable';
+          modelFailure = routedOutcome.failure ?? null;
+          groupCleanupConfirmed =
+            routedOutcome.failure === undefined
+              ? groupCleanupConfirmed
+              : routedOutcome.groupCleanupConfirmed === true;
         } else {
           const routed = routedOutcome.result;
           const routedOutput = `${routed.stdout}\n${routed.stderr}`;
@@ -527,7 +551,13 @@ async function run() {
     localFailure = error;
   } finally {
     await Promise.allSettled([mock.close()]);
+    if (ownsPrepared && prepared !== undefined) {
+      await Promise.allSettled([prepared.cleanup()]);
+    }
     await rm(temporaryRoot, { recursive: true, force: true });
+    if (ownsPreparationRoot) {
+      await removePrivateFixtureRoot(preparationRoot).catch(() => undefined);
+    }
   }
   const cleanupConfirmed = await pathIsAbsent(temporaryRoot);
   if (localFailure !== undefined) throw localFailure;
@@ -535,8 +565,13 @@ async function run() {
     throw new Error('Package evidence unavailable');
   }
   if (!cleanupConfirmed) blockedReason = 'cleanup-unconfirmed';
+  if (!groupCleanupConfirmed) blockedReason = 'process-cleanup-unconfirmed';
   const status =
-    blockedReason === 'none' && secretAbsent && cleanupConfirmed && expectedReadsObserved
+    blockedReason === 'none' &&
+    secretAbsent &&
+    cleanupConfirmed &&
+    groupCleanupConfirmed &&
+    expectedReadsObserved
       ? 'passed'
       : 'blocked';
   const evidence = buildOpenCodeEvidence({
@@ -563,8 +598,19 @@ async function run() {
   }
   await mkdir(dirname(evidencePath), { recursive: true });
   await writeFile(evidencePath, serialized, { mode: 0o600 });
-  process.stdout.write(`OpenCode Product 1A smoke: ${status}\n`);
-  if (status === 'blocked') process.exitCode = 3;
+  return Object.freeze({
+    status,
+    exitCode: status === 'blocked' ? 3 : 0,
+    blockedReason: status === 'blocked' ? blockedReason : null,
+    modelFailure,
+    groupCleanupConfirmed
+  });
+}
+
+async function run() {
+  const result = await runSmoke({ evidencePath: parseArguments(process.argv.slice(2)) });
+  process.stdout.write(`OpenCode Product 1A smoke: ${result.status}\n`);
+  process.exitCode = result.exitCode;
 }
 
 if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
