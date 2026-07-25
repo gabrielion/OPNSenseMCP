@@ -236,8 +236,10 @@ function runBounded(command, arguments_, options) {
       terminateGroup(child.pid);
       callback();
     };
-    // A bounded failure is only reported after the child closed and its process group is proven
-    // empty, so terminated evidence can never be finalized over a surviving descendant.
+    // A bounded failure is only reported after the child closed and its owned process group is
+    // proven empty. Like the installed-package harness, this covers the inherited process family
+    // only: a descendant that calls setsid/setpgid leaves the owned group and is not observable
+    // here, so cleanup is confirmed for the group, not for every possible descendant.
     const failBounded = (kind) => {
       finish(() => {
         const owned = child.pid;
@@ -432,7 +434,10 @@ export async function runSmoke(options = {}) {
   let secretAbsent = true;
   let blockedReason = 'client-unavailable';
   let modelFailure = null;
-  let groupCleanupConfirmed = true;
+  // null means "no bounded failure occurred, so nothing was measured". Only a measured false is a
+  // cleanup defect; an unmeasured path must never report a confirmed cleanup it did not observe.
+  let groupCleanupConfirmed = null;
+  let teardownFailed = false;
   let localFailure;
   try {
     await Promise.all(
@@ -488,7 +493,12 @@ export async function runSmoke(options = {}) {
         timeoutMs: 10_000,
         outputLimitBytes
       });
-    } catch {
+    } catch (error) {
+      // An unavailable client is expected, but a bounded failure still carries a cleanup
+      // observation that must not be discarded.
+      if (error instanceof BoundedCommandFailure && !error.groupCleanupConfirmed) {
+        groupCleanupConfirmed = false;
+      }
       version = undefined;
     }
     if (version !== undefined && version.code === 0 && version.signal === null) {
@@ -523,10 +533,9 @@ export async function runSmoke(options = {}) {
         if (routedOutcome.status === 'blocked') {
           blockedReason = 'model-service-unavailable';
           modelFailure = routedOutcome.failure ?? null;
-          groupCleanupConfirmed =
-            routedOutcome.failure === undefined
-              ? groupCleanupConfirmed
-              : routedOutcome.groupCleanupConfirmed === true;
+          if (routedOutcome.failure !== undefined) {
+            groupCleanupConfirmed = routedOutcome.groupCleanupConfirmed === true;
+          }
         } else {
           const routed = routedOutcome.result;
           const routedOutput = `${routed.stdout}\n${routed.stderr}`;
@@ -546,31 +555,45 @@ export async function runSmoke(options = {}) {
         }
       }
     }
-    if (!secretAbsent) blockedReason = 'secret-redaction-failed';
   } catch (error) {
     localFailure = error;
   } finally {
-    await Promise.allSettled([mock.close()]);
-    if (ownsPrepared && prepared !== undefined) {
-      await Promise.allSettled([prepared.cleanup()]);
+    // A failed teardown is a cleanup defect, never a silently swallowed one: a still-listening
+    // registry or an undeleted fixture root must be visible in the evidence.
+    for (const settled of await Promise.allSettled([
+      mock.close(),
+      ...(ownsPrepared && prepared !== undefined ? [prepared.cleanup()] : [])
+    ])) {
+      if (settled.status === 'rejected') teardownFailed = true;
     }
     await rm(temporaryRoot, { recursive: true, force: true });
     if (ownsPreparationRoot) {
-      await removePrivateFixtureRoot(preparationRoot).catch(() => undefined);
+      try {
+        await removePrivateFixtureRoot(preparationRoot);
+      } catch {
+        teardownFailed = true;
+      }
     }
   }
-  const cleanupConfirmed = await pathIsAbsent(temporaryRoot);
+  // The smoke owns its whole fixture root when it created it, so absence of the inner working
+  // directory alone is not proof that nothing remains.
+  const cleanupConfirmed =
+    !teardownFailed &&
+    (await pathIsAbsent(temporaryRoot)) &&
+    (!ownsPreparationRoot || (await pathIsAbsent(preparationRoot)));
   if (localFailure !== undefined) throw localFailure;
   if (packageMetadata === undefined || packageDigest === undefined) {
     throw new Error('Package evidence unavailable');
   }
+  // Ordered least to most severe: a secret leak must never be masked by a cleanup condition.
+  if (groupCleanupConfirmed === false) blockedReason = 'process-cleanup-unconfirmed';
   if (!cleanupConfirmed) blockedReason = 'cleanup-unconfirmed';
-  if (!groupCleanupConfirmed) blockedReason = 'process-cleanup-unconfirmed';
+  if (!secretAbsent) blockedReason = 'secret-redaction-failed';
   const status =
     blockedReason === 'none' &&
     secretAbsent &&
     cleanupConfirmed &&
-    groupCleanupConfirmed &&
+    groupCleanupConfirmed !== false &&
     expectedReadsObserved
       ? 'passed'
       : 'blocked';
@@ -607,15 +630,22 @@ export async function runSmoke(options = {}) {
   });
 }
 
-async function run() {
-  const result = await runSmoke({ evidencePath: parseArguments(process.argv.slice(2)) });
-  process.stdout.write(`OpenCode Product 1A smoke: ${result.status}\n`);
-  process.exitCode = result.exitCode;
+export async function run(argumentsList = process.argv.slice(2), dependencies = {}) {
+  const execute = dependencies.runSmoke ?? runSmoke;
+  const write = dependencies.writeStdout ?? ((message) => process.stdout.write(message));
+  const result = await execute({ evidencePath: parseArguments(argumentsList) });
+  write(`OpenCode Product 1A smoke: ${result.status}\n`);
+  return result.exitCode;
 }
 
 if (resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url)) {
-  void run().catch(() => {
-    process.stderr.write('OpenCode Product 1A smoke failed locally.\n');
-    process.exitCode = 1;
-  });
+  void run().then(
+    (exitCode) => {
+      process.exitCode = exitCode;
+    },
+    () => {
+      process.stderr.write('OpenCode Product 1A smoke failed locally.\n');
+      process.exitCode = 1;
+    }
+  );
 }

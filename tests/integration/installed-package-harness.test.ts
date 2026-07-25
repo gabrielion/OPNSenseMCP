@@ -6,13 +6,21 @@ import { describe, expect, it } from 'vitest';
 import {
   COMMAND_SUPERVISOR_STARTUP_TIMEOUT_MS,
   POSIX_COMMAND_HARNESS_ERROR,
-  localArchiveInstallArguments,
   ownedTreeTerminationPlan,
   packageHarnessPlatform,
   runBoundedCommand,
   terminateOwnedProcessTree
 } from '../support/installed-package-harness.js';
-import { redactedCommandFailure } from '../../scripts/testing/prepare-installed-package.mjs';
+import {
+  INSTALL_TIMEOUT_MS,
+  LIST_TIMEOUT_MS,
+  PACK_TIMEOUT_MS,
+  PREPARATION_BUDGET_MS,
+  hermeticInstallArguments,
+  redactedCommandFailure
+} from '../../scripts/testing/prepare-installed-package.mjs';
+import { REGISTRY_BUDGET_MS } from '../../scripts/testing/local-npm-registry.mjs';
+import { PACKAGE_TEST_TIMEOUT_MS } from './installed-package-budget.js';
 
 function errnoCode(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null) return undefined;
@@ -99,13 +107,20 @@ async function writePreReadyExitSupervisor(
 
 describe('installed-package harness portability', () => {
   it('installs the local archive without lifecycle scripts, audit, or funding traffic', () => {
-    expect(localArchiveInstallArguments('/tmp/package.tgz')).toEqual([
+    expect(hermeticInstallArguments('/tmp/package.tgz')).toEqual([
       'install',
       '--ignore-scripts',
       '--no-audit',
       '--no-fund',
       '/tmp/package.tgz'
     ]);
+  });
+
+  it('owns every child budget of the preparation it performs', () => {
+    expect(PREPARATION_BUDGET_MS).toBe(
+      PACK_TIMEOUT_MS + INSTALL_TIMEOUT_MS + LIST_TIMEOUT_MS + REGISTRY_BUDGET_MS
+    );
+    expect(PREPARATION_BUDGET_MS).toBeLessThan(PACKAGE_TEST_TIMEOUT_MS);
   });
 
   it('bounds and redacts a failed preparation command diagnostic', () => {

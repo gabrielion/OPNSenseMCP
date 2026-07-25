@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createHash } from 'node:crypto';
-import { cp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, cp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { lockProductionProjection, startLocalNpmRegistry } from './local-npm-registry.mjs';
+import {
+  REGISTRY_BUDGET_MS,
+  lockProductionProjection,
+  startLocalNpmRegistry
+} from './local-npm-registry.mjs';
 
 export const PACKAGE_INPUTS = Object.freeze([
   'package.json',
@@ -16,6 +20,12 @@ export const PACKAGE_INPUTS = Object.freeze([
 ]);
 
 const DIAGNOSTIC_LIMIT = 512;
+export const PACK_TIMEOUT_MS = 120_000;
+export const INSTALL_TIMEOUT_MS = 180_000;
+export const LIST_TIMEOUT_MS = 60_000;
+/** Every child budget the helper owns; a consumer's outer timeout must exceed this sum. */
+export const PREPARATION_BUDGET_MS =
+  PACK_TIMEOUT_MS + INSTALL_TIMEOUT_MS + LIST_TIMEOUT_MS + REGISTRY_BUDGET_MS;
 const INSTALLED_BIN_PREFIX = Buffer.from(
   '#!/usr/bin/env node\n// SPDX-License-Identifier: AGPL-3.0-or-later\n',
   'utf8'
@@ -67,6 +77,15 @@ function installedGraph(node, collected = new Set()) {
   return collected;
 }
 
+async function pathExists(path) {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function requiredNpmCli() {
   const npmCli = process.env.npm_execpath;
   if (typeof npmCli !== 'string' || npmCli === '') throw new Error('npm CLI path is unavailable');
@@ -74,9 +93,23 @@ function requiredNpmCli() {
 }
 
 /**
+ * The exact argv of the hermetic consumer install. Network isolation and the complete local
+ * fixture, not npm's cache mode, prove that the installed package has no Internet dependency.
+ */
+export function hermeticInstallArguments(archive) {
+  return Object.freeze(['install', '--ignore-scripts', '--no-audit', '--no-fund', archive]);
+}
+
+/**
  * Packs the repository package and installs it into a fully isolated consumer served only by the
- * lock-derived loopback registry. No user npm cache, public registry, proxy, or developer
- * working-tree module is a fallback.
+ * lock-derived loopback registry. The CONSUMER INSTALL has no fallback to a user npm cache, public
+ * registry, proxy, or developer working-tree module.
+ *
+ * The pack step is deliberately different: `prepack` runs `tsc` against the repository's own
+ * `node_modules` (the `npm ci --ignore-scripts` tree), exactly as the design specifies, so the
+ * archive's bytes are a function of that tree. Fixture tarballs are repacked from the same tree
+ * and are therefore not integrity-verified against the lock; "hermetic" here means no network, not
+ * a supply-chain proof.
  */
 export async function prepareInstalledPackage(options) {
   const repositoryRoot = resolve(options.repositoryRoot);
@@ -109,6 +142,11 @@ export async function prepareInstalledPackage(options) {
   if (typeof manifest.name !== 'string' || typeof manifest.version !== 'string') {
     throw new Error('Package identity is unavailable');
   }
+  // The copy must carry no pre-built output, so the packed archive can only contain what this
+  // run's `prepack` produced.
+  if (await pathExists(join(packageCopy, 'dist'))) {
+    throw new Error('Package copy already contains a built dist directory');
+  }
   const npmCli = requiredNpmCli();
   const registry = await startLocalNpmRegistry({ repositoryRoot, workRoot });
   const secrets = [workRoot, repositoryRoot];
@@ -117,7 +155,7 @@ export async function prepareInstalledPackage(options) {
     const packed = await run(process.execPath, [npmCli, 'pack', '--json'], {
       cwd: packageCopy,
       environment: isolatedNpmEnvironment(paths, registry.url),
-      timeoutMs: 180_000
+      timeoutMs: PACK_TIMEOUT_MS
     });
     if (packed.code !== 0 || packed.signal !== null) {
       throw redactedCommandFailure('npm pack', packed, secrets);
@@ -138,17 +176,13 @@ export async function prepareInstalledPackage(options) {
       )}\n`,
       { mode: 0o600 }
     );
-    const installed = await run(
-      process.execPath,
-      [npmCli, 'install', '--ignore-scripts', '--no-audit', '--no-fund', archive],
-      {
-        cwd: consumer,
-        environment: isolatedNpmEnvironment(paths, registry.url, {
-          npm_config_ignore_scripts: 'true'
-        }),
-        timeoutMs: 300_000
-      }
-    );
+    const installed = await run(process.execPath, [npmCli, ...hermeticInstallArguments(archive)], {
+      cwd: consumer,
+      environment: isolatedNpmEnvironment(paths, registry.url, {
+        npm_config_ignore_scripts: 'true'
+      }),
+      timeoutMs: INSTALL_TIMEOUT_MS
+    });
     if (installed.code !== 0 || installed.signal !== null) {
       throw redactedCommandFailure('npm install', installed, secrets);
     }
@@ -156,7 +190,7 @@ export async function prepareInstalledPackage(options) {
     const listed = await run(process.execPath, [npmCli, 'ls', '--all', '--json', '--omit=dev'], {
       cwd: consumer,
       environment: isolatedNpmEnvironment(paths, registry.url),
-      timeoutMs: 120_000
+      timeoutMs: LIST_TIMEOUT_MS
     });
     if (listed.code !== 0 || listed.signal !== null) {
       throw redactedCommandFailure('npm ls', listed, secrets);

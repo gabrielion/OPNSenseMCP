@@ -28,6 +28,11 @@ export interface PreparedInstalledPackage {
 }
 
 export declare const PACKAGE_INPUTS: readonly string[];
+export declare const PACK_TIMEOUT_MS: number;
+export declare const INSTALL_TIMEOUT_MS: number;
+export declare const LIST_TIMEOUT_MS: number;
+export declare const PREPARATION_BUDGET_MS: number;
+export declare function hermeticInstallArguments(archive: string): readonly string[];
 export declare function redactedCommandFailure(
   label: string,
   result: PreparedCommandResult,

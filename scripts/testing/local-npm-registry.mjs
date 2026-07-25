@@ -7,6 +7,13 @@ import { createServer } from 'node:http';
 import { basename, join, resolve, sep } from 'node:path';
 
 const TAR = '/usr/bin/tar';
+const TAR_TIMEOUT_MS = 30_000;
+const LISTEN_TIMEOUT_MS = 10_000;
+/**
+ * Worst-case time the fixture may spend before it is serving: one archiver budget per locked
+ * package plus the listen budget. A consumer's outer timeout must exceed this.
+ */
+export const REGISTRY_BUDGET_MS = TAR_TIMEOUT_MS + LISTEN_TIMEOUT_MS;
 const MANIFEST_FIELDS = [
   'name',
   'version',
@@ -77,21 +84,36 @@ function runTar(argumentsList) {
   return new Promise((resolveTar, rejectTar) => {
     const child = spawn(TAR, argumentsList, { shell: false, stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
+    let settled = false;
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      callback();
+    };
     child.stderr.on('data', (chunk) => {
       stderr = `${stderr}${chunk.toString('utf8')}`.slice(0, 512);
     });
     child.once('error', () => {
-      rejectTar(new Error('Fixture archiver is unavailable'));
+      finish(() => rejectTar(new Error('Fixture archiver is unavailable')));
     });
     child.once('close', (code, signal) => {
-      if (code === 0 && signal === null) {
-        resolveTar();
-        return;
-      }
-      rejectTar(
-        new Error(`Fixture archiver failed (${String(code)}/${String(signal)}): ${stderr}`)
-      );
+      finish(() => {
+        if (code === 0 && signal === null) {
+          resolveTar();
+          return;
+        }
+        rejectTar(
+          new Error(`Fixture archiver failed (${String(code)}/${String(signal)}): ${stderr}`)
+        );
+      });
     });
+    // A hung archiver must fail closed rather than stall a suite until its outer timeout.
+    const deadline = setTimeout(() => {
+      child.kill('SIGKILL');
+      finish(() => rejectTar(new Error('Fixture archiver timed out')));
+    }, TAR_TIMEOUT_MS);
+    deadline.unref();
   });
 }
 
@@ -224,10 +246,36 @@ export async function startLocalNpmRegistry(options) {
     response.writeHead(404, { 'content-type': 'application/json' });
     response.end('{"error":"Not found in the lock-derived fixture registry"}');
   });
+  const closeServer = () =>
+    new Promise((resolveClose) => {
+      server.close(() => resolveClose());
+      server.closeAllConnections();
+    });
   server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
+  try {
+    // A listen error or a hung bind must fail closed instead of never settling.
+    await Promise.race([
+      once(server, 'listening'),
+      once(server, 'error').then((error) => {
+        throw error instanceof Error ? error : new Error('Registry startup failed');
+      }),
+      new Promise((_resolveTimeout, rejectTimeout) => {
+        const timer = setTimeout(
+          () => rejectTimeout(new Error('Registry startup timed out')),
+          LISTEN_TIMEOUT_MS
+        );
+        timer.unref();
+      })
+    ]);
+  } catch (error) {
+    await closeServer();
+    throw error;
+  }
   const address = server.address();
-  if (address === null || typeof address === 'string') throw new Error('Registry startup failed');
+  if (address === null || typeof address === 'string') {
+    await closeServer();
+    throw new Error('Registry startup failed');
+  }
   url = `http://127.0.0.1:${String(address.port)}/`;
 
   return {

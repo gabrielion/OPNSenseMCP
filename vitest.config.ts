@@ -22,6 +22,7 @@ export default defineConfig({
           include: ['tests/**/*.test.{ts,mjs}'],
           exclude: [
             'tests/integration/installed-package.test.ts',
+            'tests/integration/local-npm-registry.test.mjs',
             'tests/integration/opencode-smoke-runner.test.mjs'
           ],
           sequence: { groupOrder: 0 }
@@ -29,9 +30,15 @@ export default defineConfig({
       },
       {
         test: {
+          // The package fixtures spawn one archiver per locked dependency and bind loopback
+          // servers. Running them beside the parallel group starves timing-sensitive socket
+          // tests, so they own their own sequential groups.
           ...sharedTestOptions,
           name: 'installed-package',
-          include: ['tests/integration/installed-package.test.ts'],
+          include: [
+            'tests/integration/local-npm-registry.test.mjs',
+            'tests/integration/installed-package.test.ts'
+          ],
           sequence: { groupOrder: 1 }
         }
       },

@@ -26,3 +26,4 @@ export declare function startLocalNpmRegistry(options: {
   readonly workRoot: string;
 }): Promise<LocalNpmRegistry>;
 export declare const FIXTURE_ARCHIVER: string;
+export declare const REGISTRY_BUDGET_MS: number;

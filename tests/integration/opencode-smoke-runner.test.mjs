@@ -12,7 +12,7 @@ import {
   symlink,
   writeFile
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -21,10 +21,12 @@ import {
   OUTPUT_LIMIT_BYTES,
   buildOpenCodeEvidence,
   collectToolEvidence,
+  run,
   runModelCommand,
   runSmoke
 } from '../../scripts/run-opencode-smoke.mjs';
 import {
+  PRIVATE_FIXTURE_BASE_NAME,
   createPrivateFixtureRoot,
   removeOutstandingPrivateFixtureRoots,
   removePrivateFixtureRoot
@@ -71,6 +73,18 @@ function runCli(arguments_, environment, runnerPath = runner) {
 
 async function smokeRoots() {
   return (await readdir(tmpdir())).filter((entry) => entry.startsWith(smokePrefix)).sort();
+}
+
+/**
+ * The smoke now builds below the private fixture base, so residue must be proven where it can
+ * actually appear. Listing the global temporary directory alone would be a tautology.
+ */
+async function privateFixtureEntries() {
+  try {
+    return (await readdir(join(homedir(), PRIVATE_FIXTURE_BASE_NAME))).sort();
+  } catch {
+    return [];
+  }
 }
 
 function runFixtureCommand(command, argumentsList, options) {
@@ -252,6 +266,45 @@ describe('OpenCode Product 1A smoke evidence', () => {
     }
   );
 
+  it('maps the smoke result onto the shipped command-line exit code and report', async () => {
+    const blockedWrites = [];
+    const passedWrites = [];
+    const seen = [];
+
+    const blockedExit = await run(['--evidence-out', '/tmp/evidence.json'], {
+      runSmoke: (options) => {
+        seen.push(options.evidencePath);
+        return Promise.resolve({ status: 'blocked', exitCode: 3 });
+      },
+      writeStdout: (message) => blockedWrites.push(message)
+    });
+    const passedExit = await run([], {
+      runSmoke: () => Promise.resolve({ status: 'passed', exitCode: 0 }),
+      writeStdout: (message) => passedWrites.push(message)
+    });
+
+    expect(blockedExit).toBe(3);
+    expect(blockedWrites).toEqual(['OpenCode Product 1A smoke: blocked\n']);
+    expect(seen).toEqual(['/tmp/evidence.json']);
+    expect(passedExit).toBe(0);
+    expect(passedWrites).toEqual(['OpenCode Product 1A smoke: passed\n']);
+  });
+
+  it('rejects unusable command-line arguments before running a smoke', async () => {
+    let executed = false;
+
+    await expect(
+      run(['--unknown'], {
+        runSmoke: () => {
+          executed = true;
+          return Promise.resolve({ status: 'passed', exitCode: 0 });
+        },
+        writeStdout: () => undefined
+      })
+    ).rejects.toThrow('Usage: run-opencode-smoke.mjs [--evidence-out <path>]');
+    expect(executed).toBe(false);
+  });
+
   it('carries a confirmed process-group cleanup through the model command seam', async () => {
     const outcome = await runModelCommand(async () => {
       throw new BoundedCommandFailure('output-limit', true);
@@ -288,6 +341,7 @@ describe('OpenCode Product 1A smoke evidence', () => {
     const fakeOpenCode = join(fixtureRoot, 'opencode');
     const evidencePath = join(fixtureRoot, 'evidence.json');
     const rootsBefore = await smokeRoots();
+    const privateEntriesBefore = await privateFixtureEntries();
     try {
       await writeFile(
         fakeOpenCode,
@@ -332,6 +386,56 @@ if (command[0] === '--version') {
       });
       expect(JSON.stringify(evidence)).not.toContain(fixtureRoot);
       expect(await smokeRoots()).toEqual(rootsBefore);
+      // The injected work root is the only place this run may build, and its working directory
+      // must be gone; no new private fixture root may have appeared either.
+      expect((await readdir(fixtureRoot)).filter((entry) => entry.startsWith('smoke-'))).toEqual(
+        []
+      );
+      expect(await privateFixtureEntries()).toEqual(privateEntriesBefore);
+    } finally {
+      await removePrivateFixtureRoot(fixtureRoot);
+    }
+  }, 120_000);
+
+  it('reports an unmeasured process-group cleanup as unknown rather than confirmed', async () => {
+    const fixtureRoot = await createPrivateFixtureRoot('opnsense-opencode-unmeasured');
+    const fakeOpenCode = join(fixtureRoot, 'opencode');
+    const evidencePath = join(fixtureRoot, 'evidence.json');
+    try {
+      await writeFile(
+        fakeOpenCode,
+        `#!/usr/bin/env node
+const command = process.argv.slice(2);
+if (command[0] === '--version') {
+  process.stdout.write('1.18.3\\n');
+} else if (command[0] === 'mcp' && command[1] === 'list') {
+  process.stdout.write('opnsense connected\\n');
+} else if (command[0] === 'run') {
+  process.stdout.write('{"type":"text"}\\n');
+} else {
+  process.exitCode = 64;
+}
+`,
+        { mode: 0o700 }
+      );
+      await chmod(fakeOpenCode, 0o700);
+
+      const result = await runSmoke({
+        evidencePath,
+        preparePackage: () => Promise.resolve(prepared),
+        openCodeBinary: fakeOpenCode,
+        workRoot: fixtureRoot
+      });
+
+      // The model command completed, so no bounded failure was raised and nothing was measured.
+      // Reporting `true` here would be an unearned cleanup claim.
+      expect(result).toEqual({
+        status: 'blocked',
+        exitCode: 3,
+        blockedReason: 'tool-routing-unverified',
+        modelFailure: null,
+        groupCleanupConfirmed: null
+      });
     } finally {
       await removePrivateFixtureRoot(fixtureRoot);
     }
