@@ -108,4 +108,26 @@ Post-cutover P0 hardening program: design checkpoint in progress (2026-07-25).
     the recorded provenance workflow.
   - Draft spec:
     docs/superpowers/specs/2026-07-25-post-cutover-p0-hardening-design.md
-  - Status: awaiting owner review of the written spec before the TDD implementation plan and code changes.
+  - Status: spec APPROVED by the owner as written (2026-07-25). Implementation started.
+
+P0 plan decomposition (2026-07-25): one plan per increment, not one plan for all three.
+  - P0-A plan committed now: docs/superpowers/plans/2026-07-25-p0-a-public-ci-recovery.md
+  - P0-B plan is written after P0-A is green, because its documentation tasks must be derived from
+    the live catalogue of the post-P0-A commit.
+  - P0-C plan is written after P0-B, because the alias read-back, pagination, and counter-semantics
+    tasks depend on the outcome of the disposable-VM `searchItem` probe that the spec requires
+    before those tasks can be specified honestly.
+  - Approved-asset selection for all three increments remains `none`.
+
+P0-A causal reproductions recorded before any fix (Node 22.23.1):
+  - configure: `TMPDIR=/tmp npx vitest run tests/config/configure.test.ts` = 16 failed / 8 passed.
+    `/private/tmp` is `01777`, correctly refused by the `requireSafeAncestor` `(mode & 0o022)` check
+    in src/config/configure.ts. Whole-suite run under the same TMPDIR fails only in that one file
+    (16 failed / 974 passed of 990), so no other test is sticky-directory sensitive.
+  - installed-package: with an empty `npm_config_cache`, both tests fail with `npm install failed`;
+    `npm install --offline` depends on packuments left in the user's npm cache.
+  - registry fixture feasibility: `npm pack` cannot build the fixture tarballs because npm 10.9.8
+    runs `prepare` lifecycle scripts for directory specs even with `--ignore-scripts`; a staged
+    `package/` directory archived with `/usr/bin/tar` installs correctly with an empty cache and an
+    unreachable registry. The lock has 96 non-dev entries and no optional/os/cpu/install-script
+    entries, so the lock projection is an exact `name@version` set equality.
