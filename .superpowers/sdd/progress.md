@@ -131,3 +131,75 @@ P0-A causal reproductions recorded before any fix (Node 22.23.1):
     `package/` directory archived with `/usr/bin/tar` installs correctly with an empty cache and an
     unreachable registry. The lock has 96 non-dev entries and no optional/os/cpu/install-script
     entries, so the lock projection is an exact `name@version` set equality.
+
+P0-A plan committed: f91128f (docs/superpowers/plans/2026-07-25-p0-a-public-ci-recovery.md).
+
+P0-A step 1 (configure group): complete (commit aead07a).
+  - Fix is fixture-only: tests/support/private-fixture-root.ts and
+    scripts/testing/private-fixture-root.mjs create roots below $HOME/.opnsense-mcp-fixtures and
+    fail closed on an unsafe ancestor chain. `git diff -- src/` is empty; src/config/configure.ts is
+    byte-identical.
+  - New regression `rejects a sticky world-writable ancestor without creating anything below it`
+    was proven to FAIL against a deliberately weakened `(mode & 0o002) && !sticky` check, which was
+    then reverted and re-verified as an empty src diff.
+  - Gate: `TMPDIR=/tmp npx vitest run tests/config/configure.test.ts` = 25/25 and the plain run =
+    25/25; prettier/eslint/typecheck/license-headers pass; $HOME/.opnsense-mcp-fixtures is empty
+    after the run.
+
+P0-A step 4a (bounded-command cleanup, independent half of the output-limit slice): complete
+  (commit 6bb7865).
+  - `scripts/run-opencode-smoke.mjs`: bounded spawn/timeout/output-limit failures now await child
+    close plus a proven-empty owned process group (`/bin/ps -axo pgid=`, 5s bound) before being
+    reported; the confirmation travels through `runModelCommand`; the output cap is per-call
+    injectable and `OUTPUT_LIMIT_BYTES` (4 MiB) is exported.
+  - Gate: `npx vitest run tests/integration/opencode-smoke-runner.test.mjs` = 11/11, prettier and
+    eslint clean.
+  - Remaining for step 4b: injectable package preparation, and the end-to-end assertion that a real
+    terminated group reported `groupCleanupConfirmed: true`.
+
+P0-A step 2 (registry fixture): complete (commit 52e609b, subagent-implemented, reviewed inline).
+  - scripts/testing/local-npm-registry.mjs serves the 95 distinct lock-derived name@version pairs
+    (96 lock entries; content-type@2.0.0 appears twice) on a random loopback port after verifying
+    each installed identity and path containment.
+  - npm pack cannot build the fixture tarballs: npm 10.9.8 runs `prepare` for directory specs even
+    with --ignore-scripts. Tarballs are staged as `package/` and archived with /usr/bin/tar.
+  - Correction found during integration: npm legitimately probes the ONE optional peer the lock does
+    not install (@cfworker/json-schema, declared optional by @modelcontextprotocol/sdk). That set is
+    derived from the lock and answered with a recorded 404 via absentRequests(); a missing REQUIRED
+    peer throws at fixture start. Without this, the "zero unknown requests" invariant was violated by
+    correct npm behaviour.
+  - eslint.config.js: the type-aware rule set cannot apply to hand-written .d.mts declaration files;
+    they now join the disableTypeChecked block. This was the only production-config change in P0-A.
+  - Gate: 7/7 registry tests. Independent hermeticity proof: express installs from the fixture with
+    an empty cache and dead proxy sentinels and resolves to the locked 5.2.1; the negative control
+    (public registry + same sentinels) fails ECONNREFUSED, so the success is not network leakage.
+
+P0-A step 3 (installed-package group): complete (commit 834e41d).
+  - scripts/testing/prepare-installed-package.mjs packs, installs into an isolated consumer
+    (new HOME, empty user/global npm config, empty cache, loopback registry, audit/fund/scripts
+    disabled, proxy sentinels), then verifies the npm ls production graph against the lock
+    projection, the installed shebang/licence prefix, and zero unknown registry requests.
+  - --offline removed; --no-package-lock/--no-save dropped so the consumer graph is real.
+  - Gate: with an EMPTY npm cache (the exact CI condition) installed-package + harness = 19/19,
+    in ~52s. The committed OpenCode package sha256 pin still matches, so the tarball is unchanged.
+
+P0-A step 4b (output-limit reaches the fake client): complete (commit 697c04b).
+  - runSmoke() exposes an injectable preparation seam, output cap, OpenCode binary and work root,
+    and validates OPENCODE_BIN before any packaging (so the configuration-failure test no longer
+    depends on npm at all).
+  - The scenario proves mcpConnected (fake client reached), modelFailure='output-limit' (configured
+    cap actually exceeded) and groupCleanupConfirmed=true (real terminated group proven empty).
+  - Teeth proof: lowering the fake client's output below the configured cap makes the test FAIL.
+  - Gate: opencode-runner project 11/11.
+
+P0-A step 5 (residue hardening): complete (commit 2cab3dd).
+  - The deliberately timed-out teeth-proof run leaked one fixture root, because a vitest hard
+    timeout skips the `finally` that removes it. The helpers now track outstanding roots and each
+    suite teardown asserts it had to reclaim NONE, so a skipped cleanup fails loudly instead of
+    accumulating silently. Found by the exit-gate residue check, not by a test.
+
+P0-A full gates (2026-07-25, Node 22.23.1):
+  - `npm run license:check` pass; `npm run verify` = 58 files / 1000 tests pass.
+  - `npm run test:conformance` = both 2025-11-25 and 2026-07-28 profiles, 13/13, exit 0.
+  - Repository residue: `git diff --check` clean, no `results` directory, no untracked files, and
+    $HOME/.opnsense-mcp-fixtures empty after every run.
