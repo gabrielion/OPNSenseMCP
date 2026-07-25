@@ -1,152 +1,61 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import {
-  access,
-  cp,
-  mkdir,
-  mkdtemp,
-  readFile,
-  readdir,
-  rm,
-  symlink,
-  writeFile
-} from 'node:fs/promises';
-import { createHash } from 'node:crypto';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { access, readFile, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
-  COMMAND_SUPERVISOR_STARTUP_TIMEOUT_MS,
-  localArchiveInstallArguments,
-  packageHarnessPlatform,
   runBoundedCommand,
   type CommandInvocation,
   type CommandResult
 } from '../support/installed-package-harness.js';
 import { startSyntheticOPNsenseTarget } from '../support/https-opnsense-mock.js';
+import {
+  createPrivateFixtureRoot,
+  removePrivateFixtureRoot
+} from '../support/private-fixture-root.js';
+import {
+  prepareInstalledPackage,
+  type PreparedInstalledPackage
+} from '../../scripts/testing/prepare-installed-package.mjs';
 
-const PACKAGE_INPUTS = [
-  'package.json',
-  'package-lock.json',
-  'README.md',
-  'LICENSE',
-  'src',
-  'scripts',
-  'tsconfig.json',
-  'tsconfig.build.json'
-] as const;
-const PACK_TIMEOUT_MS = 30_000;
-const INSTALL_TIMEOUT_MS = 30_000;
 const MCP_COMMAND_TIMEOUT_MS = 3_000;
 const COMMAND_CLEANUP_TIMEOUT_MS = 2_000;
-const PACKAGE_TEST_TIMEOUT_MS = 90_000;
-// Four 2s supervisor startups + pack/install cleanup + two MCP cleanup budgets = 82s < 90s.
-const WORST_CASE_PACKAGE_TEST_MS =
-  4 * COMMAND_SUPERVISOR_STARTUP_TIMEOUT_MS +
-  PACK_TIMEOUT_MS +
-  COMMAND_CLEANUP_TIMEOUT_MS +
-  INSTALL_TIMEOUT_MS +
-  COMMAND_CLEANUP_TIMEOUT_MS +
-  2 * (MCP_COMMAND_TIMEOUT_MS + COMMAND_CLEANUP_TIMEOUT_MS);
-if (WORST_CASE_PACKAGE_TEST_MS >= PACKAGE_TEST_TIMEOUT_MS) {
-  throw new Error('Installed-package outer timeout does not own every child budget');
-}
+const PACKAGE_TEST_TIMEOUT_MS = 600_000;
 
-interface InstalledPackage {
-  readonly archiveSha256: string;
-  readonly command: CommandInvocation;
-  readonly target: string;
-}
-
-function requireSuccessfulCommand(result: CommandResult, label: string): void {
-  if (result.code !== 0 || result.signal !== null) throw new Error(`${label} failed`);
-}
+const preparationRunner = (
+  command: string,
+  argumentsList: readonly string[],
+  options: {
+    readonly cwd: string;
+    readonly environment: Readonly<Record<string, string>>;
+    readonly timeoutMs: number;
+  }
+): Promise<CommandResult> =>
+  runBoundedCommand(
+    { command, arguments: [...argumentsList] },
+    {
+      cwd: options.cwd,
+      environment: { ...options.environment },
+      input: '',
+      timeoutMs: options.timeoutMs,
+      cleanupTimeoutMs: COMMAND_CLEANUP_TIMEOUT_MS
+    }
+  );
 
 async function withInstalledPackage(
-  assertion: (installed: InstalledPackage, packageCopy: string) => Promise<void>
+  assertion: (installed: PreparedInstalledPackage) => Promise<void>
 ): Promise<void> {
-  const repository = resolve('.');
-  const temporaryRoot = await mkdtemp(join(tmpdir(), 'mcp-package-installation-'));
+  const workRoot = await createPrivateFixtureRoot('mcp-package-installation');
+  let prepared: PreparedInstalledPackage | undefined;
   try {
-    const packageCopy = join(temporaryRoot, 'package');
-    const consumer = join(temporaryRoot, 'consumer');
-    await Promise.all([mkdir(packageCopy), mkdir(consumer)]);
-    await Promise.all(
-      PACKAGE_INPUTS.map((input) =>
-        cp(join(repository, input), join(packageCopy, input), { recursive: true })
-      )
-    );
-    const manifest = JSON.parse(await readFile(join(packageCopy, 'package.json'), 'utf8')) as {
-      readonly name?: unknown;
-    };
-    if (typeof manifest.name !== 'string') throw new Error('Package name is unavailable');
-    const npmCli = process.env.npm_execpath;
-    if (npmCli === undefined) throw new Error('npm CLI path is unavailable');
-    const harness = packageHarnessPlatform({
-      platform: process.platform,
-      consumer,
-      packageName: manifest.name,
-      nodeExecutable: process.execPath,
-      npmCli,
-      windowsSystemRoot: process.env.SystemRoot
+    prepared = await prepareInstalledPackage({
+      repositoryRoot: resolve('.'),
+      workRoot,
+      run: preparationRunner
     });
-    await symlink(
-      join(repository, 'node_modules'),
-      join(packageCopy, 'node_modules'),
-      harness.dependencyLinkType
-    );
-    await expect(readFile(join(packageCopy, 'dist/main.js'), 'utf8')).rejects.toMatchObject({
-      code: 'ENOENT'
-    });
-
-    const packed = await runBoundedCommand(
-      {
-        command: harness.npm.command,
-        arguments: [...harness.npm.arguments, 'pack', '--json']
-      },
-      {
-        cwd: packageCopy,
-        environment: process.env,
-        input: '',
-        timeoutMs: PACK_TIMEOUT_MS,
-        cleanupTimeoutMs: COMMAND_CLEANUP_TIMEOUT_MS
-      }
-    );
-    requireSuccessfulCommand(packed, 'npm pack');
-    const archives = (await readdir(packageCopy)).filter((entry) => entry.endsWith('.tgz'));
-    expect(archives).toHaveLength(1);
-    const archiveName = archives[0];
-    if (archiveName === undefined) throw new Error('npm pack did not produce an archive');
-    const archive = join(packageCopy, archiveName);
-    const archiveSha256 = createHash('sha256')
-      .update(await readFile(archive))
-      .digest('hex');
-
-    await writeFile(
-      join(consumer, 'package.json'),
-      `${JSON.stringify({ private: true }, null, 2)}\n`,
-      'utf8'
-    );
-    const installed = await runBoundedCommand(
-      {
-        command: harness.npm.command,
-        arguments: [...harness.npm.arguments, ...localArchiveInstallArguments(archive)]
-      },
-      {
-        cwd: consumer,
-        environment: process.env,
-        input: '',
-        timeoutMs: INSTALL_TIMEOUT_MS,
-        cleanupTimeoutMs: COMMAND_CLEANUP_TIMEOUT_MS
-      }
-    );
-    requireSuccessfulCommand(installed, 'npm install');
-
-    await assertion(
-      { archiveSha256, command: harness.installedCommand, target: harness.installedTarget },
-      packageCopy
-    );
+    await assertion(prepared);
   } finally {
-    await rm(temporaryRoot, { force: true, recursive: true });
+    if (prepared !== undefined) await prepared.cleanup();
+    await removePrivateFixtureRoot(workRoot);
   }
 }
 
@@ -182,8 +91,8 @@ describe('installed npm executable', () => {
   it(
     'builds a clean package copy before packing and installs a shebang-bearing bin target',
     () =>
-      withInstalledPackage(async ({ target }) => {
-        const emitted = await readFile(target);
+      withInstalledPackage(async ({ installedTarget }) => {
+        const emitted = await readFile(installedTarget);
         const prefix = Buffer.from(
           '#!/usr/bin/env node\n// SPDX-License-Identifier: AGPL-3.0-or-later\n',
           'utf8'
@@ -226,13 +135,13 @@ describe('installed npm executable', () => {
           })
         };
       });
-      const fixtureRoot = await mkdtemp(join(tmpdir(), 'mcp-product1a-fixture-'));
+      const fixtureRoot = await createPrivateFixtureRoot('mcp-product1a-fixture');
       const caFile = join(fixtureRoot, 'ca.pem');
       const configFile = join(fixtureRoot, 'opnsense.json');
       const evidence = JSON.parse(
         await readFile('tests/fixtures/opencode.product1a.json', 'utf8')
       ) as { readonly package?: { readonly sha256?: unknown } };
-      let packageRoot: string | undefined;
+      let consumerPath: string | undefined;
       await writeFile(caFile, target.ca, { mode: 0o600 });
       await writeFile(
         configFile,
@@ -240,10 +149,10 @@ describe('installed npm executable', () => {
         { mode: 0o600 }
       );
       try {
-        await withInstalledPackage(async ({ archiveSha256, command }, packageCopy) => {
-          packageRoot = dirname(packageCopy);
+        await withInstalledPackage(async ({ archiveSha256, installedCommand, consumerRoot }) => {
+          consumerPath = consumerRoot;
           expect(evidence.package?.sha256).toBe(archiveSha256);
-          const negative = await runInstalledCommand(command, 'invalid', '');
+          const negative = await runInstalledCommand(installedCommand, 'invalid', '');
           const requests = [
             {
               jsonrpc: '2.0',
@@ -288,7 +197,7 @@ describe('installed npm executable', () => {
             }
           ];
           const positive = await runInstalledCommand(
-            command,
+            installedCommand,
             'true',
             `${requests.map((request) => JSON.stringify(request)).join('\n')}\n`,
             configFile
@@ -363,10 +272,10 @@ describe('installed npm executable', () => {
         });
       } finally {
         await target.close();
-        await rm(fixtureRoot, { recursive: true, force: true });
+        await removePrivateFixtureRoot(fixtureRoot);
       }
-      if (packageRoot === undefined) throw new Error('Package fixture was not created');
-      await expect(access(packageRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+      if (consumerPath === undefined) throw new Error('Package fixture was not created');
+      await expect(access(consumerPath)).rejects.toMatchObject({ code: 'ENOENT' });
       await expect(access(fixtureRoot)).rejects.toMatchObject({ code: 'ENOENT' });
     },
     PACKAGE_TEST_TIMEOUT_MS

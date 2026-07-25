@@ -12,6 +12,7 @@ import {
   runBoundedCommand,
   terminateOwnedProcessTree
 } from '../support/installed-package-harness.js';
+import { redactedCommandFailure } from '../../scripts/testing/prepare-installed-package.mjs';
 
 function errnoCode(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null) return undefined;
@@ -97,17 +98,33 @@ async function writePreReadyExitSupervisor(
 }
 
 describe('installed-package harness portability', () => {
-  it('makes the local archive install offline and lifecycle-script free', () => {
+  it('installs the local archive without lifecycle scripts, audit, or funding traffic', () => {
     expect(localArchiveInstallArguments('/tmp/package.tgz')).toEqual([
       'install',
       '--ignore-scripts',
-      '--offline',
       '--no-audit',
       '--no-fund',
-      '--no-package-lock',
-      '--no-save',
       '/tmp/package.tgz'
     ]);
+  });
+
+  it('bounds and redacts a failed preparation command diagnostic', () => {
+    const failure = redactedCommandFailure(
+      'npm install',
+      {
+        code: 1,
+        signal: null,
+        stdout: '',
+        stderr: `${'q'.repeat(4096)} /private/work/secret-path npm error code ENOTCACHED`
+      },
+      ['/private/work/secret-path']
+    );
+
+    expect(failure.message).toContain('npm install failed (exit 1, signal null)');
+    expect(failure.message).toContain('ENOTCACHED');
+    expect(failure.message).not.toContain('/private/work/secret-path');
+    expect(failure.message).toContain('<redacted>');
+    expect(failure.message.length).toBeLessThan(700);
   });
 
   it('projects npm, dependency links, package targets, and bin shims for Unix', () => {

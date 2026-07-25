@@ -228,17 +228,13 @@ export async function terminateOwnedProcessTree(
   await waitForPosixGroupExit(plan.group, signal);
 }
 
+/**
+ * Network isolation and the complete lock-derived loopback registry, not npm's cache mode, prove
+ * that the installed package has no Internet dependency. The consumer keeps a real manifest and
+ * lock so its production graph can be compared against the committed lock projection.
+ */
 export function localArchiveInstallArguments(archive: string): readonly string[] {
-  return Object.freeze([
-    'install',
-    '--ignore-scripts',
-    '--offline',
-    '--no-audit',
-    '--no-fund',
-    '--no-package-lock',
-    '--no-save',
-    archive
-  ]);
+  return Object.freeze(['install', '--ignore-scripts', '--no-audit', '--no-fund', archive]);
 }
 
 export function packageHarnessPlatform(input: PackageHarnessPlatformInput): PackageHarnessPlatform {
