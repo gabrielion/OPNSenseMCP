@@ -146,7 +146,7 @@ describe('installed npm executable', () => {
       const configFile = join(fixtureRoot, 'opnsense.json');
       const evidence = JSON.parse(
         await readFile('tests/fixtures/opencode.product1a.json', 'utf8')
-      ) as { readonly package?: { readonly sha256?: unknown } };
+      ) as { readonly package?: { readonly tarSha256?: unknown } };
       let consumerPath: string | undefined;
       let packageWorkRoot: string | undefined;
       await writeFile(caFile, target.ca, { mode: 0o600 });
@@ -157,10 +157,13 @@ describe('installed npm executable', () => {
       );
       try {
         await withInstalledPackage(
-          async ({ archiveSha256, installedCommand, consumerRoot }, workRoot) => {
+          async ({ archiveTarSha256, installedCommand, consumerRoot }, workRoot) => {
             consumerPath = consumerRoot;
             packageWorkRoot = workRoot;
-            expect(evidence.package?.sha256).toBe(archiveSha256);
+            // The sealed evidence must describe THIS package. The comparison uses the
+            // uncompressed-archive digest because the gzip layer is not reproducible across
+            // platforms, so a .tgz digest would only ever match the sealing host.
+            expect(evidence.package?.tarSha256).toBe(archiveTarSha256);
             const negative = await runInstalledCommand(installedCommand, 'invalid', '');
             const requests = [
               {

@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createHash } from 'node:crypto';
-import { access, cp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { gunzipSync } from 'node:zlib';
+import {
+  access,
+  chmod,
+  cp,
+  mkdir,
+  opendir,
+  readFile,
+  readdir,
+  rm,
+  symlink,
+  writeFile
+} from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import {
   REGISTRY_BUDGET_MS,
@@ -20,12 +32,15 @@ export const PACKAGE_INPUTS = Object.freeze([
 ]);
 
 const DIAGNOSTIC_LIMIT = 512;
+export const PACKED_FILE_MODE = 0o644;
+export const PACKED_DIRECTORY_MODE = 0o755;
+export const BUILD_TIMEOUT_MS = 120_000;
 export const PACK_TIMEOUT_MS = 120_000;
 export const INSTALL_TIMEOUT_MS = 180_000;
 export const LIST_TIMEOUT_MS = 60_000;
 /** Every child budget the helper owns; a consumer's outer timeout must exceed this sum. */
 export const PREPARATION_BUDGET_MS =
-  PACK_TIMEOUT_MS + INSTALL_TIMEOUT_MS + LIST_TIMEOUT_MS + REGISTRY_BUDGET_MS;
+  BUILD_TIMEOUT_MS + PACK_TIMEOUT_MS + INSTALL_TIMEOUT_MS + LIST_TIMEOUT_MS + REGISTRY_BUDGET_MS;
 const INSTALLED_BIN_PREFIX = Buffer.from(
   '#!/usr/bin/env node\n// SPDX-License-Identifier: AGPL-3.0-or-later\n',
   'utf8'
@@ -75,6 +90,26 @@ function installedGraph(node, collected = new Set()) {
     installedGraph(entry, collected);
   }
   return collected;
+}
+
+/**
+ * npm's portable tar normalization is `mode = (mode | 0o600) & ~0o22`: it collapses 0644 and 0664,
+ * but PRESERVES the group/other read bits. A host with umask 027 would therefore pack 0640 and
+ * produce a different archive digest for byte-identical content. Normalizing the tree before
+ * packing makes the packed identity a function of content alone, on any umask.
+ */
+export async function normalizeTreeModes(root) {
+  const directory = await opendir(root);
+  for await (const entry of directory) {
+    if (entry.isSymbolicLink()) continue;
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) {
+      await chmod(path, PACKED_DIRECTORY_MODE);
+      await normalizeTreeModes(path);
+    } else if (entry.isFile()) {
+      await chmod(path, PACKED_FILE_MODE);
+    }
+  }
 }
 
 async function pathExists(path) {
@@ -152,7 +187,18 @@ export async function prepareInstalledPackage(options) {
   const secrets = [workRoot, repositoryRoot];
   let prepared;
   try {
-    const packed = await run(process.execPath, [npmCli, 'pack', '--json'], {
+    // Build and pack are separate steps so the emitted tree can be mode-normalized in between;
+    // `npm pack` alone would run `prepack` and read the freshly built modes before we could.
+    const built = await run(process.execPath, [npmCli, 'run', 'build'], {
+      cwd: packageCopy,
+      environment: isolatedNpmEnvironment(paths, registry.url),
+      timeoutMs: BUILD_TIMEOUT_MS
+    });
+    if (built.code !== 0 || built.signal !== null) {
+      throw redactedCommandFailure('npm run build', built, secrets);
+    }
+    await normalizeTreeModes(packageCopy);
+    const packed = await run(process.execPath, [npmCli, 'pack', '--json', '--ignore-scripts'], {
       cwd: packageCopy,
       environment: isolatedNpmEnvironment(paths, registry.url),
       timeoutMs: PACK_TIMEOUT_MS
@@ -163,9 +209,14 @@ export async function prepareInstalledPackage(options) {
     const archives = (await readdir(packageCopy)).filter((entry) => entry.endsWith('.tgz'));
     if (archives.length !== 1) throw new Error('npm pack output was not unique');
     const archive = join(packageCopy, archives[0]);
-    const archiveSha256 = createHash('sha256')
-      .update(await readFile(archive))
-      .digest('hex');
+    const archiveBytes = await readFile(archive);
+    const archiveSha256 = createHash('sha256').update(archiveBytes).digest('hex');
+    // The gzip layer is NOT reproducible across platforms: different zlib builds deflate the same
+    // bytes differently, so a .tgz digest can only ever match the host that produced it. The
+    // uncompressed archive was verified byte-identical on macOS and on Linux (node:22.23.1), and
+    // the mode normalization above removes the remaining umask dependency, so this digest is the
+    // identity of the packaged content rather than of the packing host.
+    const archiveTarSha256 = createHash('sha256').update(gunzipSync(archiveBytes)).digest('hex');
 
     await writeFile(
       join(consumer, 'package.json'),
@@ -222,6 +273,7 @@ export async function prepareInstalledPackage(options) {
 
     prepared = {
       archiveSha256,
+      archiveTarSha256,
       packageName: manifest.name,
       packageVersion: manifest.version,
       installedCommand: Object.freeze({

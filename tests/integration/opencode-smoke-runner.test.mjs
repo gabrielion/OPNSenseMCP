@@ -478,6 +478,7 @@ if (command[0] === '--version') {
       packageName: '@gabrielion/opnsense-mcp',
       packageVersion: '0.1.0',
       packageSha256: 'a'.repeat(64),
+      packageTarSha256: 'b'.repeat(64),
       tools: [],
       cleanupConfirmed: true,
       secretAbsent: true
@@ -496,6 +497,13 @@ if (command[0] === '--version') {
       expectedReadsObserved: false
     });
 
+    expect(passed.schemaVersion).toBe(2);
+    expect(passed.package).toEqual({
+      name: '@gabrielion/opnsense-mcp',
+      version: '0.1.0',
+      sha256: 'a'.repeat(64),
+      tarSha256: 'b'.repeat(64)
+    });
     expect(passed.claim).toContain('only OpenCode 1.18.3');
     expect(passed.claim).toContain('synthetic HTTPS');
     expect(blocked.claim).toContain('No OpenCode routing claim');

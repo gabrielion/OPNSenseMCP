@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, posix, win32 } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -12,15 +12,23 @@ import {
   terminateOwnedProcessTree
 } from '../support/installed-package-harness.js';
 import {
+  BUILD_TIMEOUT_MS,
   INSTALL_TIMEOUT_MS,
   LIST_TIMEOUT_MS,
+  PACKED_DIRECTORY_MODE,
+  PACKED_FILE_MODE,
   PACK_TIMEOUT_MS,
   PREPARATION_BUDGET_MS,
   hermeticInstallArguments,
+  normalizeTreeModes,
   redactedCommandFailure
 } from '../../scripts/testing/prepare-installed-package.mjs';
 import { REGISTRY_BUDGET_MS } from '../../scripts/testing/local-npm-registry.mjs';
 import { PACKAGE_TEST_TIMEOUT_MS } from './installed-package-budget.js';
+import {
+  createPrivateFixtureRoot,
+  removePrivateFixtureRoot
+} from '../support/private-fixture-root.js';
 
 function errnoCode(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null) return undefined;
@@ -118,9 +126,33 @@ describe('installed-package harness portability', () => {
 
   it('owns every child budget of the preparation it performs', () => {
     expect(PREPARATION_BUDGET_MS).toBe(
-      PACK_TIMEOUT_MS + INSTALL_TIMEOUT_MS + LIST_TIMEOUT_MS + REGISTRY_BUDGET_MS
+      BUILD_TIMEOUT_MS + PACK_TIMEOUT_MS + INSTALL_TIMEOUT_MS + LIST_TIMEOUT_MS + REGISTRY_BUDGET_MS
     );
     expect(PREPARATION_BUDGET_MS).toBeLessThan(PACKAGE_TEST_TIMEOUT_MS);
+  });
+
+  it('makes packed modes independent of the packing host umask', async () => {
+    const root = await createPrivateFixtureRoot('mode-normalisation');
+    try {
+      const nested = join(root, 'nested');
+      const restricted = join(root, 'restricted.txt');
+      const inNested = join(nested, 'inner.txt');
+      await mkdir(nested, { mode: 0o700 });
+      await writeFile(restricted, 'x', { mode: 0o600 });
+      await writeFile(inNested, 'y', { mode: 0o640 });
+      await symlink(restricted, join(root, 'link.txt'));
+
+      await normalizeTreeModes(root);
+
+      // npm's portable tar keeps group/other READ bits, so 0600 and 0640 would otherwise change
+      // the archive digest for identical content.
+      expect((await lstat(restricted)).mode & 0o7777).toBe(PACKED_FILE_MODE);
+      expect((await lstat(inNested)).mode & 0o7777).toBe(PACKED_FILE_MODE);
+      expect((await lstat(nested)).mode & 0o7777).toBe(PACKED_DIRECTORY_MODE);
+      expect((await lstat(join(root, 'link.txt'))).isSymbolicLink()).toBe(true);
+    } finally {
+      await removePrivateFixtureRoot(root);
+    }
   });
 
   it('bounds and redacts a failed preparation command diagnostic', () => {

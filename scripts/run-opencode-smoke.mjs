@@ -80,7 +80,7 @@ export function collectToolEvidence(events) {
 export function buildOpenCodeEvidence(input) {
   const passed = input.status === 'passed';
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: input.status,
     claim: passed
       ? `This evidence covers only OpenCode ${input.clientVersion} with ${input.model} selecting the three Product 1A reads from the installed package against a synthetic HTTPS OPNsense target.`
@@ -90,7 +90,11 @@ export function buildOpenCodeEvidence(input) {
     package: {
       name: input.packageName,
       version: input.packageVersion,
-      sha256: input.packageSha256
+      // `sha256` records the exact archive this host produced; it is not portable because the
+      // gzip layer depends on the platform's zlib. `tarSha256` is the uncompressed-archive
+      // digest, which is byte-identical across platforms and is what verifiers compare.
+      sha256: input.packageSha256,
+      tarSha256: input.packageTarSha256
     },
     tools: input.tools,
     checks: {
@@ -425,6 +429,7 @@ export async function runSmoke(options = {}) {
   const mock = await startMock();
   let packageMetadata;
   let packageDigest;
+  let packageTarDigest;
   let prepared;
   let ownsPrepared = false;
   let clientVersion = 'unavailable';
@@ -453,6 +458,7 @@ export async function runSmoke(options = {}) {
       prepared = await options.preparePackage();
     }
     packageDigest = prepared.archiveSha256;
+    packageTarDigest = prepared.archiveTarSha256;
     const caFile = join(temporaryRoot, 'ca.pem');
     const connectionFile = join(temporaryRoot, 'opnsense.json');
     await writeFile(caFile, mock.ca, { mode: 0o600 });
@@ -582,7 +588,11 @@ export async function runSmoke(options = {}) {
     (await pathIsAbsent(temporaryRoot)) &&
     (!ownsPreparationRoot || (await pathIsAbsent(preparationRoot)));
   if (localFailure !== undefined) throw localFailure;
-  if (packageMetadata === undefined || packageDigest === undefined) {
+  if (
+    packageMetadata === undefined ||
+    packageDigest === undefined ||
+    packageTarDigest === undefined
+  ) {
     throw new Error('Package evidence unavailable');
   }
   // Ordered least to most severe: a secret leak must never be masked by a cleanup condition.
@@ -605,6 +615,7 @@ export async function runSmoke(options = {}) {
     packageName: packageMetadata.name,
     packageVersion: packageMetadata.version,
     packageSha256: packageDigest,
+    packageTarSha256: packageTarDigest,
     tools,
     mcpConnected,
     expectedReadsObserved,

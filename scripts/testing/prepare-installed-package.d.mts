@@ -18,6 +18,8 @@ export type PreparedCommandRunner = (
 
 export interface PreparedInstalledPackage {
   readonly archiveSha256: string;
+  /** Digest of the uncompressed archive: the portable identity of the packaged content. */
+  readonly archiveTarSha256: string;
   readonly packageName: string;
   readonly packageVersion: string;
   readonly installedCommand: { readonly command: string; readonly arguments: readonly string[] };
@@ -28,7 +30,11 @@ export interface PreparedInstalledPackage {
 }
 
 export declare const PACKAGE_INPUTS: readonly string[];
+export declare const BUILD_TIMEOUT_MS: number;
 export declare const PACK_TIMEOUT_MS: number;
+export declare const PACKED_FILE_MODE: number;
+export declare const PACKED_DIRECTORY_MODE: number;
+export declare function normalizeTreeModes(root: string): Promise<void>;
 export declare const INSTALL_TIMEOUT_MS: number;
 export declare const LIST_TIMEOUT_MS: number;
 export declare const PREPARATION_BUDGET_MS: number;
