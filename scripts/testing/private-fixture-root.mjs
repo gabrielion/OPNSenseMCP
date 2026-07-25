@@ -39,12 +39,15 @@ export function assertPrivateAncestors(path) {
   }
 }
 
+const outstandingRoots = new Set();
+
 export async function createPrivateFixtureRoot(prefix) {
   if (!/^[a-z0-9][a-z0-9-]*$/u.test(prefix)) throw new Error('Invalid fixture prefix');
   const base = join(homedir(), PRIVATE_FIXTURE_BASE_NAME);
   await mkdir(base, { mode: 0o700, recursive: true });
   const root = await realpath(await mkdtemp(join(base, `${prefix}-`)));
   assertPrivateAncestors(root);
+  outstandingRoots.add(root);
   return root;
 }
 
@@ -52,4 +55,15 @@ export async function removePrivateFixtureRoot(root) {
   const base = join(homedir(), PRIVATE_FIXTURE_BASE_NAME);
   if (!root.startsWith(`${base}${sep}`)) throw new Error('Refusing to remove a foreign path');
   await rm(root, { force: true, recursive: true });
+  outstandingRoots.delete(root);
+}
+
+/**
+ * A hard test timeout skips the `finally` that would normally remove a fixture root, so a suite
+ * teardown hook removes whatever is still outstanding. Returns the roots it had to reclaim.
+ */
+export async function removeOutstandingPrivateFixtureRoots() {
+  const reclaimed = [...outstandingRoots];
+  for (const root of reclaimed) await removePrivateFixtureRoot(root);
+  return reclaimed;
 }

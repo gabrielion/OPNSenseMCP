@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { access, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import {
   runBoundedCommand,
   type CommandInvocation,
@@ -10,6 +10,7 @@ import {
 import { startSyntheticOPNsenseTarget } from '../support/https-opnsense-mock.js';
 import {
   createPrivateFixtureRoot,
+  removeOutstandingPrivateFixtureRoots,
   removePrivateFixtureRoot
 } from '../support/private-fixture-root.js';
 import {
@@ -40,6 +41,11 @@ const preparationRunner = (
       cleanupTimeoutMs: COMMAND_CLEANUP_TIMEOUT_MS
     }
   );
+
+afterAll(async () => {
+  // A leaked root means some path (including a hard test timeout) skipped its own cleanup.
+  expect(await removeOutstandingPrivateFixtureRoots()).toEqual([]);
+});
 
 async function withInstalledPackage(
   assertion: (installed: PreparedInstalledPackage) => Promise<void>

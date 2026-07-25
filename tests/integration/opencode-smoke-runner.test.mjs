@@ -26,6 +26,7 @@ import {
 } from '../../scripts/run-opencode-smoke.mjs';
 import {
   createPrivateFixtureRoot,
+  removeOutstandingPrivateFixtureRoots,
   removePrivateFixtureRoot
 } from '../../scripts/testing/private-fixture-root.mjs';
 import { prepareInstalledPackage } from '../../scripts/testing/prepare-installed-package.mjs';
@@ -132,6 +133,8 @@ beforeAll(async () => {
 afterAll(async () => {
   if (prepared !== undefined) await prepared.cleanup();
   if (preparationRoot !== undefined) await removePrivateFixtureRoot(preparationRoot);
+  // A leaked root means some path (including a hard test timeout) skipped its own cleanup.
+  expect(await removeOutstandingPrivateFixtureRoots()).toEqual([]);
 });
 
 async function createIsolatedRunner(fixtureRoot) {
