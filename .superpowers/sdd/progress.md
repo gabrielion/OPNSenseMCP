@@ -203,3 +203,45 @@ P0-A full gates (2026-07-25, Node 22.23.1):
   - `npm run test:conformance` = both 2025-11-25 and 2026-07-28 profiles, 13/13, exit 0.
   - Repository residue: `git diff --check` clean, no `results` directory, no untracked files, and
     $HOME/.opnsense-mcp-fixtures empty after every run.
+  - Combined Linux-CI-equivalent run (sticky TMPDIR=/tmp AND an empty npm_config_cache together,
+    i.e. both original causal conditions at once): vitest exit 0, 58 files / 1000 tests passed, no
+    residue. A first attempt reported the exit code of the trailing residue check rather than
+    vitest's, so it was discarded and re-run capturing VITEST_EXIT explicitly.
+  - `git diff 786f092..HEAD -- src/` is EMPTY: no production source changed in the whole increment.
+    The only non-test change is one eslint.config.js line for .d.mts declaration files.
+
+P0-A review round (subagent adversarial review of 786f092..HEAD): 10 findings, ALL accepted as real
+  after independent verification, all fixed before any push.
+  - HIGH 1: `groupCleanupConfirmed` was initialized `true` and only ever assigned on the bounded-
+    failure branch, so a PASSING smoke reported a confirmed process-group cleanup it had never
+    measured. Now `null` = not measured; only a measured `false` blocks; a discarded
+    BoundedCommandFailure from `opencode --version` no longer loses its observation. New regression
+    proves a completed model command reports `groupCleanupConfirmed: null`.
+  - HIGH 2: the residue assertions scanned `tmpdir()`, which the new code never writes to, so both
+    were tautologies. They now assert on the private fixture base and the injected work root.
+  - HIGH 3: the deleted WORST_CASE budget guard was a real invariant, and the new child budgets
+    summed to EXACTLY the outer timeout (180+300+120 = 600s). Budgets are now named constants
+    (120/180/60s + registry budget) with a test asserting the sum is strictly below the outer
+    timeout; the registry archiver and listen paths gained timeouts they lacked entirely.
+  - MED 4: `localArchiveInstallArguments` had become dead code that a test still "verified"; the
+    real argv is now `hermeticInstallArguments`, used by the actual install.
+  - MED 5: the "no developer working-tree module" claim was overbroad — `prepack` builds `tsc`
+    against the repository tree by design. The comment now scopes the no-fallback claim to the
+    consumer install and states that repacked fixture tarballs are NOT integrity-verified against
+    the lock: hermetic means no network, not a supply-chain proof.
+  - MED 6: smoke teardown swallowed failures and `cleanupConfirmed` covered only an inner
+    subdirectory; teardown failures now block confirmation and the whole owned root must be absent.
+  - MED 7: the deleted "no pre-built dist" assertion is restored inside the helper that owns the copy.
+  - MED 8: the residue proof is widened from `consumerRoot` back to the entire work root.
+  - MED 9: CLI exit-code mapping lost its coverage; `run()` is injectable and directly tested for
+    exit 3/0, its report line, and argument rejection before any smoke runs.
+  - LOW 10: `process-cleanup-unconfirmed` could mask `secret-redaction-failed`; overwrites are now
+    ordered least-to-most severe.
+  - Reviewer non-findings: no production security policy relaxed (src/ byte-identical), the
+    expected-absent peer set cannot silently grow and a required missing peer fails closed, no
+    private data, and no manufactured or resealed evidence.
+
+Ledger publication note (2026-07-25): `.superpowers/sdd/progress.md` is tracked and public in this
+  repository (it already was at 786f092) even though `.gitignore` lists `.superpowers/sdd/`, so
+  `git add` needs `-f`. Leaving it stale would publish a false status, so it is kept current.
+  Whether it should remain public is an open P0-B sanitation decision for the owner.
