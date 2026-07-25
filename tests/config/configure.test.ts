@@ -5,15 +5,12 @@ import {
   link,
   lstat,
   mkdir,
-  mkdtemp,
   readdir,
   readFile,
-  realpath,
   rm,
   symlink,
   writeFile
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -24,17 +21,21 @@ import {
   type ConfigureFileSystem,
   type ConfigureTerminal
 } from '../../src/config/configure.js';
+import {
+  createPrivateFixtureRoot,
+  removePrivateFixtureRoot
+} from '../support/private-fixture-root.js';
 
 const KEY = 'CONFIGURE_KEY_MUST_NOT_LEAK';
 const SECRET = 'CONFIGURE_SECRET_MUST_NOT_LEAK';
 let directory = '';
 
 beforeEach(async () => {
-  directory = await realpath(await mkdtemp(join(tmpdir(), 'opnsense-configure-test-')));
+  directory = await createPrivateFixtureRoot('opnsense-configure-test');
 });
 
 afterEach(async () => {
-  await rm(directory, { recursive: true, force: true });
+  await removePrivateFixtureRoot(directory);
 });
 
 function terminal(answers: readonly string[]) {
@@ -258,6 +259,20 @@ describe('configure command', () => {
         document
       );
     }).toThrow(/^Invalid OPNsense configuration\.$/u);
+  });
+
+  it('rejects a sticky world-writable ancestor without creating anything below it', async () => {
+    const stickyAncestor = join(directory, 'sticky');
+    await mkdir(stickyAncestor, { mode: 0o700 });
+    await chmod(stickyAncestor, 0o1777);
+
+    expect(() => {
+      writePrivateOPNsenseConfigFile(join(stickyAncestor, 'opnsense-mcp', 'config.json'), document);
+    }).toThrow(/^Invalid OPNsense configuration\.$/u);
+
+    await expect(lstat(join(stickyAncestor, 'opnsense-mcp'))).rejects.toMatchObject({
+      code: 'ENOENT'
+    });
   });
 
   it('refuses existing symlink and hardlink configuration targets without replacing them', async () => {
