@@ -25,7 +25,9 @@ export default tseslint.config(
     }
   },
   {
-    files: ['**/*.{js,mjs}'],
+    // Hand-written declaration files for the `.mjs` test fixtures are not part of a TypeScript
+    // project, so the type-aware rule set cannot apply to them.
+    files: ['**/*.{js,mjs}', '**/*.d.mts'],
     ...tseslint.configs.disableTypeChecked,
     languageOptions: { globals: globals.node }
   }
