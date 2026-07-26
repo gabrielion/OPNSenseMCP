@@ -103,6 +103,7 @@ export function createOPNsenseDeleteCapability(aliasAdapter: OPNsenseAliasAdapte
       };
     },
     handler: (input, context) => aliasAdapter.deleteHostAlias(input.id, context.signal),
+    summarizeChange: (input) => ({ operation: 'delete', subject: input.id, detail: '' }),
     verifyOutcome: async (input, _output, context) => {
       const items = await readHostAliases(aliasAdapter, context.signal);
       return !items.some((item) => item.uuid === input.id);

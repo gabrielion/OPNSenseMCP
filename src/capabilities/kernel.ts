@@ -9,6 +9,7 @@ import type { FeatureFlag } from '../config/feature-flags.js';
 import { createCanonicalJsonSnapshot } from '../security/canonical-json.js';
 import { areDeclaredResourceScopesAllowed } from './exposure.js';
 import type {
+  ChangeSummary,
   AuditPhase,
   AuditRecord,
   CapabilityDefinition,
@@ -104,7 +105,8 @@ const WRITE_RESOURCE_CAPABILITY_DEFINITION_KEYS = Object.freeze([
   'resolver',
   'preflight',
   'handler',
-  'verifyOutcome'
+  'verifyOutcome',
+  'summarizeChange'
 ]);
 const CAPABILITY_POLICY_KEYS = Object.freeze([
   'effect',
@@ -196,6 +198,38 @@ type VerifyOutcomeCallback = (
 // kernel-private maps — not the effect string — is what routes a capability through the envelope, so the
 // foundation's plain defineCapability write fixtures keep their existing execution path unchanged.
 const writeEnvelopePreflights = new WeakMap<CapabilityDefinition, PreflightCallback>();
+type ChangeSummaryProjection = Omit<ChangeSummary, 'resource'>;
+const changeSummarizers = new WeakMap<
+  CapabilityDefinition,
+  (input: Record<string, unknown>) => ChangeSummaryProjection
+>();
+const SUMMARY_SUBJECT_LIMIT = 72;
+const SUMMARY_FIELD_LIMIT = 32;
+
+/**
+ * The capability chooses the words; the kernel decides what may cross the boundary. Control
+ * characters are removed and every field is length-bounded, so an alias name read back from the
+ * firewall cannot inject line breaks or overflow the prompt a human is about to approve.
+ */
+function sealedSummaryText(value: unknown, limit: number): string {
+  const text = typeof value === 'string' ? value : '';
+  // Array.from iterates code points, which is what the bound below counts.
+  const printable = Array.from(text).filter((character) => {
+    const code = character.codePointAt(0) ?? 0;
+    return code >= 0x20 && code !== 0x7f && !(code >= 0x80 && code <= 0x9f);
+  });
+  if (printable.length <= limit) return printable.join('');
+  return `${printable.slice(0, limit - 1).join('')}\u2026`;
+}
+
+function sealedChangeSummary(projection: ChangeSummaryProjection, resource: string): ChangeSummary {
+  return Object.freeze({
+    operation: sealedSummaryText(projection.operation, SUMMARY_FIELD_LIMIT),
+    resource: sealedSummaryText(resource, SUMMARY_FIELD_LIMIT),
+    subject: sealedSummaryText(projection.subject, SUMMARY_SUBJECT_LIMIT),
+    detail: sealedSummaryText(projection.detail, SUMMARY_FIELD_LIMIT)
+  });
+}
 const writeEnvelopeVerifiers = new WeakMap<CapabilityDefinition, VerifyOutcomeCallback>();
 
 export interface TypedCapabilityDefinition<
@@ -986,6 +1020,12 @@ export interface TypedWriteResourceCapabilityDefinition<
     output: TOutput,
     context: ResourceCapabilityExecutionContext
   ) => Promise<boolean>;
+  /**
+   * Trusted static projection from the RESOLVED input to the words a human sees before approving.
+   * The kernel seals and bounds whatever it returns. It must never carry a credential, a raw
+   * response, or a path.
+   */
+  readonly summarizeChange: (input: TResolvedInput) => ChangeSummaryProjection;
 }
 
 // A write-resource capability resolves a visible resource exactly like a read resource capability and then
@@ -1039,6 +1079,7 @@ export function defineWriteResourceCapability<
     const handlerValue = readRequiredProperty(source, 'handler');
     const preflightValue = readRequiredProperty(source, 'preflight');
     const verifyOutcomeValue = readRequiredProperty(source, 'verifyOutcome');
+    const summarizeChangeValue = readRequiredProperty(source, 'summarizeChange');
     if (
       typeof resolverValue !== 'function' ||
       isProxy(resolverValue) ||
@@ -1047,7 +1088,9 @@ export function defineWriteResourceCapability<
       typeof preflightValue !== 'function' ||
       isProxy(preflightValue) ||
       typeof verifyOutcomeValue !== 'function' ||
-      isProxy(verifyOutcomeValue)
+      isProxy(verifyOutcomeValue) ||
+      typeof summarizeChangeValue !== 'function' ||
+      isProxy(summarizeChangeValue)
     ) {
       return invalidCapabilityDefinition();
     }
@@ -1087,6 +1130,11 @@ export function defineWriteResourceCapability<
       TResolvedInput,
       TOutput
     >['verifyOutcome'];
+    const summarizeChange = summarizeChangeValue as TypedWriteResourceCapabilityDefinition<
+      TParsedInput,
+      TResolvedInput,
+      TOutput
+    >['summarizeChange'];
     const capability = defineCapability<Record<string, unknown>, TOutput>({
       id: readRequiredProperty(source, 'id') as string,
       mcpName: readRequiredProperty(source, 'mcpName') as string,
@@ -1120,6 +1168,7 @@ export function defineWriteResourceCapability<
     resourceResolvers.set(capability, (input, context) => resolver(input as TParsedInput, context));
     resourceSelectableScopes.set(capability, selectableResourceScopes);
     resourceRefusalDetailVocabularies.set(capability, refusalDetailVocabulary);
+    changeSummarizers.set(capability, (input) => summarizeChange(input as TResolvedInput));
     writeEnvelopePreflights.set(capability, (input, context) =>
       preflight(input as TResolvedInput, context as ResourceCapabilityExecutionContext)
     );
@@ -1951,11 +2000,25 @@ export function createCapabilityDispatcher(
         expiresAtMs
       });
       pendingConfirmations.set(confirmationId, pending);
+      const summarizer = changeSummarizers.get(authorization.authorization.capability);
+      let summary: ChangeSummary | undefined;
+      if (summarizer !== undefined) {
+        try {
+          summary = sealedChangeSummary(
+            summarizer(authorization.authorization.input),
+            authorization.authorization.effectiveResourceScopes[0] ?? ''
+          );
+        } catch {
+          // A capability that cannot describe its own change must not be approved blindly.
+          return Promise.resolve(refusal('CONFIRMATION_UNAVAILABLE'));
+        }
+      }
       const challenge = Object.freeze({
         confirmationId,
         capabilityId: pending.capabilityId,
         argumentsSha256: pending.argumentsSha256,
-        expiresAt
+        expiresAt,
+        ...(summary === undefined ? {} : { summary })
       });
       return Promise.resolve(Object.freeze({ kind: 'confirmation-required', challenge }));
     }

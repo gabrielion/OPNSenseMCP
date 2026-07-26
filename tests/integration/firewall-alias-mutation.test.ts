@@ -89,6 +89,7 @@ async function withTarget(
   run: (input: {
     readonly client: Awaited<ReturnType<(typeof MCP_ERAS)[number]['connect']>>['client'];
     readonly requests: readonly RecordedHttpsRequest[];
+    readonly elicitationMessages: readonly string[];
   }) => Promise<void>
 ): Promise<void> {
   const target = await startSyntheticOPNsenseTarget(handler);
@@ -108,11 +109,13 @@ async function withTarget(
   const connection = await connect(runtime.application, {
     capabilities: { elicitation: { form: {} } }
   });
-  connection.client.setRequestHandler('elicitation/create', () =>
-    Promise.resolve({ action: 'accept', content: { confirm: true } } as ElicitResult)
-  );
+  const elicitationMessages: string[] = [];
+  connection.client.setRequestHandler('elicitation/create', (request) => {
+    elicitationMessages.push(request.params.message);
+    return Promise.resolve({ action: 'accept', content: { confirm: true } } as ElicitResult);
+  });
   try {
-    await run({ client: connection.client, requests: target.requests });
+    await run({ client: connection.client, requests: target.requests, elicitationMessages });
   } finally {
     await connection.close();
     await runtime.close();
@@ -122,6 +125,23 @@ async function withTarget(
 }
 
 describe.each(MCP_ERAS)('$label firewall-alias reversible mutation', ({ connect }) => {
+  it('describes the exact pending change in the human confirmation', async () => {
+    await withTarget(statefulMock(), connect, async ({ client, elicitationMessages }) => {
+      await client.callTool({ name: 'opn_create', arguments: CREATE_ARGS });
+      await client.callTool({
+        name: 'opn_delete',
+        arguments: { resource: 'firewall.alias', id: CREATED_UUID }
+      });
+
+      // A human approving a firewall change must be told which change. A fixed question makes the
+      // gate that justifies allowing writes a blind yes/no.
+      expect(elicitationMessages).toEqual([
+        'Apply this exact OPNsense change? create firewall.alias "lab_hosts" (1 entry)',
+        `Apply this exact OPNsense change? delete firewall.alias "${CREATED_UUID}"`
+      ]);
+    });
+  });
+
   it('runs the full create, read-back, delete, prove-absence lifecycle', async () => {
     await withTarget(statefulMock(), connect, async ({ client, requests }) => {
       expect((await client.listTools()).tools.map(({ name }) => name)).toEqual([

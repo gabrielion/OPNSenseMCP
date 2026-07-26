@@ -103,11 +103,24 @@ export interface ServerContext extends CapabilityInvocationContext {
   readonly application: ApplicationContext;
 }
 
+/**
+ * A bounded, human-meaningful description of the change awaiting approval. The capability supplies
+ * the words; the kernel seals them (control characters stripped, every field length-bounded) so a
+ * hostile value read from the firewall cannot reshape the prompt a human is about to approve.
+ */
+export interface ChangeSummary {
+  readonly operation: string;
+  readonly resource: string;
+  readonly subject: string;
+  readonly detail: string;
+}
+
 export interface ConfirmationChallenge {
   readonly confirmationId: string;
   readonly capabilityId: string;
   readonly argumentsSha256: string;
   readonly expiresAt: string;
+  readonly summary?: ChangeSummary;
 }
 
 export type RefusalCode =

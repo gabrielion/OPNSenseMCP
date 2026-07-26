@@ -123,6 +123,13 @@ export function createOPNsenseCreateCapability(aliasAdapter: OPNsenseAliasAdapte
       };
     },
     handler: (input, context) => aliasAdapter.createHostAlias(input.attributes, context.signal),
+    summarizeChange: (input) => ({
+      operation: 'create',
+      subject: input.attributes.name,
+      detail: `${String(input.attributes.content.length)} ${
+        input.attributes.content.length === 1 ? 'entry' : 'entries'
+      }`
+    }),
     verifyOutcome: async (input, output, context) => {
       const items = await readHostAliases(aliasAdapter, context.signal);
       return items.some((item) => item.uuid === output.item.uuid && item.name === output.item.name);

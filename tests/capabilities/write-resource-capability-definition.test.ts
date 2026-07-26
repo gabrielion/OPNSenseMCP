@@ -58,6 +58,12 @@ interface DefOverrides {
   readonly effect?: 'read' | 'local-write' | 'firewall-write';
   readonly audit?: 'none' | 'required';
   readonly backup?: 'none' | 'strict';
+  readonly confirmation?: 'none' | 'elicitation';
+  readonly summarizeChange?: (input: WriteResourceInput) => {
+    readonly operation: string;
+    readonly subject: string;
+    readonly detail: string;
+  };
 }
 
 interface WriteResourceInput extends Record<string, unknown> {
@@ -91,7 +97,7 @@ function makeCapability(events: string[], overrides: DefOverrides = {}): Capabil
         requiredFeatureFlags: [],
         backup: overrides.backup ?? 'strict',
         audit: overrides.audit ?? 'required',
-        confirmation: 'none',
+        confirmation: overrides.confirmation ?? 'none',
         timeoutMs: 1000,
         redactFields: []
       },
@@ -117,6 +123,9 @@ function makeCapability(events: string[], overrides: DefOverrides = {}): Capabil
         events.push('handler');
         return Promise.resolve({ applied: input.value });
       },
+      summarizeChange:
+        overrides.summarizeChange ??
+        ((input) => ({ operation: 'write', subject: input.value, detail: '' })),
       verifyOutcome: () => {
         events.push('verify');
         return Promise.resolve(true);
@@ -184,5 +193,56 @@ describe('defineWriteResourceCapability', () => {
     });
     expect(result).toMatchObject({ kind: 'refused', code: 'UNKNOWN_RESOURCE' });
     expect(harness.events).toEqual([]);
+  });
+
+  it('seals a hostile change summary before a human is asked to approve it', async () => {
+    const harness = makeHarness();
+    const capability = makeCapability(harness.events, {
+      confirmation: 'elicitation',
+      summarizeChange: () => ({
+        operation: `write\nApproved: yes`,
+        subject: `evil\u0000${'x'.repeat(200)}`,
+        detail: 'd\u009fe'
+      })
+    });
+
+    // Elicitation needs a completion installed, exactly as the MCP layer does at startup.
+    const dispatcher = createCapabilityDispatcher(
+      new CapabilityCatalog([capability]),
+      { readOnly: false, allowedResourceScopes: null, enabledFeatureFlags: new Set<never>() },
+      () => undefined,
+      {},
+      {},
+      harness.services
+    );
+    const result = await dispatcher.dispatch(
+      { name: 'test_write_resource', arguments: { resource: 'test.resource', value: 'x' } },
+      { transport: 'stdio' }
+    );
+
+    // The capability chooses the words; the kernel decides what may reach the prompt. Control
+    // characters would let a value read back from the firewall forge extra lines in the question a
+    // human is about to answer.
+    expect(result.kind).toBe('confirmation-required');
+    if (result.kind === 'confirmation-required') {
+      const summary = result.challenge.summary;
+      expect(summary).toBeDefined();
+      expect(summary?.operation).toBe('writeApproved: yes');
+      expect(summary?.subject.startsWith('evilxxx')).toBe(true);
+      expect(summary?.subject.length).toBe(72);
+      expect(summary?.subject.endsWith('\u2026')).toBe(true);
+      expect(summary?.detail).toBe('de');
+      const fields: readonly string[] =
+        summary === undefined
+          ? []
+          : [summary.operation, summary.resource, summary.subject, summary.detail];
+      const control = fields.flatMap((field) =>
+        Array.from(field).filter((character) => {
+          const code = character.codePointAt(0) ?? 0;
+          return code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f);
+        })
+      );
+      expect(control).toEqual([]);
+    }
   });
 });

@@ -18,6 +18,7 @@ import {
 } from '../app/application-context.js';
 import type {
   CapabilityDefinition,
+  ChangeSummary,
   CapabilityRequest,
   CapabilityResult,
   ServerContext
@@ -26,6 +27,16 @@ import { dispatchCapability } from '../capabilities/dispatch.js';
 import { formatCapabilityResult, refusalResult } from './results.js';
 
 export const CONFIRMATION_QUESTION = 'Apply this exact OPNsense change?';
+
+/**
+ * A human approving a firewall change must be told which change. The summary reaching this point is
+ * already sealed and bounded by the kernel; this only lays it out.
+ */
+export function confirmationPrompt(summary: ChangeSummary | undefined): string {
+  if (summary === undefined) return CONFIRMATION_QUESTION;
+  const detail = summary.detail === '' ? '' : ` (${summary.detail})`;
+  return `${CONFIRMATION_QUESTION} ${summary.operation} ${summary.resource} "${summary.subject}"${detail}`;
+}
 
 export const ConfirmationResponseSchema = z.object({ confirm: z.boolean() }).strict();
 
@@ -153,7 +164,7 @@ export async function handleConfirmationCall(
   return inputRequired({
     inputRequests: {
       confirmation: inputRequired.elicit({
-        message: CONFIRMATION_QUESTION,
+        message: confirmationPrompt(initial.challenge.summary),
         requestedSchema: {
           type: 'object',
           properties: { confirm: { type: 'boolean' } },
