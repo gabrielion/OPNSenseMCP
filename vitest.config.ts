@@ -23,7 +23,8 @@ export default defineConfig({
           exclude: [
             'tests/integration/installed-package.test.ts',
             'tests/integration/local-npm-registry.test.mjs',
-            'tests/integration/opencode-smoke-runner.test.mjs'
+            'tests/integration/opencode-smoke-runner.test.mjs',
+            'tests/integration/sealed-evidence.test.ts'
           ],
           sequence: { groupOrder: 0 }
         }
@@ -40,6 +41,17 @@ export default defineConfig({
             'tests/integration/installed-package.test.ts'
           ],
           sequence: { groupOrder: 1 }
+        }
+      },
+      {
+        test: {
+          // Release gate only. The sealed OpenCode evidence can only be re-sealed by its real
+          // producer (an external client and model), so its digest equality must not block an
+          // ordinary commit. `npm run evidence:check` runs this project.
+          ...sharedTestOptions,
+          name: 'evidence',
+          include: ['tests/integration/sealed-evidence.test.ts'],
+          sequence: { groupOrder: 3 }
         }
       },
       {

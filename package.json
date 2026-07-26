@@ -39,7 +39,7 @@
     "operations:generate": "node scripts/generate-operation-descriptors.mjs",
     "operations:check": "node scripts/generate-operation-descriptors.mjs --check",
     "provenance:verify": "node scripts/provenance/verify-manifest.mjs docs/provenance/migration-manifest.json",
-    "test": "npm run build && vitest run",
+    "test": "npm run build && vitest run --project parallel --project installed-package --project opencode-runner",
     "test:product1a": "vitest run tests/integration/installed-package.test.ts",
     "vm:doctor": "node scripts/vm/product1b.mjs doctor",
     "vm:prepare-image": "node scripts/vm/product1b.mjs prepare-image",
@@ -54,7 +54,8 @@
     "test:conformance:2025": "npm run build && node scripts/run-conformance.mjs 2025-11-25",
     "test:conformance:2026": "npm run build && node scripts/run-conformance.mjs 2026-07-28",
     "test:conformance": "npm run test:conformance:2025 && npm run test:conformance:2026",
-    "verify": "npm run operations:check && npm run format:check && npm run lint && npm run typecheck && npm run license:check && npm test"
+    "verify": "npm run operations:check && npm run format:check && npm run lint && npm run typecheck && npm run license:check && npm test",
+    "evidence:check": "npm run build && vitest run --project evidence"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "2.0.0-beta.4",
