@@ -51,7 +51,7 @@ describe('loadRuntimeConfig', () => {
   it('parses explicit policy lists and a supplied request-state key', () => {
     const config = loadRuntimeConfig({
       READ_ONLY: 'false',
-      ALLOWED_RESOURCES: 'firewall.rule, dns.host,firewall.rule',
+      ALLOWED_RESOURCES: 'firewall.alias, core.services,firewall.alias',
       ENABLED_FEATURE_FLAGS: 'advanced-api,ssh',
       MCP_ALLOWED_ORIGINS: 'https://console.example:8443',
       MCP_REQUEST_STATE_SECRET: '0123456789abcdef0123456789abcdef',
@@ -59,7 +59,7 @@ describe('loadRuntimeConfig', () => {
     });
 
     expect(config.readOnly).toBe(false);
-    expect(config.allowedResourceScopes).toEqual(new Set(['firewall.rule', 'dns.host']));
+    expect(config.allowedResourceScopes).toEqual(new Set(['firewall.alias', 'core.services']));
     expect(config.enabledFeatureFlags).toEqual(new Set(['advanced-api', 'ssh']));
     expect(config.http.allowedOrigins).toEqual(['https://console.example:8443']);
     expect(new TextDecoder().decode(config.requestStateKey)).toBe(
@@ -113,6 +113,35 @@ describe('loadRuntimeConfig', () => {
   it('does not enable deprecated SSE independently of hardened HTTP', () => {
     expect(() => loadRuntimeConfig({ MCP_LEGACY_SSE_ENABLED: 'true' })).toThrow(
       'Invalid runtime configuration: MCP_LEGACY_SSE_ENABLED'
+    );
+  });
+});
+
+describe('P0-B policy inputs', () => {
+  it('accepts the exact experimental alias write flag token', () => {
+    const config = loadRuntimeConfig({
+      READ_ONLY: 'false',
+      ENABLED_FEATURE_FLAGS: 'experimental-alias-write',
+      ALLOWED_RESOURCES: 'firewall.alias'
+    });
+
+    expect(config.enabledFeatureFlags.has('experimental-alias-write')).toBe(true);
+  });
+
+  it('rejects an unknown resource scope instead of silently hiding a tool', () => {
+    expect(() =>
+      loadRuntimeConfig({ READ_ONLY: 'true', ALLOWED_RESOURCES: 'system.staus' })
+    ).toThrow(/ALLOWED_RESOURCES/u);
+  });
+
+  it('accepts every catalogued scope including the server health scope', () => {
+    const config = loadRuntimeConfig({
+      READ_ONLY: 'true',
+      ALLOWED_RESOURCES: 'server.status,system.status,core.services,firewall.alias'
+    });
+
+    expect(config.allowedResourceScopes).toEqual(
+      new Set(['server.status', 'system.status', 'core.services', 'firewall.alias'])
     );
   });
 });

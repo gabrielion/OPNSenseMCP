@@ -17,6 +17,7 @@ import type { OPNsenseReadAdapter } from '../../src/opnsense/read-adapter.js';
 import type { OPNsenseAliasAdapter } from '../../src/opnsense/alias-adapter.js';
 import type { MutationEnvelopeServices } from '../../src/capabilities/types.js';
 import { createMutationFixture, createReadFixture } from '../fixtures/capabilities.js';
+import { KNOWN_RESOURCE_SCOPES } from '../../src/capabilities/resource-scopes.js';
 
 describe('CapabilityCatalog', () => {
   it('indexes stable IDs and MCP names', () => {
@@ -283,5 +284,60 @@ describe('product catalog write surface', () => {
     expect(() =>
       createCapabilityDispatcher(catalog, options, undefined, {}, {}, services)
     ).not.toThrow();
+  });
+});
+
+describe('write containment (P0-B)', () => {
+  const aliasAdapter = {
+    available: true,
+    listHostAliases: () => Promise.resolve({ items: [], total: 0 }),
+    createHostAlias: () => Promise.resolve({ item: { uuid: 'u', name: 'n' } }),
+    deleteHostAlias: () => Promise.resolve({ item: { id: 'u' } }),
+    reconfigure: () => Promise.resolve()
+  } as unknown as OPNsenseAliasAdapter;
+  const readAdapter = { available: true } as unknown as OPNsenseReadAdapter;
+  const catalog = createProductCapabilityCatalog(readAdapter, aliasAdapter);
+  const expose = (
+    allowedResourceScopes: ReadonlySet<string> | null,
+    enabledFeatureFlags: ReadonlySet<FeatureFlag>
+  ): readonly string[] =>
+    catalog
+      .listExposed({
+        readOnly: false,
+        transport: 'stdio',
+        enabledFeatureFlags,
+        allowedResourceScopes
+      })
+      .map(({ mcpName }) => mcpName);
+
+  it('authorizes every read but no write when the allow-list is absent', () => {
+    // An absent allow-list still means "every catalogued scope" for reads, but a write must always
+    // be authorized by an explicitly named scope.
+    expect(expose(null, new Set(['experimental-alias-write']))).toEqual([
+      'server_status',
+      'opn_describe',
+      'opn_get',
+      'opn_list'
+    ]);
+  });
+
+  it('exposes alias writes only with the flag and an explicit firewall.alias scope', () => {
+    const scopes = new Set(['firewall.alias']);
+
+    expect(expose(scopes, new Set())).not.toContain('opn_create');
+    expect(expose(scopes, new Set(['experimental-alias-write']))).toContain('opn_create');
+    expect(expose(scopes, new Set(['experimental-alias-write']))).toContain('opn_delete');
+  });
+
+  it('keeps every declared capability scope inside the sealed vocabulary', () => {
+    const declared = new Set<string>();
+    for (const capability of catalog.all) {
+      for (const scope of capability.policy.resourceScopes) declared.add(scope);
+    }
+    for (const scope of ['firewall.alias', 'core.services', 'system.status']) declared.add(scope);
+
+    // A scope a capability declares but ALLOWED_RESOURCES cannot name is a trap: the operator
+    // writes the obvious list and a tool silently disappears.
+    for (const scope of declared) expect(KNOWN_RESOURCE_SCOPES.has(scope)).toBe(true);
   });
 });

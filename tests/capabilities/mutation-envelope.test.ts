@@ -132,7 +132,13 @@ function dispatch(
 ): Promise<CapabilityResult> {
   const dispatcher = createCapabilityDispatcher(
     new CapabilityCatalog([capability]),
-    { readOnly: false, allowedResourceScopes: null, enabledFeatureFlags: new Set<never>() },
+    {
+      readOnly: false,
+      // A write is never authorized by an absent allow-list, so the envelope harness names its
+      // own scope explicitly.
+      allowedResourceScopes: new Set(['test.envelope']),
+      enabledFeatureFlags: new Set<never>()
+    },
     undefined,
     {},
     {},

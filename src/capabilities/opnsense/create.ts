@@ -62,7 +62,7 @@ export function createOPNsenseCreateCapability(aliasAdapter: OPNsenseAliasAdapte
     },
     policy: {
       effect: 'firewall-write',
-      requiredFeatureFlags: [],
+      requiredFeatureFlags: ['experimental-alias-write'],
       backup: 'strict',
       audit: 'required',
       confirmation: 'elicitation',

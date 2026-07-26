@@ -884,10 +884,10 @@ describe('effect-aware cancellation and timeout handling', () => {
             );
           })
       });
-      const pending = dispatcherFor([capability]).dispatch(
-        request(),
-        stdioContext({ signal: controller.signal })
-      );
+      const pending = dispatcherFor(
+        [capability],
+        policyOptions({ allowedResourceScopes: new Set(['kernel.read']) })
+      ).dispatch(request(), stdioContext({ signal: controller.signal }));
 
       controller.abort();
       await observedAbort.promise;
@@ -913,7 +913,10 @@ describe('effect-aware cancellation and timeout handling', () => {
           }, 100);
         })
     });
-    const pending = dispatcherFor([capability]).dispatch(request(), stdioContext());
+    const pending = dispatcherFor(
+      [capability],
+      policyOptions({ allowedResourceScopes: new Set(['kernel.read']) })
+    ).dispatch(request(), stdioContext());
     let dispatchSettled = false;
     const observed = pending.then((result) => {
       dispatchSettled = true;
@@ -946,10 +949,10 @@ describe('effect-aware cancellation and timeout handling', () => {
           }, 100);
         })
     });
-    const pending = dispatcherFor([capability]).dispatch(
-      request(),
-      stdioContext({ signal: controller.signal })
-    );
+    const pending = dispatcherFor(
+      [capability],
+      policyOptions({ allowedResourceScopes: new Set(['kernel.read']) })
+    ).dispatch(request(), stdioContext({ signal: controller.signal }));
     controller.abort();
 
     const result = await pending;
@@ -1128,10 +1131,10 @@ describe('effect-aware cancellation and timeout handling', () => {
         }
       });
 
-      const result = await dispatcherFor([capability]).dispatch(
-        request(),
-        stdioContext({ signal: controller.signal })
-      );
+      const result = await dispatcherFor(
+        [capability],
+        policyOptions({ allowedResourceScopes: new Set(['kernel.read']) })
+      ).dispatch(request(), stdioContext({ signal: controller.signal }));
 
       expectRefusal(result, expected);
       expect(JSON.stringify(result)).not.toContain('SENTINEL');

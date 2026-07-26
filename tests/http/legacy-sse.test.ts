@@ -13,6 +13,7 @@ import { CapabilityCatalog } from '../../src/capabilities/catalog.js';
 import { dispatchCapability } from '../../src/capabilities/dispatch.js';
 import { defineCapability } from '../../src/capabilities/kernel.js';
 import { loadRuntimeConfig } from '../../src/config/runtime-config.js';
+import { KNOWN_RESOURCE_SCOPES } from '../../src/capabilities/resource-scopes.js';
 import { startHttp, type HttpRuntime } from '../../src/http/runtime.js';
 import { connectLegacy } from '../helpers/connect.js';
 import { createMutationFixture } from '../fixtures/capabilities.js';
@@ -37,14 +38,26 @@ interface BlockingCapabilityFixture {
 }
 
 function application(enabled: boolean, catalog?: CapabilityCatalog) {
+  const runtime = loadRuntimeConfig({
+    READ_ONLY: 'false',
+    MCP_HTTP_ENABLED: 'true',
+    MCP_HTTP_TOKEN: TOKEN,
+    MCP_ALLOWED_ORIGINS: ORIGIN,
+    MCP_LEGACY_SSE_ENABLED: enabled ? 'true' : 'false'
+  });
+  // ALLOWED_RESOURCES only accepts catalogued scopes, and these fixtures declare synthetic ones, so
+  // the scope set is supplied directly rather than through the validated environment.
   return createApplicationContext(
-    loadRuntimeConfig({
-      READ_ONLY: 'false',
-      MCP_HTTP_ENABLED: 'true',
-      MCP_HTTP_TOKEN: TOKEN,
-      MCP_ALLOWED_ORIGINS: ORIGIN,
-      MCP_LEGACY_SSE_ENABLED: enabled ? 'true' : 'false'
-    }),
+    {
+      ...runtime,
+      allowedResourceScopes: new Set([
+        ...KNOWN_RESOURCE_SCOPES,
+        'test.read',
+        'test.write',
+        'test.blocking',
+        'test.legacy'
+      ])
+    },
     catalog
   );
 }
@@ -79,7 +92,9 @@ function createBlockingCapabilityFixture(
     transports: ['http'],
     policy: {
       effect,
-      resourceScopes: [],
+      // A capability declaring no scope cannot be named by any allow-list, so it could never be
+      // authorized once one exists. This fixture exercises admission slots, not scope policy.
+      resourceScopes: ['test.blocking'],
       requiredFeatureFlags: [],
       backup: 'none',
       audit: 'none',
@@ -765,7 +780,7 @@ describe('isolated legacy SSE compatibility', () => {
       transports: ['http'],
       policy: {
         effect: 'read',
-        resourceScopes: [],
+        resourceScopes: ['test.legacy'],
         requiredFeatureFlags: [],
         backup: 'none',
         audit: 'none',
@@ -904,7 +919,7 @@ describe('isolated legacy SSE compatibility', () => {
       transports: ['http'] as const,
       policy: {
         effect: 'read' as const,
-        resourceScopes: [],
+        resourceScopes: ['test.legacy'],
         requiredFeatureFlags: [],
         backup: 'none' as const,
         audit: 'none' as const,

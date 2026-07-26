@@ -104,6 +104,10 @@ async function withTarget(
   );
   vi.stubEnv('OPNSENSE_CONFIG_FILE', configFile);
   vi.stubEnv('READ_ONLY', 'false');
+  // Alias writes are experimental: they require the exact flag and an explicitly named scope, the
+  // same triple the disposable-VM runner uses.
+  vi.stubEnv('ENABLED_FEATURE_FLAGS', 'experimental-alias-write');
+  vi.stubEnv('ALLOWED_RESOURCES', 'server.status,system.status,core.services,firewall.alias');
 
   const runtime = createDefaultApplicationRuntime();
   const connection = await connect(runtime.application, {

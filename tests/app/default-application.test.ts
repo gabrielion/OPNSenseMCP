@@ -19,6 +19,7 @@ import { CapabilityCatalog } from '../../src/capabilities/catalog.js';
 import { dispatchCapability } from '../../src/capabilities/dispatch.js';
 import { defineCapability } from '../../src/capabilities/kernel.js';
 import type { RuntimeConfig } from '../../src/config/runtime-config.js';
+import { KNOWN_RESOURCE_SCOPES } from '../../src/capabilities/resource-scopes.js';
 import { createMutationFixture, createReadFixture } from '../fixtures/capabilities.js';
 import { connectLegacy } from '../helpers/connect.js';
 import { startSyntheticOPNsenseTarget } from '../support/https-opnsense-mock.js';
@@ -37,7 +38,9 @@ afterEach(() => {
 function writableConfig(): RuntimeConfig {
   return {
     readOnly: false,
-    allowedResourceScopes: null,
+    // A write is never authorized by an absent allow-list, so this writable harness names the
+    // scopes its fixtures declare.
+    allowedResourceScopes: new Set([...KNOWN_RESOURCE_SCOPES, 'test.read', 'test.write']),
     enabledFeatureFlags: new Set(),
     requestStateKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
     http: {

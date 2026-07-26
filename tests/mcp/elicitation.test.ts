@@ -26,7 +26,9 @@ import { connectModern, MCP_ERAS } from '../helpers/connect.js';
 function config(): RuntimeConfig {
   return {
     readOnly: false,
-    allowedResourceScopes: null,
+    // A write is never authorized by an absent allow-list, so the confirmation harness names the
+    // scope its mutation fixture declares.
+    allowedResourceScopes: new Set(['test.read', 'test.write']),
     enabledFeatureFlags: new Set(),
     requestStateKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
     http: {

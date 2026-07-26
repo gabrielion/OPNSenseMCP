@@ -110,7 +110,11 @@ function harness(adapter: OPNsenseAliasAdapter, services: MutationEnvelopeServic
     | undefined;
   const dispatcher = createCapabilityDispatcher(
     new CapabilityCatalog([createOPNsenseCreateCapability(adapter)]),
-    { readOnly: false, allowedResourceScopes: null, enabledFeatureFlags: new Set<never>() },
+    {
+      readOnly: false,
+      allowedResourceScopes: new Set(['firewall.alias']),
+      enabledFeatureFlags: new Set(['experimental-alias-write' as const])
+    },
     (installed) => {
       completion = installed;
     },

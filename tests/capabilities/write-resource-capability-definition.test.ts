@@ -141,7 +141,11 @@ function dispatch(
 ): Promise<CapabilityResult> {
   const dispatcher = createCapabilityDispatcher(
     new CapabilityCatalog([capability]),
-    { readOnly: false, allowedResourceScopes: null, enabledFeatureFlags: new Set<never>() },
+    {
+      readOnly: false,
+      allowedResourceScopes: new Set(['test.resource']),
+      enabledFeatureFlags: new Set<never>()
+    },
     undefined,
     {},
     {},
@@ -209,7 +213,11 @@ describe('defineWriteResourceCapability', () => {
     // Elicitation needs a completion installed, exactly as the MCP layer does at startup.
     const dispatcher = createCapabilityDispatcher(
       new CapabilityCatalog([capability]),
-      { readOnly: false, allowedResourceScopes: null, enabledFeatureFlags: new Set<never>() },
+      {
+        readOnly: false,
+        allowedResourceScopes: new Set(['test.resource']),
+        enabledFeatureFlags: new Set<never>()
+      },
       () => undefined,
       {},
       {},

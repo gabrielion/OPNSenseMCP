@@ -2,6 +2,7 @@
 import { randomBytes } from 'node:crypto';
 import { posix, win32 } from 'node:path';
 import * as z from 'zod/v4';
+import { KNOWN_RESOURCE_SCOPES } from '../capabilities/resource-scopes.js';
 import { FeatureFlagSchema, type FeatureFlag } from './feature-flags.js';
 
 const BooleanTextSchema = z.enum(['true', 'false']).transform((value) => value === 'true');
@@ -104,6 +105,15 @@ const EnvironmentSchema = z
       });
     }
 
+    for (const scope of value.ALLOWED_RESOURCES) {
+      if (!KNOWN_RESOURCE_SCOPES.has(scope)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'unknown resource scope',
+          path: ['ALLOWED_RESOURCES']
+        });
+      }
+    }
     for (const flag of value.ENABLED_FEATURE_FLAGS) {
       if (!FeatureFlagSchema.safeParse(flag).success) {
         context.addIssue({

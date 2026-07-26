@@ -7,7 +7,8 @@ import type * as z from 'zod/v4';
 import { FeatureFlagSchema } from '../config/feature-flags.js';
 import type { FeatureFlag } from '../config/feature-flags.js';
 import { createCanonicalJsonSnapshot } from '../security/canonical-json.js';
-import { areDeclaredResourceScopesAllowed } from './exposure.js';
+import { PRODUCT_MCP_NAMES } from './resource-scopes.js';
+import { areResourceScopesAllowedForEffect } from './exposure.js';
 import type {
   ChangeSummary,
   AuditPhase,
@@ -284,6 +285,11 @@ export interface TypedResourceCapabilityDefinition<
 export interface CapabilityCatalogView {
   getByMcpName(name: string): CapabilityDefinition | undefined;
   listExposed(context: ExposureContext): readonly CapabilityDefinition[];
+  /**
+   * Every capability the catalogue holds, exposed or not. Used ONLY by the construction-time
+   * envelope-services guard, which must not depend on the policy that can hide a write.
+   */
+  listAll?(): readonly CapabilityDefinition[];
 }
 
 export interface CapabilityPolicyOptions {
@@ -1197,17 +1203,31 @@ export function hasVisibleResourceScopes(
   capability: CapabilityDefinition,
   allowedResourceScopes: ReadonlySet<string> | null
 ): boolean {
+  const effect = capability.policy.effect;
   const selectable = resourceSelectableScopes.get(capability);
   if (selectable === undefined) {
-    return areDeclaredResourceScopesAllowed(
+    return areResourceScopesAllowedForEffect(
       capability.policy.resourceScopes,
-      allowedResourceScopes
+      allowedResourceScopes,
+      effect
     );
   }
+  // A non-read effect is never authorized by an absent allow-list, so a selectable write scope must
+  // be named explicitly before it can be listed or dispatched.
+  if (effect !== 'read' && allowedResourceScopes === null) return false;
   return (
     selectable.length > 0 &&
     (allowedResourceScopes === null || selectable.some((scope) => allowedResourceScopes.has(scope)))
   );
+}
+
+/**
+ * A catalogued product tool that is not registered has no configured target; a name outside the
+ * product vocabulary is genuinely unknown. Answering both with UNKNOWN_CAPABILITY left a client
+ * unable to tell "you are not configured" from "you invented a tool".
+ */
+function absentCapabilityRefusal(name: string): CapabilityResult {
+  return refusal(PRODUCT_MCP_NAMES.has(name) ? 'TARGET_UNAVAILABLE' : 'UNKNOWN_CAPABILITY');
 }
 
 function authorizeRequest(
@@ -1220,10 +1240,10 @@ function authorizeRequest(
   try {
     capability = catalog.getByMcpName(request.name);
   } catch {
-    return { kind: 'refused', result: refusal('UNKNOWN_CAPABILITY') };
+    return { kind: 'refused', result: absentCapabilityRefusal(request.name) };
   }
   if (capability === undefined) {
-    return { kind: 'refused', result: refusal('UNKNOWN_CAPABILITY') };
+    return { kind: 'refused', result: absentCapabilityRefusal(request.name) };
   }
 
   let visibleResourceScopes: readonly string[] | undefined;
@@ -1250,14 +1270,18 @@ function authorizeRequest(
     }
     if (selectable === undefined) {
       if (
-        !areDeclaredResourceScopesAllowed(
+        !areResourceScopesAllowedForEffect(
           capability.policy.resourceScopes,
-          options.allowedResourceScopes
+          options.allowedResourceScopes,
+          capability.policy.effect
         )
       ) {
         return { kind: 'refused', result: refusal('RESOURCE_NOT_ALLOWED') };
       }
     } else {
+      if (capability.policy.effect !== 'read' && options.allowedResourceScopes === null) {
+        return { kind: 'refused', result: refusal('RESOURCE_NOT_ALLOWED') };
+      }
       visibleResourceScopes = Object.freeze(
         options.allowedResourceScopes === null
           ? [...selectable]
@@ -1358,7 +1382,11 @@ function authorizeRequest(
       }
       effectiveResourceScopes = Object.freeze([...resolvedScopes].sort());
       if (
-        !areDeclaredResourceScopesAllowed(effectiveResourceScopes, options.allowedResourceScopes)
+        !areResourceScopesAllowedForEffect(
+          effectiveResourceScopes,
+          options.allowedResourceScopes,
+          capability.policy.effect
+        )
       ) {
         return { kind: 'refused', result: refusal('RESOURCE_NOT_ALLOWED') };
       }
@@ -1824,9 +1852,11 @@ export function createCapabilityDispatcher(
   });
   const runtime = validateRuntime(testRuntime);
   if (mutationServices === undefined) {
-    // A capability that runs the mutation envelope cannot be exposed without its services. Evaluate
-    // exposure across both transports under the sealed options; the view exposes only listExposed.
-    const exposesEnvelopeCapability = (['stdio', 'http'] as const).some((transport) =>
+    // A capability that runs the mutation envelope cannot be exposed without its services. The
+    // question is not whether THESE options expose it, but whether any options could: a dispatcher
+    // built without services must never hold such a capability, so that widening the allow-list
+    // later cannot turn a silent absence into an unprotected write.
+    const exposedEnvelopeCapability = (['stdio', 'http'] as const).some((transport) =>
       catalog
         .listExposed({
           readOnly: options.readOnly,
@@ -1836,6 +1866,14 @@ export function createCapabilityDispatcher(
         })
         .some((capability) => isMutationEnvelopeCapability(capability))
     );
+    // Exposure alone is no longer sufficient evidence: a write is now hidden by an absent
+    // allow-list, so a dispatcher could hold one while listing none. Ask the catalogue for
+    // everything it holds, so widening the allow-list later cannot reveal an unprotected
+    // capability on an already-built dispatcher.
+    const holdsEnvelopeCapability = (catalog.listAll?.() ?? []).some((capability) =>
+      isMutationEnvelopeCapability(capability)
+    );
+    const exposesEnvelopeCapability = exposedEnvelopeCapability || holdsEnvelopeCapability;
     if (exposesEnvelopeCapability) {
       throw new Error('Mutation envelope services are required to expose a write capability');
     }

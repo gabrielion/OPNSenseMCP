@@ -47,7 +47,7 @@ export function createOPNsenseDeleteCapability(aliasAdapter: OPNsenseAliasAdapte
     refusalDetailVocabulary: { operations: ['delete'], fields: ['resource', 'id'] },
     policy: {
       effect: 'firewall-write',
-      requiredFeatureFlags: [],
+      requiredFeatureFlags: ['experimental-alias-write'],
       backup: 'strict',
       audit: 'required',
       confirmation: 'elicitation',

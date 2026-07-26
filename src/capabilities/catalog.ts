@@ -64,6 +64,10 @@ export class CapabilityCatalog {
   listExposed(context: ExposureContext): readonly CapabilityDefinition[] {
     return Object.freeze(this.all.filter((capability) => isExposed(capability, context)));
   }
+
+  listAll(): readonly CapabilityDefinition[] {
+    return this.all;
+  }
 }
 
 export function createProductCapabilityCatalog(
