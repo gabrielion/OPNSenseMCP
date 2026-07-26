@@ -1,9 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
 import type { CapabilityResult, ResourceRefusalDetails } from '../../src/capabilities/types.js';
-import { formatCapabilityResult, refusalResult } from '../../src/mcp/results.js';
+import { REFUSAL_MESSAGES, formatCapabilityResult, refusalResult } from '../../src/mcp/results.js';
+import { KERNEL_REFUSAL_MESSAGES } from '../../src/capabilities/kernel.js';
 
 describe('bounded resource refusal results', () => {
+  it('never claims a durable pre-change backup while the backup root is per-process', () => {
+    // src/app/default-application.ts creates the backup root with mkdtempSync and removes it in a
+    // shutdown closer, so no message may tell an operator to consult it afterwards. P0-C makes the
+    // store durable; until then the product must not claim it.
+    const claims = Object.entries(REFUSAL_MESSAGES)
+      .filter(([, message]) => /backup is preserved|preserved backup/iu.test(message))
+      .map(([code]) => code);
+
+    expect(claims).toEqual([]);
+  });
+
+  it('keeps the kernel and MCP refusal tables byte-identical', () => {
+    expect(REFUSAL_MESSAGES).toEqual(KERNEL_REFUSAL_MESSAGES);
+  });
+
   it.each([
     {
       code: 'UNKNOWN_RESOURCE' as const,

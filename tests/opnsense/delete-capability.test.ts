@@ -137,6 +137,9 @@ describe('opn_delete firewall alias', () => {
       id: SEED_UUID
     });
     expect(result).toMatchObject({ kind: 'refused', code: 'OUTCOME_UNVERIFIED' });
-    if (result.kind === 'refused') expect(result.message).toContain('preserved');
+    if (result.kind === 'refused') {
+      expect(result.message).toContain('Do not retry blindly');
+      expect(result.message).not.toMatch(/preserved/iu);
+    }
   });
 });

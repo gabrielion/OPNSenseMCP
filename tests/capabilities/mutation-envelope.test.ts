@@ -252,7 +252,11 @@ describe('mutation envelope lifecycle', () => {
     );
     expect(result).toMatchObject({ kind: 'refused', code: 'OUTCOME_INDETERMINATE' });
     if (result.kind === 'refused') {
-      expect(result.message).toContain('preserved');
+      // The backup is still taken, and the operator is still told not to retry blindly; what the
+      // message may NOT do is promise a preserved backup, because the store is removed at shutdown
+      // until P0-C makes it durable.
+      expect(result.message).toContain('Do not retry blindly');
+      expect(result.message).not.toMatch(/preserved/iu);
       expect(Object.keys(result).sort()).toEqual(['code', 'kind', 'message']);
     }
     expect(harness.createdBackups.size).toBe(1);

@@ -43,9 +43,9 @@ const REFUSAL_MESSAGES: Readonly<Record<RefusalCode, string>> = Object.freeze({
   LOCK_UNAVAILABLE: 'Capability refused: the target mutation lock is unavailable.',
   OPERATION_NOT_AVAILABLE: 'Resource operation is not available.',
   OUTCOME_INDETERMINATE:
-    'Capability outcome is indeterminate; the pre-change backup is preserved. Do not retry blindly: reconcile the target state against the preserved backup before any further change.',
+    'Capability outcome is indeterminate. Do not retry blindly: verify the current target state before any further change.',
   OUTCOME_UNVERIFIED:
-    'Capability outcome could not be verified; the pre-change backup is preserved. Reconcile the target state against the preserved backup before any further change.',
+    'Capability outcome could not be verified. Do not retry blindly: verify the current target state before any further change.',
   PREFLIGHT_FAILED: 'Capability refused: the read-only preflight failed.',
   READ_ONLY: 'Capability is disabled in read-only mode.',
   RESOURCE_NOT_ALLOWED: 'Capability resource scope is not allowed.',

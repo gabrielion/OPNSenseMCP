@@ -196,7 +196,8 @@ describe('opn_create firewall alias', () => {
     const result = await harness(adapter, services).create(VALID);
     expect(result).toMatchObject({ kind: 'refused', code: 'OUTCOME_UNVERIFIED' });
     if (result.kind === 'refused') {
-      expect(result.message).toContain('preserved');
+      expect(result.message).toContain('Do not retry blindly');
+      expect(result.message).not.toMatch(/preserved/iu);
       expect(JSON.stringify(result)).not.toContain('backup-');
     }
   });
