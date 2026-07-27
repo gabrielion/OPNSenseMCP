@@ -395,3 +395,25 @@ P0-B slice 6 (truthful public documentation): complete (commits 44acead, 0d4d0d9
     prose so reflowing a paragraph cannot silently drop a promise. 15/15.
   - Gate: verify exit 0, 1020/1020 across 58 files, lint/format/typecheck/license green.
     `npm run evidence:check` remains RED by design until the end-of-P0-B re-seal.
+
+P0-B slice 7 (commit-bound disposable-VM attestation): infrastructure complete; live evidence
+  BLOCKED pending a valid disposable-image factory credential (commits 6113770, f002f14).
+  - The producer now refuses a dirty tree and a non-absolute output, binds the exact tested commit,
+    tree, policy inputs, pinned image and fixed checks, and writes canonical schema-v2 JSON only
+    after lifecycle, VM cleanup and residue proof. The verifier returns 0 coherent, 2 stale and
+    1 unreadable, and permits a later P0-C replacement without widening the evidence-only delta.
+  - TDD: the initial missing producer/verifier contract failed first; commit/tree drift, incomplete
+    VM cleanup, wrong image pin, symlink evidence, missing-parent durability and later evidence
+    replacement each received a focused red/green proof. Independent task review found no open
+    source-level Critical or Important issue.
+  - Fresh gate on f002f14 under Node 22.23.1: license passed; verify passed 58 files / 1043 tests;
+    both conformance eras passed with zero failures or warnings; git diff --check passed.
+  - The first live attempt was interrupted at the masked input prompt because no interactive
+    terminal was available; its cleanup reported vmStopped=true and residueFree=true. A second
+    attempt used a native hidden macOS dialog connected to stdin only by an anonymous pipe. It
+    reached bootstrap, but bootstrap authentication did not complete; package installation and
+    every alias lifecycle check remained false, while cleanup again reported vmStopped=true and
+    residueFree=true. An independent `vm:status` check reported STOPPED.
+  - No alias write occurred, no evidence file was created, and no attestation was synthesized.
+    Resume only by entering the valid disposable-image factory credential through the hidden native
+    dialog; never place it in chat, a command argument, a log or a tracked file.
