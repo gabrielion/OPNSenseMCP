@@ -113,10 +113,18 @@ function writableToolSurface(value) {
   });
 }
 
+/**
+ * Alias writes are experimental: they require READ_ONLY=false, the exact feature flag, and an
+ * allow-list that explicitly names firewall.alias. The allow-list filters reads as well, so every
+ * scope this lifecycle still needs is named — including `server.status`, without which
+ * `server_status` would disappear and the six-tool surface assertion would fail.
+ */
 function lifecycleEnvironment(configPath) {
   return Object.freeze({
     PATH: process.env.PATH ?? '',
     READ_ONLY: 'false',
+    ENABLED_FEATURE_FLAGS: 'experimental-alias-write',
+    ALLOWED_RESOURCES: 'server.status,system.status,core.services,firewall.alias',
     OPNSENSE_CONFIG_FILE: configPath,
     MCP_REQUEST_STATE_SECRET: randomBytes(32).toString('base64url')
   });
