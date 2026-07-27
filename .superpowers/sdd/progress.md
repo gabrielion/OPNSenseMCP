@@ -272,7 +272,126 @@ P0-A adversarial workflow review (4 lenses, each finding independently refuted):
   - Proven: the full preparation under umask 022, 027 and 077 all produce cf9de45ca009..., equal to
     the sealed evidence. The overclaiming comment was corrected to state exactly what was verified.
 
+P0-A: COMPLETE and CLOSED (commits f91128f..2d39e10, pushed to origin/main).
+  - PUBLIC CI GREEN on 2d39e10: verify, compatibility-floor and protocol all success
+    (run 30153126218). This is the increment's real exit gate, observed rather than assumed.
+  - Local gates on the same tree: license:check, verify = 58 files / 1005 tests, conformance 13/13
+    in both protocol eras, git diff --check clean, no residue.
+  - `git diff 786f092..2d39e10 -- src/` is EMPTY: the entire increment changed zero production
+    source. The only non-test changes are one eslint.config.js line (.d.mts) and vitest.config.ts
+    (test grouping).
+  - Known flake, NOT introduced here and NOT claimed fixed: tests/conformance/run-conformance.test.mjs
+    "destroys the held upstream response when the upstream ClientRequest errors" failed once with
+    read ECONNRESET under full-suite load. It passes 3/3 in isolation and 175/175 for its file. The
+    package fixtures were moved to their own sequential group to remove the contention this
+    increment added; that is a mitigation, not a proof of stability.
+
+=== P0-B (truthful public boundary) — IN PROGRESS ===
+Plan: docs/superpowers/plans/2026-07-26-p0-b-truthful-public-boundary.md (commit 96dda31), 9 slices.
+  Five slices go beyond the approved spec, each answering a defect the five-lens assessment found and
+  an independent verifier confirmed: the false backup promise, the blind confirmation, the unvalidated
+  allow-list, UNKNOWN_CAPABILITY for an unconfigured target, and the per-commit evidence pin.
+  Recorded deviation: the spec's literal ALLOWED_RESOURCES value (line 184) hides server_status,
+  because server_status declares the uncatalogued scope `server.status`; the runner will use the
+  four-token value and Task 4 catalogues the scope.
+
+P0-B slice 1 (truthful refusal text): complete (commit f62b25f).
+  - OUTCOME_INDETERMINATE and OUTCOME_UNVERIFIED claimed "the pre-change backup is preserved" and told
+    the operator to reconcile against it. The backup root is mkdtempSync under tmpdir and a shutdown
+    closer rmSync's it (src/app/default-application.ts:94-126), so the instruction pointed at a file
+    that does not survive the process. Both messages now state only what is true.
+  - The text lived in THREE copies (kernel.ts, results.ts, and an independent copy in
+    tests/security/policy-kernel.test.ts). A new test pins the first two byte-identical; another
+    forbids any message from claiming a preserved backup while the store is per-process.
+  - One assertion demanded the word 'preserved' (mutation-envelope.test.ts:255) — the assertion itself
+    encoded the false claim. Re-pointed, not deleted: it now requires the actionable instruction AND
+    forbids any preservation promise. Same treatment in create-/delete-capability tests.
+  - Gate: verify 1007/1007, conformance untouched, lint/format/typecheck/license green.
+
+P0-B slice 8 (evidence pin scoping): complete (commit ca95423), PULLED FORWARD out of plan order.
+  - Reason: slice 1 changed src/, which changed the packaged content, which broke the sealed-digest
+    pin inside `npm run verify` — exactly the failure mode the assessment predicted, on the first
+    slice. Deferring the fix would have meant a red per-commit gate for the whole increment.
+  - `npm run verify` keeps every installation proof and now asserts the sealed evidence still
+    describes THIS package (name, version, well-formed portable digest). Digest EQUALITY moved to
+    `npm run evidence:check` (new vitest project `evidence`, excluded from the default run).
+  - CURRENT STATE, deliberate: `npm run evidence:check` is RED
+    (built a73438bf... vs sealed cf9de45c...). That is the gate working: the package really did
+    change. It is re-sealed by its real producer (`npm run smoke:opencode`) at the end of P0-B, never
+    by hand. Public CI runs `npm run verify` only, so CI stays green.
+
+P0-B slice 2 (descriptive write confirmation): complete (commit 3e3b7df).
+  - Before: src/mcp/confirmation.ts sent one fixed string for every create and delete, so the human
+    gate was a blind yes/no. After: `create firewall.alias "lab_hosts" (1 entry)` /
+    `delete firewall.alias "<uuid>"`, asserted end to end in BOTH MCP eras.
+  - Design fact that shaped it: the effect-plan digest is computed inside executeMutationEnvelope
+    step 2, i.e. AFTER confirmation (kernel.ts:1566), so it could not be rendered. The capability
+    supplies `summarizeChange(resolvedInput)`; the kernel seals it (control characters stripped,
+    subject bounded to 72 code points, other fields to 32). Required by the type, so no future write
+    can be added without describing itself.
+  - The sealed capability-definition key allow-list correctly refused `summarizeChange` until it was
+    declared there — the AGENTS.md guard working as intended.
+  - Test placement corrected mid-slice: a "hostile alias name" test at the integration level would
+    have passed WITHOUT exercising the boundary, because AliasCreateAttributesSchema already limits
+    names to ^[A-Za-z0-9_]{1,32}$. The sealing test now lives at the kernel boundary with a fixture
+    capability that deliberately returns newlines and 200 characters.
+  - Two lint errors were fixed at the root rather than suppressed: `[...string]` became Array.from
+    (code-point iteration is what the bound counts), and the control-character assertion stopped
+    inspecting the JSON-serialised form, where such characters are escaped and the check proved
+    nothing.
+  - Gate: verify 1010/1010, conformance exit 0, lint/format/typecheck/license green.
+
+P0-B slices 3+4+5 (write containment, scope vocabulary, target routing): complete (commit 28905e1).
+  - Absent ALLOWED_RESOURCES = all reads, ZERO writes. Enforced at all three deciding points
+    (catalog.isExposed, authorizeRequest scope rung, post-resolution recheck) so a direct call
+    cannot bypass what listing hides. `experimental-alias-write` added to FeatureFlagSchema and
+    required by opn_create/opn_delete.
+  - src/capabilities/resource-scopes.ts seals the scope vocabulary (descriptor keys + server.status)
+    and PRODUCT_MCP_NAMES. ALLOWED_RESOURCES tokens are validated: a typo is now a startup error,
+    not a silently narrower surface.
+  - A catalogued-but-unregistered product tool answers TARGET_UNAVAILABLE instead of
+    UNKNOWN_CAPABILITY.
+  - STRENGTHENED, not merely adapted: the envelope-services guard used exposure as its evidence, and
+    since a write is now hidden by default it would have gone silent. Two tests caught it. The guard
+    now asks the catalogue via a new `listAll()` on CapabilityCatalogView, so a dispatcher built
+    without services cannot even HOLD a write capability — stricter than before this increment.
+  - Test fallout, all setup and never assertions: ~60 harness sites had to name their scope. Several
+    fixtures declared `resourceScopes: []`, which under an explicit allow-list can never be
+    authorized; they were given real scopes rather than relaxing the rule.
+  - Two process failures worth remembering: two scripted replacements silently did nothing because
+    prettier had reformatted the target text, costing two full gate cycles. Edits are now verified
+    to have landed before any gate is run.
+  - Gate: verify 1016/1016, conformance exit 0, lint/format/typecheck/license green.
+
 Ledger publication note (2026-07-25): `.superpowers/sdd/progress.md` is tracked and public in this
   repository (it already was at 786f092) even though `.gitignore` lists `.superpowers/sdd/`, so
   `git add` needs `-f`. Leaving it stale would publish a false status, so it is kept current.
   Whether it should remain public is an open P0-B sanitation decision for the owner.
+
+P0-B slice 6 (truthful public documentation): complete (commits 44acead, 0d4d0d9, ead64c5).
+  - Method: five parallel readers, one per area, each confronting every public claim with the code
+    path that decides it, then independent refuters on each finding. 98 claims checked, 28 findings
+    ranked. The subject was MY OWN rewrite of README.md, and it did not survive contact: the
+    envelope order was inverted, elicitation was described as HIDING write tools when it refuses at
+    call time, and the ALLOWED_RESOURCES example given would have broken any server that copied it
+    (the allow-list filters reads too, so server_status and both documented reads would vanish).
+    Writing honestly is not the same as writing verifiably; only the confrontation with the source
+    separates them.
+  - REAL PRODUCT DEFECT found by this pass and fixed (44acead): opn_delete accepted any alias UUID,
+    while its observed-state digest AND its outcome verifier both read HOST aliases only. Deleting a
+    network or GeoIP alias would have passed revalidation and been reported to the caller as a
+    VERIFIED SUCCESS, with the capability unable to observe the target at all. Preflight now refuses
+    with PREFLIGHT_FAILED before the first write; the new test proves no delete call is issued.
+  - Regression from slice 3 caught here (0d4d0d9): scripts/vm/product3-alias.mjs still started the
+    server with READ_ONLY=false alone, so the containment work had silently disabled the disposable
+    VM lifecycle runner. Slice 7 would have failed at its first check.
+  - Documentation corrections, each anchored in code: real 11-step envelope order (audit intent
+    BEFORE backup); the three listing conditions vs the call-time elicitation condition; a complete
+    ALLOWED_RESOURCES example; `configure` ignores OPNSENSE_CONFIG_FILE, needs a TTY, never
+    overwrites; backup deleted at shutdown, no restore and no rollback; audit is an in-memory ring of
+    1024; opn_list returns host entries only. Unproven claims about live VM mutation and the
+    100-alias pagination ceiling are now stated as explicit NON-claims.
+  - tests/foundation/documentation.test.ts asserts the corrected wording on whitespace-normalized
+    prose so reflowing a paragraph cannot silently drop a promise. 15/15.
+  - Gate: verify exit 0, 1020/1020 across 58 files, lint/format/typecheck/license green.
+    `npm run evidence:check` remains RED by design until the end-of-P0-B re-seal.
