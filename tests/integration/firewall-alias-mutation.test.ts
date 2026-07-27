@@ -141,7 +141,7 @@ describe.each(MCP_ERAS)('$label firewall-alias reversible mutation', ({ connect 
       // gate that justifies allowing writes a blind yes/no.
       expect(elicitationMessages).toEqual([
         'Apply this exact OPNsense change? create firewall.alias "lab_hosts" (1 entry)',
-        `Apply this exact OPNsense change? delete firewall.alias "${CREATED_UUID}"`
+        `Apply this exact OPNsense change? delete firewall.alias "${CREATED_UUID}" (host alias)`
       ]);
     });
   });

@@ -93,6 +93,13 @@ export function createOPNsenseDeleteCapability(aliasAdapter: OPNsenseAliasAdapte
     },
     preflight: async (input, context) => {
       const items = await readHostAliases(aliasAdapter, context.signal);
+      // The observed state and the outcome verification both read HOST aliases only. Deleting any
+      // other alias type would therefore pass revalidation and be reported as a verified success
+      // while this capability could not see it at all. Refuse before the first write unless the
+      // exact UUID is a host alias that exists right now.
+      if (!items.some((item) => item.uuid === input.id)) {
+        throw new Error('Alias to delete is not a visible host alias');
+      }
       return {
         observedStateDigest: aliasStateDigest(items),
         effectPlanDigest: sha256Json({
@@ -103,7 +110,7 @@ export function createOPNsenseDeleteCapability(aliasAdapter: OPNsenseAliasAdapte
       };
     },
     handler: (input, context) => aliasAdapter.deleteHostAlias(input.id, context.signal),
-    summarizeChange: (input) => ({ operation: 'delete', subject: input.id, detail: '' }),
+    summarizeChange: (input) => ({ operation: 'delete', subject: input.id, detail: 'host alias' }),
     verifyOutcome: async (input, _output, context) => {
       const items = await readHostAliases(aliasAdapter, context.signal);
       return !items.some((item) => item.uuid === input.id);

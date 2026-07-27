@@ -146,4 +146,28 @@ describe('opn_delete firewall alias', () => {
       expect(result.message).not.toMatch(/preserved/iu);
     }
   });
+
+  it('refuses to delete an alias the host-filtered view cannot see, before any write', async () => {
+    const { adapter, uuids } = statefulAliasAdapter();
+    const deleted: string[] = [];
+    const blindAdapter: OPNsenseAliasAdapter = {
+      ...adapter,
+      deleteHostAlias: (id, signal) => {
+        deleted.push(id);
+        return adapter.deleteHostAlias(id, signal);
+      }
+    };
+    const absent = '11111111-2222-3333-4444-555555555555';
+
+    const result = await harness(blindAdapter, makeServices()).remove({
+      resource: 'firewall.alias',
+      id: absent
+    });
+
+    // Both the state digest and the outcome verifier read host aliases only, so a non-host target
+    // would pass revalidation and be reported as a verified success. Refuse before the first write.
+    expect(result).toMatchObject({ kind: 'refused', code: 'PREFLIGHT_FAILED' });
+    expect(deleted).toEqual([]);
+    expect(uuids()).toContain(SEED_UUID);
+  });
 });
