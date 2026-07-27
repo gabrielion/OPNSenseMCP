@@ -41,8 +41,8 @@ function nulSeparatedPaths(output) {
   return output.split('\0').filter((entry) => entry !== '');
 }
 
-function soleEvidencePath(output) {
-  const paths = nulSeparatedPaths(output);
+function soleEvidencePath(...outputs) {
+  const paths = outputs.flatMap((output) => nulSeparatedPaths(output));
   return paths.length === 1 && paths[0] === EVIDENCE_RELATIVE_PATH;
 }
 
@@ -113,20 +113,20 @@ async function gitStateIsCoherent(repositoryRoot, attestation) {
   );
   if (ancestor.code !== 0) return false;
 
-  const testedEvidence = await runGit(
-    ['ls-tree', '--name-only', '-z', attestation.commit, '--', EVIDENCE_RELATIVE_PATH],
-    repositoryRoot
-  );
-  if (testedEvidence.code !== 0 || testedEvidence.stdout !== '') return false;
-
   if (head === attestation.commit) {
-    const trackedChanges = await runGit(['diff', '--quiet', 'HEAD', '--'], repositoryRoot);
-    if (trackedChanges.code !== 0) return false;
+    const trackedChanges = await runGit(
+      ['diff', '--name-only', '-z', 'HEAD', '--'],
+      repositoryRoot
+    );
     const untracked = await runGit(
       ['ls-files', '--others', '--exclude-standard', '-z'],
       repositoryRoot
     );
-    return untracked.code === 0 && soleEvidencePath(untracked.stdout);
+    return (
+      trackedChanges.code === 0 &&
+      untracked.code === 0 &&
+      soleEvidencePath(trackedChanges.stdout, untracked.stdout)
+    );
   }
 
   const changedPaths = await runGit(

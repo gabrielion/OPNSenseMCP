@@ -460,6 +460,38 @@ describe('commit-bound VM attestation verifier', () => {
     expect(afterCommit).toEqual({ code: 0, stdout: '', stderr: '' });
   });
 
+  it('accepts replacement evidence when the tested commit contains older evidence', async () => {
+    const fixture = await verifierFixture();
+    await git(fixture.root, ['add', 'docs/evidence/product3-vm.json']);
+    await git(fixture.root, ['commit', '-qm', 'add older VM evidence']);
+    await writeFile(join(fixture.root, 'tracked.txt'), 'later tested bytes\n', 'utf8');
+    await git(fixture.root, ['add', 'tracked.txt']);
+    await git(fixture.root, ['commit', '-qm', 'create later tested commit']);
+
+    const testedCommit = await git(fixture.root, ['rev-parse', 'HEAD']);
+    const testedTree = await git(fixture.root, ['rev-parse', 'HEAD^{tree}']);
+    await writeFile(fixture.evidencePath, vmAttestation(testedCommit, testedTree), 'utf8');
+
+    const beforeCommit = await runVerifier(fixture.root);
+    expect(beforeCommit).toEqual({ code: 0, stdout: '', stderr: '' });
+
+    await git(fixture.root, ['add', 'docs/evidence/product3-vm.json']);
+    await git(fixture.root, ['commit', '-qm', 'replace VM evidence']);
+
+    const afterCommit = await runVerifier(fixture.root);
+    expect(afterCommit).toEqual({ code: 0, stdout: '', stderr: '' });
+  });
+
+  it('rejects unrelated tracked or untracked changes in a pre-evidence state', async () => {
+    const untracked = await verifierFixture();
+    await writeFile(join(untracked.root, 'extra.txt'), 'not evidence\n', 'utf8');
+    expect(await runVerifier(untracked.root)).toEqual({ code: 2, stdout: '', stderr: '' });
+
+    const tracked = await verifierFixture();
+    await writeFile(join(tracked.root, 'tracked.txt'), 'unrelated working change\n', 'utf8');
+    expect(await runVerifier(tracked.root)).toEqual({ code: 2, stdout: '', stderr: '' });
+  });
+
   it('returns stale for an unresolved commit, a tree mismatch, or extra changed paths', async () => {
     const unresolved = await verifierFixture();
     await writeFile(
