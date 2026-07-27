@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { constants } from 'node:fs';
+import { mkdir, open, rename, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { buildVmAttestation, serializeVmAttestation } from './attestation.mjs';
 import { FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES, bootstrapProduct1b } from './product1b-bootstrap.mjs';
 import { createConnectionArtifacts } from './product1b-connection.mjs';
 import { startDisposableVm, statusDisposableVm, stopDisposableVm } from './product1b-lifecycle.mjs';
@@ -32,6 +36,167 @@ const ALIAS_ATTRIBUTES = Object.freeze({
   content: Object.freeze(['192.0.2.10']),
   description: 'Disposable Product 3 verification alias'
 });
+const MCP_PROTOCOL_VERSION = '2026-07-28';
+const MCP_CLIENT_VERSION = '0.1.0';
+const ATTESTATION_USAGE = 'Usage: product3-alias.mjs --attestation-out <absolute-path>';
+const GIT_OBJECT_PATTERN = /^[0-9a-f]{40}$/u;
+const GIT_MAX_OUTPUT_BYTES = 1024 * 1024;
+const SCENARIO_FLAGS = Object.freeze(['experimental-alias-write']);
+const SCENARIO_SCOPES = Object.freeze([
+  'server.status',
+  'system.status',
+  'core.services',
+  'firewall.alias'
+]);
+
+export class Product3AliasError extends Error {
+  constructor(code, message = code) {
+    super(message);
+    this.name = 'Product3AliasError';
+    this.code = code;
+  }
+}
+
+export function parseProduct3Arguments(arguments_) {
+  if (
+    !Array.isArray(arguments_) ||
+    arguments_.length !== 2 ||
+    arguments_[0] !== '--attestation-out' ||
+    typeof arguments_[1] !== 'string' ||
+    !isAbsolute(arguments_[1])
+  ) {
+    throw new Product3AliasError('USAGE', ATTESTATION_USAGE);
+  }
+  return Object.freeze({ attestationPath: arguments_[1] });
+}
+
+function runGit(arguments_, repositoryRoot) {
+  return new Promise((resolvePromise, reject) => {
+    execFile(
+      'git',
+      arguments_,
+      {
+        cwd: repositoryRoot,
+        encoding: 'utf8',
+        env: { PATH: process.env.PATH ?? '' },
+        maxBuffer: GIT_MAX_OUTPUT_BYTES,
+        windowsHide: true
+      },
+      (error, stdout) => {
+        if (error !== null) {
+          reject(error);
+          return;
+        }
+        resolvePromise(stdout);
+      }
+    );
+  });
+}
+
+export async function inspectGitWorktree(repositoryRoot) {
+  try {
+    const status = await runGit(
+      ['status', '--porcelain=v1', '--untracked-files=all'],
+      repositoryRoot
+    );
+    if (status !== '') return Object.freeze({ clean: false });
+    const [commitOutput, treeOutput] = await Promise.all([
+      runGit(['rev-parse', '--verify', 'HEAD^{commit}'], repositoryRoot),
+      runGit(['rev-parse', '--verify', 'HEAD^{tree}'], repositoryRoot)
+    ]);
+    const commit = commitOutput.trim();
+    const tree = treeOutput.trim();
+    if (!GIT_OBJECT_PATTERN.test(commit) || !GIT_OBJECT_PATTERN.test(tree)) {
+      throw new Product3AliasError('GIT_PREFLIGHT_FAILED');
+    }
+    return Object.freeze({ clean: true, commit, tree });
+  } catch {
+    throw new Product3AliasError('GIT_PREFLIGHT_FAILED');
+  }
+}
+
+function compatibleDirectorySyncError(error) {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    ['EBADF', 'EINVAL', 'EISDIR', 'ENOTSUP'].includes(String(error.code))
+  );
+}
+
+async function syncParentDirectory(parentPath, openFile) {
+  let handle;
+  try {
+    handle = await openFile(parentPath, constants.O_RDONLY);
+    await handle.sync();
+  } catch (error) {
+    if (!compatibleDirectorySyncError(error)) throw error;
+  } finally {
+    if (handle !== undefined) await handle.close().catch(() => undefined);
+  }
+}
+
+function directorySyncPaths(parentPath, firstCreatedPath) {
+  if (firstCreatedPath === undefined) return [parentPath];
+  if (typeof firstCreatedPath !== 'string' || !isAbsolute(firstCreatedPath)) {
+    throw new Product3AliasError('VM_ATTESTATION_WRITE_FAILED');
+  }
+  const createdRelative = relative(firstCreatedPath, parentPath);
+  if (
+    createdRelative === '..' ||
+    createdRelative.startsWith(`..${sep}`) ||
+    isAbsolute(createdRelative)
+  ) {
+    throw new Product3AliasError('VM_ATTESTATION_WRITE_FAILED');
+  }
+  const boundary = dirname(firstCreatedPath);
+  const paths = [];
+  let current = parentPath;
+  for (;;) {
+    paths.push(current);
+    if (current === boundary) return paths;
+    const next = dirname(current);
+    if (next === current) throw new Product3AliasError('VM_ATTESTATION_WRITE_FAILED');
+    current = next;
+  }
+}
+
+export async function writeVmAttestationAtomic(outputPath, attestation, options = {}) {
+  if (typeof outputPath !== 'string' || !isAbsolute(outputPath)) {
+    throw new Product3AliasError('VM_ATTESTATION_WRITE_FAILED');
+  }
+  const serialized = serializeVmAttestation(attestation);
+  const openFile = options.openFile ?? open;
+  const makeDirectory = options.makeDirectory ?? mkdir;
+  const renameFile = options.renameFile ?? rename;
+  const syncDirectory = options.syncDirectory ?? ((path) => syncParentDirectory(path, openFile));
+  const unlinkFile = options.unlinkFile ?? unlink;
+  const nonce = (options.randomBytes ?? randomBytes)(16).toString('hex');
+  const parentPath = dirname(outputPath);
+  const temporaryPath = join(parentPath, `.${basename(outputPath)}.pending-${nonce}`);
+  let handle;
+  let temporaryExists = false;
+  try {
+    const firstCreatedPath = await makeDirectory(parentPath, { recursive: true });
+    const syncPaths = directorySyncPaths(parentPath, firstCreatedPath);
+    handle = await openFile(
+      temporaryPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600
+    );
+    temporaryExists = true;
+    await handle.writeFile(serialized, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await renameFile(temporaryPath, outputPath);
+    temporaryExists = false;
+    for (const syncPath of syncPaths) await syncDirectory(syncPath);
+  } catch {
+    if (handle !== undefined) await handle.close().catch(() => undefined);
+    if (temporaryExists) await unlinkFile(temporaryPath).catch(() => undefined);
+    throw new Product3AliasError('VM_ATTESTATION_WRITE_FAILED');
+  }
+}
 
 function userCacheRoot() {
   return process.platform === 'darwin'
@@ -57,7 +222,7 @@ function emptyChecks() {
 }
 
 function summary(checks, interrupted = false, failureStage = null) {
-  const passed = !interrupted && Object.values(checks).every(Boolean);
+  const passed = !interrupted && failureStage === null && Object.values(checks).every(Boolean);
   return Object.freeze({
     schemaVersion: 1,
     status: passed ? 'passed' : 'failed',
@@ -123,8 +288,8 @@ function lifecycleEnvironment(configPath) {
   return Object.freeze({
     PATH: process.env.PATH ?? '',
     READ_ONLY: 'false',
-    ENABLED_FEATURE_FLAGS: 'experimental-alias-write',
-    ALLOWED_RESOURCES: 'server.status,system.status,core.services,firewall.alias',
+    ENABLED_FEATURE_FLAGS: SCENARIO_FLAGS.join(','),
+    ALLOWED_RESOURCES: SCENARIO_SCOPES.join(','),
     OPNSENSE_CONFIG_FILE: configPath,
     MCP_REQUEST_STATE_SECRET: randomBytes(32).toString('base64url')
   });
@@ -138,10 +303,10 @@ async function openSdkClient({ invocation, environment, signal }) {
     stderr: 'pipe'
   });
   const client = new Client(
-    { name: 'product3-alias', version: '0.1.0' },
+    { name: 'product3-alias', version: MCP_CLIENT_VERSION },
     {
       capabilities: { elicitation: { form: {} } },
-      versionNegotiation: { mode: { pin: '2026-07-28' } }
+      versionNegotiation: { mode: { pin: MCP_PROTOCOL_VERSION } }
     }
   );
   client.setRequestHandler('elicitation/create', () =>
@@ -258,6 +423,7 @@ export async function runProduct3Alias(options = {}) {
   const cacheRoot = options.cacheRoot ?? userCacheRoot();
   const instanceRoot = options.instanceRoot ?? join(cacheRoot, 'instance');
   const repositoryRoot = options.repositoryRoot ?? resolve('.');
+  const attestationPath = options.attestationPath;
   const stdout = options.stdout ?? process.stdout;
   const stderr = options.stderr ?? process.stderr;
   const signalSource = options.signalSource ?? process;
@@ -282,7 +448,12 @@ export async function runProduct3Alias(options = {}) {
   const runInstalled = options.runInstalled ?? runInstalledAliasLifecycle;
   const removeTemporaryRoot = options.removeTemporaryRoot ?? removePrivateTemporaryRoot;
   const verifyResidue = options.verifyResidue ?? verifyProduct1bResidue;
+  const inspectGit = options.inspectGit ?? inspectGitWorktree;
+  const writeAttestation = options.writeAttestation ?? writeVmAttestationAtomic;
+  const nodeVersion = options.nodeVersion ?? process.versions.node;
   const checks = emptyChecks();
+  let gitIdentity;
+  let doctorReport;
   let ownedVm = false;
   let temporaryRoot;
   let cleanupFailed = false;
@@ -300,8 +471,14 @@ export async function runProduct3Alias(options = {}) {
   signalSource.on('SIGTERM', interrupt);
   try {
     try {
-      const report = doctor();
-      checks.doctor = report?.ready === true;
+      failureStage = 'preflight';
+      if (typeof attestationPath !== 'string' || !isAbsolute(attestationPath)) {
+        throw new Product3AliasError('USAGE', ATTESTATION_USAGE);
+      }
+      gitIdentity = await inspectGit(repositoryRoot);
+      if (gitIdentity?.clean !== true) throw new Product3AliasError('DIRTY_WORKTREE');
+      doctorReport = doctor();
+      checks.doctor = doctorReport?.ready === true;
       if (!checks.doctor) throw new Error('Doctor failed');
       throwIfInterrupted();
       failureStage = 'preflight';
@@ -312,7 +489,7 @@ export async function runProduct3Alias(options = {}) {
       const started = await startVm({
         instanceRoot,
         rawPath: join(cacheRoot, IMAGE_SPEC.rawName),
-        accelerator: report.accelerator,
+        accelerator: doctorReport.accelerator,
         prepareBase
       });
       checks.vmStarted = started?.state === 'running';
@@ -353,7 +530,7 @@ export async function runProduct3Alias(options = {}) {
       if (ownedVm) {
         try {
           const stopped = await stopVm({ instanceRoot });
-          checks.vmStopped = stopped?.state === 'stopped';
+          checks.vmStopped = stopped?.state === 'stopped' && stopped.cleaned === true;
           if (!checks.vmStopped) failureStage = 'cleanup';
         } catch {
           checks.vmStopped = false;
@@ -374,6 +551,47 @@ export async function runProduct3Alias(options = {}) {
       }
       if (!checks.residueFree) failureStage = 'cleanup';
     }
+    if (
+      !interrupted &&
+      Object.values(checks).every(Boolean) &&
+      gitIdentity?.clean === true &&
+      doctorReport?.ready === true
+    ) {
+      failureStage = 'attestation';
+      try {
+        const finalGitIdentity = await inspectGit(repositoryRoot);
+        if (
+          finalGitIdentity?.clean !== true ||
+          finalGitIdentity.commit !== gitIdentity.commit ||
+          finalGitIdentity.tree !== gitIdentity.tree
+        ) {
+          throw new Product3AliasError('GIT_STATE_CHANGED');
+        }
+        const attestation = buildVmAttestation({
+          schemaVersion: 2,
+          commit: gitIdentity.commit,
+          tree: gitIdentity.tree,
+          node: nodeVersion,
+          host: doctorReport.host,
+          protocolVersion: MCP_PROTOCOL_VERSION,
+          clientVersion: MCP_CLIENT_VERSION,
+          image: {
+            release: IMAGE_SPEC.release,
+            sha256: IMAGE_SPEC.archiveSha256
+          },
+          scenario: {
+            readOnly: false,
+            flags: SCENARIO_FLAGS,
+            scopes: SCENARIO_SCOPES
+          },
+          checks
+        });
+        await writeAttestation(attestationPath, attestation);
+        failureStage = null;
+      } catch {
+        failureStage = 'attestation';
+      }
+    }
     const result = summary(checks, interrupted, failureStage);
     stdout.write(`${JSON.stringify(result)}\n`);
     if (interrupted) return 3;
@@ -384,8 +602,24 @@ export async function runProduct3Alias(options = {}) {
   }
 }
 
+export async function runProduct3Cli(arguments_, options = {}) {
+  let parsed;
+  try {
+    parsed = parseProduct3Arguments(arguments_);
+  } catch (error) {
+    const stderr = options.stderr ?? process.stderr;
+    stderr.write(`${error instanceof Product3AliasError ? error.message : ATTESTATION_USAGE}\n`);
+    return 1;
+  }
+  return runProduct3Alias({ ...options, ...parsed });
+}
+
 if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
-  void runProduct3Alias().then((code) => {
-    process.exitCode = code;
-  });
+  void runProduct3Cli(process.argv.slice(2))
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch(() => {
+      process.exitCode = 2;
+    });
 }

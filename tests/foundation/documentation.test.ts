@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { readFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createProductCapabilityCatalog } from '../../src/capabilities/catalog.js';
 import type { OPNsenseAliasAdapter } from '../../src/opnsense/alias-adapter.js';
 import type { OPNsenseReadAdapter } from '../../src/opnsense/read-adapter.js';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 const NODE_22_PREFLIGHT = [
   'if test -x /opt/homebrew/opt/node@22/bin/node; then',
@@ -14,6 +17,127 @@ const NODE_22_PREFLIGHT = [
 
 const PLATFORM_STATUS =
   '**Platform status:** macOS and Linux are the currently verified development hosts. Native Windows remains a required product target, but package and client support are not claimed until the later `windows-2025` gate passes.';
+const VM_ATTESTATION_SCRIPT = join(process.cwd(), 'scripts/verify-vm-attestation.mjs');
+const VERIFIER_ROOTS: string[] = [];
+
+interface CommandResult {
+  readonly code: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    VERIFIER_ROOTS.splice(0).map((root) => rm(root, { recursive: true, force: true }))
+  );
+});
+
+function runCommand(
+  command: string,
+  arguments_: readonly string[],
+  options: { readonly cwd: string; readonly env?: NodeJS.ProcessEnv }
+): Promise<CommandResult> {
+  return new Promise((resolve) => {
+    execFile(
+      command,
+      [...arguments_],
+      {
+        cwd: options.cwd,
+        encoding: 'utf8',
+        env: options.env ?? process.env,
+        maxBuffer: 1024 * 1024,
+        windowsHide: true
+      },
+      (error, stdout, stderr) => {
+        const code =
+          error === null
+            ? 0
+            : typeof error.code === 'number' && Number.isInteger(error.code)
+              ? error.code
+              : 1;
+        resolve({ code, stdout, stderr });
+      }
+    );
+  });
+}
+
+async function git(root: string, arguments_: readonly string[]): Promise<string> {
+  const result = await runCommand('git', arguments_, {
+    cwd: root,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Task 7 Test',
+      GIT_AUTHOR_EMAIL: 'task7@example.invalid',
+      GIT_COMMITTER_NAME: 'Task 7 Test',
+      GIT_COMMITTER_EMAIL: 'task7@example.invalid'
+    }
+  });
+  if (result.code !== 0) throw new Error('Git fixture command failed');
+  return result.stdout.trim();
+}
+
+function vmAttestation(
+  commit: string,
+  tree: string,
+  imageSha256 = '3c16267c791abfc3e41d5249fcb0c245c03cb91e2f1aa4d53017f0f3454d03a1'
+): string {
+  return `${JSON.stringify({
+    checks: {
+      aliasAbsentAfter: true,
+      aliasAbsentBefore: true,
+      aliasCreated: true,
+      aliasDeleted: true,
+      aliasPresent: true,
+      bootstrap: true,
+      doctor: true,
+      packageInstalled: true,
+      residueFree: true,
+      vmStarted: true,
+      vmStopped: true,
+      writableSurface: true
+    },
+    clientVersion: '0.1.0',
+    commit,
+    host: 'linux',
+    image: {
+      release: '26.1.6',
+      sha256: imageSha256
+    },
+    node: '22.19.0',
+    protocolVersion: '2026-07-28',
+    scenario: {
+      flags: ['experimental-alias-write'],
+      readOnly: false,
+      scopes: ['server.status', 'system.status', 'core.services', 'firewall.alias']
+    },
+    schemaVersion: 2,
+    tree
+  })}\n`;
+}
+
+async function verifierFixture(): Promise<{
+  readonly root: string;
+  readonly evidencePath: string;
+  readonly testedCommit: string;
+  readonly testedTree: string;
+}> {
+  const root = await mkdtemp(join(tmpdir(), 'opnsense-vm-attestation-verifier-'));
+  VERIFIER_ROOTS.push(root);
+  await git(root, ['init', '-q']);
+  await writeFile(join(root, 'tracked.txt'), 'tested bytes\n', 'utf8');
+  await git(root, ['add', 'tracked.txt']);
+  await git(root, ['commit', '-qm', 'tested commit']);
+  const testedCommit = await git(root, ['rev-parse', 'HEAD']);
+  const testedTree = await git(root, ['rev-parse', 'HEAD^{tree}']);
+  const evidencePath = join(root, 'docs/evidence/product3-vm.json');
+  await mkdir(join(root, 'docs/evidence'), { recursive: true });
+  await writeFile(evidencePath, vmAttestation(testedCommit, testedTree), 'utf8');
+  return { root, evidencePath, testedCommit, testedTree };
+}
+
+async function runVerifier(root: string): Promise<CommandResult> {
+  return runCommand(process.execPath, [VM_ATTESTATION_SCRIPT], { cwd: root });
+}
 
 function bashBlocks(document: string): readonly string[] {
   return [...document.matchAll(/```bash\n(?<body>[\s\S]*?)\n```/gu)].map(
@@ -123,6 +247,10 @@ describe('product documentation', () => {
     ]) {
       expect(contributingLines).toContain(exactCommand);
     }
+    expect(contributingLines).toContain(
+      'npm run vm:product3 -- --attestation-out "$PWD/docs/evidence/product3-vm.json"'
+    );
+    expect(contributingLines).not.toContain('npm run vm:product3');
     for (const block of [...bashBlocks(readme), ...bashBlocks(contributing)]) {
       if (!/(?:^|\n)(?:node|npm|npx)\b/mu.test(block)) continue;
       if (/npm run (?:vm:|test:product1b)/u.test(block)) continue;
@@ -315,5 +443,93 @@ describe('product documentation', () => {
     expect(prose).toContain('deleted when the server shuts down');
     expect(prose).toContain('in-memory ring');
     expect(prose).toContain('no restore and no rollback');
+  });
+});
+
+describe('commit-bound VM attestation verifier', () => {
+  it('accepts the coherent pre-evidence state and the later sole-evidence commit', async () => {
+    const fixture = await verifierFixture();
+
+    const beforeCommit = await runVerifier(fixture.root);
+    expect(beforeCommit).toEqual({ code: 0, stdout: '', stderr: '' });
+
+    await git(fixture.root, ['add', 'docs/evidence/product3-vm.json']);
+    await git(fixture.root, ['commit', '-qm', 'add VM evidence']);
+
+    const afterCommit = await runVerifier(fixture.root);
+    expect(afterCommit).toEqual({ code: 0, stdout: '', stderr: '' });
+  });
+
+  it('returns stale for an unresolved commit, a tree mismatch, or extra changed paths', async () => {
+    const unresolved = await verifierFixture();
+    await writeFile(
+      unresolved.evidencePath,
+      vmAttestation('f'.repeat(40), unresolved.testedTree),
+      'utf8'
+    );
+    expect(await runVerifier(unresolved.root)).toEqual({ code: 2, stdout: '', stderr: '' });
+
+    const mismatchedTree = await verifierFixture();
+    await writeFile(
+      mismatchedTree.evidencePath,
+      vmAttestation(mismatchedTree.testedCommit, 'e'.repeat(40)),
+      'utf8'
+    );
+    expect(await runVerifier(mismatchedTree.root)).toEqual({ code: 2, stdout: '', stderr: '' });
+
+    const extraPath = await verifierFixture();
+    await writeFile(join(extraPath.root, 'extra.txt'), 'not evidence\n', 'utf8');
+    await git(extraPath.root, ['add', 'docs/evidence/product3-vm.json', 'extra.txt']);
+    await git(extraPath.root, ['commit', '-qm', 'evidence and unrelated change']);
+    expect(await runVerifier(extraPath.root)).toEqual({ code: 2, stdout: '', stderr: '' });
+  });
+
+  it('returns unreadable for a missing, malformed, or non-canonical document', async () => {
+    const fixture = await verifierFixture();
+    await unlink(fixture.evidencePath);
+    expect(await runVerifier(fixture.root)).toEqual({ code: 1, stdout: '', stderr: '' });
+
+    await writeFile(fixture.evidencePath, '{"schemaVersion":2}\n', 'utf8');
+    expect(await runVerifier(fixture.root)).toEqual({ code: 1, stdout: '', stderr: '' });
+
+    await writeFile(
+      fixture.evidencePath,
+      JSON.stringify(JSON.parse(vmAttestation(fixture.testedCommit, fixture.testedTree)), null, 2),
+      'utf8'
+    );
+    expect(await runVerifier(fixture.root)).toEqual({ code: 1, stdout: '', stderr: '' });
+
+    const wrongImage = await verifierFixture();
+    await writeFile(
+      wrongImage.evidencePath,
+      vmAttestation(wrongImage.testedCommit, wrongImage.testedTree, 'a'.repeat(64)),
+      'utf8'
+    );
+    expect(await runVerifier(wrongImage.root)).toEqual({ code: 1, stdout: '', stderr: '' });
+  });
+
+  it('returns unreadable for pre-evidence and committed symlink documents', async () => {
+    const fixture = await verifierFixture();
+    const attestation = await readFile(fixture.evidencePath, 'utf8');
+    await writeFile(join(fixture.root, '.git/attestation-target'), attestation, 'utf8');
+    await unlink(fixture.evidencePath);
+    await symlink('../../.git/attestation-target', fixture.evidencePath);
+
+    expect(await runVerifier(fixture.root)).toEqual({ code: 1, stdout: '', stderr: '' });
+
+    await git(fixture.root, ['add', 'docs/evidence/product3-vm.json']);
+    await git(fixture.root, ['commit', '-qm', 'add symlink evidence']);
+    expect(await runVerifier(fixture.root)).toEqual({ code: 1, stdout: '', stderr: '' });
+  });
+
+  it('keeps package and VM evidence verification as distinct scripts', async () => {
+    const manifest = JSON.parse(await readFile('package.json', 'utf8')) as {
+      readonly scripts: Readonly<Record<string, string>>;
+    };
+
+    expect(manifest.scripts['evidence:check']).toBe(
+      'npm run build && vitest run --project evidence'
+    );
+    expect(manifest.scripts['evidence:verify']).toBe('node scripts/verify-vm-attestation.mjs');
   });
 });

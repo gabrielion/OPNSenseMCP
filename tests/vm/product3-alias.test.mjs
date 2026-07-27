@@ -1,13 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { EventEmitter } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { runInstalledAliasLifecycle, runProduct3Alias } from '../../scripts/vm/product3-alias.mjs';
+import { buildVmAttestation, serializeVmAttestation } from '../../scripts/vm/attestation.mjs';
+import {
+  parseProduct3Arguments,
+  runInstalledAliasLifecycle,
+  runProduct3Alias,
+  writeVmAttestationAtomic
+} from '../../scripts/vm/product3-alias.mjs';
 import { FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES } from '../../scripts/vm/product1b-bootstrap.mjs';
 
 const UUID = '00000000-0000-0000-0000-000000000001';
+const COMMIT = '1'.repeat(40);
+const TREE = '2'.repeat(40);
+const FIXTURE_ROOTS = [];
+
+afterEach(async () => {
+  await Promise.all(
+    FIXTURE_ROOTS.splice(0).map((root) => rm(root, { recursive: true, force: true }))
+  );
+});
 
 function captureStream() {
   const stream = new PassThrough();
@@ -29,6 +46,46 @@ function lifecycleChecks() {
   };
 }
 
+function completeChecks() {
+  return {
+    doctor: true,
+    vmStarted: true,
+    bootstrap: true,
+    packageInstalled: true,
+    writableSurface: true,
+    aliasAbsentBefore: true,
+    aliasCreated: true,
+    aliasPresent: true,
+    aliasDeleted: true,
+    aliasAbsentAfter: true,
+    vmStopped: true,
+    residueFree: true
+  };
+}
+
+function attestationInput(overrides = {}) {
+  return {
+    schemaVersion: 2,
+    commit: COMMIT,
+    tree: TREE,
+    node: '22.19.0',
+    host: 'macos',
+    protocolVersion: '2026-07-28',
+    clientVersion: '0.1.0',
+    image: {
+      release: '26.1.6',
+      sha256: '3c16267c791abfc3e41d5249fcb0c245c03cb91e2f1aa4d53017f0f3454d03a1'
+    },
+    scenario: {
+      readOnly: false,
+      flags: ['experimental-alias-write'],
+      scopes: ['server.status', 'system.status', 'core.services', 'firewall.alias']
+    },
+    checks: completeChecks(),
+    ...overrides
+  };
+}
+
 function dependencies(overrides = {}) {
   const instanceRoot = '/private/SENTINEL_INSTANCE';
   const temporaryRoot = '/private/SENTINEL_TEMPORARY';
@@ -37,7 +94,11 @@ function dependencies(overrides = {}) {
     instanceRoot,
     cacheRoot: '/private/SENTINEL_CACHE',
     repositoryRoot: '/private/SENTINEL_REPOSITORY',
-    doctor: vi.fn(() => ({ ready: true, accelerator: 'tcg' })),
+    attestationPath: '/private/SENTINEL_ATTESTATION.json',
+    nodeVersion: '22.19.0',
+    inspectGit: vi.fn(async () => ({ clean: true, commit: COMMIT, tree: TREE })),
+    writeAttestation: vi.fn(async () => undefined),
+    doctor: vi.fn(() => ({ ready: true, host: 'macos', accelerator: 'tcg' })),
     statusVm: vi.fn(async () => ({ state: 'stopped', cleaned: false })),
     prepareBase: vi.fn(async () => undefined),
     startVm: vi.fn(async () => {
@@ -107,6 +168,7 @@ describe('Product 3 disposable-VM alias runner', () => {
       })
     );
     expect(deps.calls).toEqual(['start', 'stop', 'remove']);
+    expect(deps.writeAttestation).toHaveBeenCalledOnce();
 
     const output = stdout.output();
     expect(output.split('\n').filter(Boolean)).toHaveLength(1);
@@ -184,6 +246,10 @@ describe('Product 3 disposable-VM alias runner', () => {
     };
     const openClient = vi.fn(async ({ environment }) => {
       expect(environment.READ_ONLY).toBe('false');
+      expect(environment.ENABLED_FEATURE_FLAGS).toBe('experimental-alias-write');
+      expect(environment.ALLOWED_RESOURCES).toBe(
+        'server.status,system.status,core.services,firewall.alias'
+      );
       expect(environment.OPNSENSE_CONFIG_FILE).toBe('/private/SENTINEL_CONNECTION.json');
       expect(environment.MCP_REQUEST_STATE_SECRET).toMatch(/^[A-Za-z0-9_-]+$/u);
       return client;
@@ -318,6 +384,7 @@ describe('Product 3 disposable-VM alias runner', () => {
     expect(deps.startVm).not.toHaveBeenCalled();
     expect(deps.stopVm).not.toHaveBeenCalled();
     expect(deps.removeTemporaryRoot).not.toHaveBeenCalled();
+    expect(deps.writeAttestation).not.toHaveBeenCalled();
     expect(JSON.parse(stdout.output())).toMatchObject({
       status: 'failed',
       failureStage: 'preflight',
@@ -344,6 +411,7 @@ describe('Product 3 disposable-VM alias runner', () => {
       checks: { vmStopped: true, residueFree: true, aliasPresent: false }
     });
     expect(stdout.output()).not.toMatch(/SENTINEL|\/private/iu);
+    expect(deps.writeAttestation).not.toHaveBeenCalled();
   });
 
   it('stops the owned VM when bootstrap fails before connection artifacts exist', async () => {
@@ -467,10 +535,267 @@ describe('Product 3 disposable-VM alias runner', () => {
       failureStage: 'cleanup',
       checks: { vmStopped: true, residueFree: false }
     });
+    expect(deps.writeAttestation).not.toHaveBeenCalled();
   });
 
   it('wires vm:product3 to the disposable alias runner', async () => {
     const manifest = JSON.parse(await readFile('package.json', 'utf8'));
     expect(manifest.scripts['vm:product3']).toBe('node scripts/vm/product3-alias.mjs');
+  });
+});
+
+describe('Product 3 VM attestation', () => {
+  it('builds one fixed recursively key-sorted schema with stable canonical bytes', () => {
+    const reordered = attestationInput({
+      checks: {
+        residueFree: true,
+        aliasPresent: true,
+        vmStopped: true,
+        doctor: true,
+        writableSurface: true,
+        aliasDeleted: true,
+        bootstrap: true,
+        aliasAbsentAfter: true,
+        packageInstalled: true,
+        vmStarted: true,
+        aliasCreated: true,
+        aliasAbsentBefore: true
+      }
+    });
+    const canonical = serializeVmAttestation(reordered);
+
+    expect(canonical).toBe(serializeVmAttestation(attestationInput()));
+    expect(canonical).toBe(
+      `{"checks":{"aliasAbsentAfter":true,"aliasAbsentBefore":true,"aliasCreated":true,"aliasDeleted":true,"aliasPresent":true,"bootstrap":true,"doctor":true,"packageInstalled":true,"residueFree":true,"vmStarted":true,"vmStopped":true,"writableSurface":true},"clientVersion":"0.1.0","commit":"${COMMIT}","host":"macos","image":{"release":"26.1.6","sha256":"3c16267c791abfc3e41d5249fcb0c245c03cb91e2f1aa4d53017f0f3454d03a1"},"node":"22.19.0","protocolVersion":"2026-07-28","scenario":{"flags":["experimental-alias-write"],"readOnly":false,"scopes":["server.status","system.status","core.services","firewall.alias"]},"schemaVersion":2,"tree":"${TREE}"}\n`
+    );
+    expect(buildVmAttestation(reordered)).toEqual(JSON.parse(canonical));
+  });
+
+  it.each([
+    [
+      'missing check',
+      () => {
+        const checks = completeChecks();
+        delete checks.residueFree;
+        return attestationInput({ checks });
+      }
+    ],
+    [
+      'unknown check',
+      () => attestationInput({ checks: { ...completeChecks(), credentialFree: true } })
+    ],
+    [
+      'non-true check',
+      () => attestationInput({ checks: { ...completeChecks(), aliasPresent: false } })
+    ],
+    ['unknown top-level field', () => ({ ...attestationInput(), statePath: '/private/SENTINEL' })]
+  ])('rejects a fixed-schema attestation with a %s', (_label, input) => {
+    expect(() => buildVmAttestation(input())).toThrow('VM_ATTESTATION_INVALID');
+  });
+
+  it('accepts exactly one absolute attestation-output CLI flag', () => {
+    const outputPath = join(tmpdir(), 'product3-vm.json');
+
+    expect(parseProduct3Arguments(['--attestation-out', outputPath])).toEqual({
+      attestationPath: outputPath
+    });
+    for (const argumentsList of [
+      [],
+      ['--attestation-out'],
+      ['--attestation-out', 'docs/evidence/product3-vm.json'],
+      ['--attestation-out', outputPath, 'extra'],
+      ['--unknown', outputPath]
+    ]) {
+      expect(() => parseProduct3Arguments(argumentsList)).toThrow(
+        'Usage: product3-alias.mjs --attestation-out <absolute-path>'
+      );
+    }
+  });
+
+  it('rejects a dirty starting tree before doctor or VM startup without exposing Git output', async () => {
+    const stdout = captureStream();
+    const dirtyOutput = ' M /Users/SENTINEL/private-state.json';
+    const deps = dependencies({
+      inspectGit: vi.fn(async () => ({ clean: false, privateOutput: dirtyOutput }))
+    });
+
+    await expect(runProduct3Alias({ ...deps, stdout: stdout.stream })).resolves.toBe(2);
+
+    expect(deps.doctor).not.toHaveBeenCalled();
+    expect(deps.statusVm).not.toHaveBeenCalled();
+    expect(deps.startVm).not.toHaveBeenCalled();
+    expect(deps.writeAttestation).not.toHaveBeenCalled();
+    expect(stdout.output().split('\n').filter(Boolean)).toHaveLength(1);
+    expect(JSON.parse(stdout.output())).toMatchObject({
+      status: 'failed',
+      failureStage: 'preflight'
+    });
+    expect(stdout.output()).not.toContain(dirtyOutput);
+    expect(stdout.output()).not.toMatch(/SENTINEL|\/Users\//u);
+  });
+
+  it('refuses to bind evidence when the commit changes during the live run', async () => {
+    const stdout = captureStream();
+    const inspectGit = vi
+      .fn()
+      .mockResolvedValueOnce({ clean: true, commit: COMMIT, tree: TREE })
+      .mockResolvedValueOnce({ clean: true, commit: '3'.repeat(40), tree: '4'.repeat(40) });
+    const deps = dependencies({ inspectGit });
+
+    await expect(runProduct3Alias({ ...deps, stdout: stdout.stream })).resolves.toBe(2);
+
+    expect(inspectGit).toHaveBeenCalledTimes(2);
+    expect(deps.writeAttestation).not.toHaveBeenCalled();
+    expect(JSON.parse(stdout.output())).toMatchObject({
+      status: 'failed',
+      failureStage: 'attestation'
+    });
+  });
+
+  it('writes only after lifecycle, cleanup, and residue pass, with no private data in the document', async () => {
+    const order = [];
+    let writtenInput;
+    const stdout = captureStream();
+    const deps = dependencies({
+      runInstalled: vi.fn(async () => {
+        order.push('lifecycle');
+        return lifecycleChecks();
+      }),
+      stopVm: vi.fn(async () => {
+        order.push('stop');
+        return { state: 'stopped', cleaned: true };
+      }),
+      removeTemporaryRoot: vi.fn(async () => {
+        order.push('remove');
+      }),
+      verifyResidue: vi.fn(async () => {
+        order.push('residue');
+        return true;
+      }),
+      writeAttestation: vi.fn(async (_path, input) => {
+        order.push('write');
+        writtenInput = input;
+      })
+    });
+
+    await expect(runProduct3Alias({ ...deps, stdout: stdout.stream })).resolves.toBe(0);
+
+    expect(order).toEqual(['lifecycle', 'stop', 'remove', 'residue', 'write']);
+    expect(deps.writeAttestation).toHaveBeenCalledWith(deps.attestationPath, expect.any(Object));
+    expect(writtenInput).toEqual(attestationInput());
+    expect(serializeVmAttestation(writtenInput)).not.toMatch(
+      /\/Users\/|\/home\/|SENTINEL|CONNECTION|private-state|attestationPath/iu
+    );
+  });
+
+  it.each(['lifecycle', 'vm cleanup', 'residue'])(
+    'does not write when %s proof fails',
+    async (failure) => {
+      const stdout = captureStream();
+      const deps = dependencies({
+        runInstalled:
+          failure === 'lifecycle'
+            ? vi.fn(async () => ({ ...lifecycleChecks(), aliasPresent: false }))
+            : vi.fn(async () => lifecycleChecks()),
+        stopVm:
+          failure === 'vm cleanup'
+            ? vi.fn(async () => ({ state: 'stopped', cleaned: false }))
+            : vi.fn(async () => ({ state: 'stopped', cleaned: true })),
+        verifyResidue: vi.fn(async () => failure !== 'residue')
+      });
+
+      await expect(runProduct3Alias({ ...deps, stdout: stdout.stream })).resolves.toBe(2);
+
+      expect(deps.writeAttestation).not.toHaveBeenCalled();
+    }
+  );
+
+  it('writes through a same-directory temporary file and atomically replaces the destination', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opnsense-product3-attestation-'));
+    FIXTURE_ROOTS.push(root);
+    const outputPath = join(root, 'product3-vm.json');
+    await writeFile(outputPath, 'old\n', 'utf8');
+
+    await writeVmAttestationAtomic(outputPath, attestationInput());
+
+    expect(await readFile(outputPath, 'utf8')).toBe(serializeVmAttestation(attestationInput()));
+    expect(await readdir(root)).toEqual(['product3-vm.json']);
+  });
+
+  it('cleans the same-directory temporary file when the atomic rename fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opnsense-product3-attestation-'));
+    FIXTURE_ROOTS.push(root);
+    const outputPath = join(root, 'product3-vm.json');
+    await writeFile(outputPath, 'old\n', 'utf8');
+
+    await expect(
+      writeVmAttestationAtomic(outputPath, attestationInput(), {
+        renameFile: async () => {
+          throw new Error('rename failed');
+        }
+      })
+    ).rejects.toThrow('VM_ATTESTATION_WRITE_FAILED');
+
+    expect(await readFile(outputPath, 'utf8')).toBe('old\n');
+    expect(await readdir(root)).toEqual(['product3-vm.json']);
+  });
+
+  it('creates a missing output parent and still leaves only the final atomic file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opnsense-product3-attestation-'));
+    FIXTURE_ROOTS.push(root);
+    const missingParent = join(root, 'missing');
+    const outputPath = join(missingParent, 'product3-vm.json');
+
+    await writeVmAttestationAtomic(outputPath, attestationInput());
+
+    expect(await readFile(outputPath, 'utf8')).toBe(serializeVmAttestation(attestationInput()));
+    expect(await readdir(root)).toEqual(['missing']);
+    expect(await readdir(missingParent)).toEqual(['product3-vm.json']);
+  });
+
+  it('fsyncs every created output directory and its pre-existing parent', async () => {
+    const events = [];
+    const outputPath = '/safe/docs/evidence/product3-vm.json';
+    const fileHandle = {
+      writeFile: vi.fn(async () => {
+        events.push('write-file');
+      }),
+      sync: vi.fn(async () => {
+        events.push('sync-file');
+      }),
+      close: vi.fn(async () => {
+        events.push('close-file');
+      })
+    };
+
+    await writeVmAttestationAtomic(outputPath, attestationInput(), {
+      makeDirectory: vi.fn(async (path) => {
+        events.push(`mkdir:${path}`);
+        return '/safe/docs';
+      }),
+      openFile: vi.fn(async (path) => {
+        events.push(`open:${path}`);
+        return fileHandle;
+      }),
+      randomBytes: () => Buffer.alloc(16),
+      renameFile: vi.fn(async (source, destination) => {
+        events.push(`rename:${source}->${destination}`);
+      }),
+      syncDirectory: vi.fn(async (path) => {
+        events.push(`sync-directory:${path}`);
+      })
+    });
+
+    expect(events).toEqual([
+      'mkdir:/safe/docs/evidence',
+      'open:/safe/docs/evidence/.product3-vm.json.pending-00000000000000000000000000000000',
+      'write-file',
+      'sync-file',
+      'close-file',
+      'rename:/safe/docs/evidence/.product3-vm.json.pending-00000000000000000000000000000000->/safe/docs/evidence/product3-vm.json',
+      'sync-directory:/safe/docs/evidence',
+      'sync-directory:/safe/docs',
+      'sync-directory:/safe'
+    ]);
   });
 });

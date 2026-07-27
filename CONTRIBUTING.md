@@ -34,7 +34,7 @@ decompression commands.
 ```bash
 npm run vm:doctor
 npm run test:product1b
-npm run vm:product3
+npm run vm:product3 -- --attestation-out "$PWD/docs/evidence/product3-vm.json"
 ```
 
 The first live run downloads the SHA-256-pinned official OPNsense 26.1.6 nano archive into the user cache.
