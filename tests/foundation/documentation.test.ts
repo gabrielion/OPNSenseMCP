@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { readFile } from 'node:fs/promises';
+import { createProductCapabilityCatalog } from '../../src/capabilities/catalog.js';
+import type { OPNsenseAliasAdapter } from '../../src/opnsense/alias-adapter.js';
+import type { OPNsenseReadAdapter } from '../../src/opnsense/read-adapter.js';
 import { describe, expect, it } from 'vitest';
 
 const NODE_22_PREFLIGHT = [
@@ -55,15 +58,17 @@ describe('product documentation', () => {
       readFile('tests/fixtures/opencode.product1a.json', 'utf8'),
       readFile('tests/fixtures/product1b.live.json', 'utf8')
     ]);
-    expect(readme).toContain('Product 1 preview');
+    expect(readme).toContain('read-only by default');
     for (const tool of ['`server_status`', '`opn_describe`', '`opn_get`', '`opn_list`']) {
       expect(readme).toContain(tool);
     }
     for (const resource of ['`system.status`', '`core.services`']) {
       expect(readme).toContain(resource);
     }
-    expect(readme).toContain('No mutation tool is registered');
-    expect(readme).toContain('verified backup and audit');
+    // Prettier rewraps prose, so content assertions run against a whitespace-normalised copy.
+    const prose = readme.replace(/\s+/gu, ' ');
+    expect(prose).toContain('no write tool is listed or dispatchable');
+    expect(prose).toContain('verified pre-change backup');
     expect(readme).toContain('disposable OPNsense 26 VM');
     expect(readme).toContain('POST /api/core/service/search');
     for (const nonClaim of ['public DNS, ACME, or HAProxy', 'Windows', 'agentic benchmark'])
@@ -240,5 +245,75 @@ describe('product documentation', () => {
       expect(index).toContain(focusRule);
     expect(index).toContain('clean-room product');
     expect(index).toContain('without legacy inputs');
+  });
+
+  it('documents exactly the tools the live catalogue exposes, and the experimental write triple', async () => {
+    const readme = await readFile('README.md', 'utf8');
+    const aliasAdapter = { available: true } as unknown as OPNsenseAliasAdapter;
+    const readAdapter = { available: true } as unknown as OPNsenseReadAdapter;
+    const catalog = createProductCapabilityCatalog(readAdapter, aliasAdapter);
+    const defaults = catalog
+      .listExposed({
+        readOnly: true,
+        transport: 'stdio',
+        enabledFeatureFlags: new Set(),
+        allowedResourceScopes: null
+      })
+      .map(({ mcpName }) => mcpName);
+    const experimental = catalog
+      .listExposed({
+        readOnly: false,
+        transport: 'stdio',
+        enabledFeatureFlags: new Set(['experimental-alias-write']),
+        allowedResourceScopes: new Set(['firewall.alias'])
+      })
+      .map(({ mcpName }) => mcpName)
+      .filter((name) => !defaults.includes(name));
+
+    // The README must name what the product actually exposes, derived from the catalogue rather
+    // than from a hand-maintained list that can drift.
+    for (const tool of [...defaults, ...experimental]) expect(readme).toContain(`\`${tool}\``);
+    expect(experimental).toEqual(['opn_create', 'opn_delete']);
+
+    // Every condition a write requires must be stated, and the retired false claim must be gone.
+    expect(readme).toContain('`experimental-alias-write`');
+    expect(readme).toContain('`ALLOWED_RESOURCES`');
+    expect(readme).toContain('`READ_ONLY=false`');
+    expect(readme).not.toContain('No mutation tool is registered');
+    expect(readme).not.toContain('exactly four read-only tools');
+  });
+
+  it('documents the configure command, the proven ACLs, and the distribution status', async () => {
+    const readme = await readFile('README.md', 'utf8');
+
+    const prose = readme.replace(/\s+/gu, ' ');
+    // The runnable form from a clone, plus the fact that the short name only exists once installed.
+    expect(prose).toContain('node dist/main.js configure');
+    expect(prose).toContain('`opnsense-mcp` name exists only inside an installed tarball');
+    expect(prose).toContain('ignores `OPNSENSE_CONFIG_FILE`');
+    for (const privilege of [
+      'page-system-status',
+      'page-status-services',
+      'user-config-readonly',
+      'page-diagnostics-configurationhistory',
+      'page-firewall-alias-edit'
+    ]) {
+      expect(readme).toContain(`\`${privilege}\``);
+    }
+    // The package is private: it cannot be installed from a registry today, and the README must not
+    // imply otherwise.
+    expect(readme).toContain('not published');
+    expect(readme).toContain('stdio');
+  });
+
+  it('never claims a durable backup or audit before P0-C lands', async () => {
+    const readme = await readFile('README.md', 'utf8');
+
+    const prose = readme.replace(/\s+/gu, ' ');
+    // The honest statements: the backup is destroyed at shutdown, the audit is a bounded in-memory
+    // ring, and there is no restore. Each must be present.
+    expect(prose).toContain('deleted when the server shuts down');
+    expect(prose).toContain('in-memory ring');
+    expect(prose).toContain('no restore and no rollback');
   });
 });

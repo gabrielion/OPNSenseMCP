@@ -34,12 +34,20 @@ decompression commands.
 ```bash
 npm run vm:doctor
 npm run test:product1b
+npm run vm:product3
 ```
 
 The first live run downloads the SHA-256-pinned official OPNsense 26.1.6 nano archive into the user cache.
 The test prompts for the disposable image's factory password without echoing it. It then owns start,
 least-privilege API bootstrap, TLS pinning, npm pack/install, the two MCP reads, stop, credential deletion,
 overlay deletion, and residue verification. A setup or read failure still runs cleanup and exits nonzero.
+
+`vm:product3` runs the bounded firewall-alias lifecycle — list, create, read back, delete, prove absence.
+It boots and owns **its own** VM: it refuses to start while another managed VM is running, prompts for the
+factory password again, bootstraps its own alias-write account, and stops and cleans up afterwards. It sets
+`READ_ONLY=false`, `ENABLED_FEATURE_FLAGS=experimental-alias-write` and an explicit `ALLOWED_RESOURCES`
+naming `server.status,system.status,core.services,firewall.alias`, because a write is refused without the
+first three and `server_status` disappears without the fourth scope.
 
 For lifecycle diagnosis only, the same pieces are available separately:
 
@@ -83,6 +91,23 @@ The runner uses an isolated project, installed tarball, synthetic HTTPS target, 
 `opencode/north-mini-code-free` model. It writes sanitized evidence to
 `tests/fixtures/opencode.product1a.json`: only versions, SHA-256 digests, narrow checks, and cleanup status.
 External model or capacity failure exits `3` and records `blocked`; it never becomes a false success.
+
+## Release gate
+
+`npm run verify` is the per-commit gate. One further check belongs to a release rather than to a commit:
+
+```bash
+if test -x /opt/homebrew/opt/node@22/bin/node; then
+  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+fi
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&
+npm run evidence:check
+```
+
+It compares the sealed OpenCode evidence against the package this tree builds. Anything that is packed
+changes that package — `src/` through `dist/`, and also `README.md`, `LICENSE` and `package.json` — so this
+check is expected to fail until the evidence is re-sealed by its real producer, `npm run smoke:opencode`,
+which needs the OpenCode client and a model. Never hand-edit `tests/fixtures/opencode.product1a.json`.
 
 ## Change discipline
 

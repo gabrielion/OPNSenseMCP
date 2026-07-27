@@ -1,23 +1,59 @@
 # OPNsense MCP
 
-> **Product 1 preview:** a small, useful, read-only MCP server that lets an AI assistant inspect an
-> OPNsense system without changing it. The packaged server is exercised against both synthetic HTTPS and a
-> disposable OPNsense 26 VM.
+> **Preview:** a small MCP server that lets an AI assistant inspect an OPNsense system, and — only
+> when explicitly enabled — create or delete one kind of firewall alias behind a confirmation,
+> backup and audit envelope. It is read-only by default. The packaged server is exercised against
+> both a synthetic HTTPS target and a disposable OPNsense 26 VM.
 
 Ask in everyday language. The server tells the agent to start with facts, explain networking terms, ask one
 useful clarification at a time, and clearly separate observations from hypotheses.
 
 ## What works now
 
-The installed server exposes exactly four read-only tools:
+By default the installed server exposes four read-only tools:
 
 - `server_status` checks the MCP process and its read-only state.
 - `opn_describe` explains a visible resource before the agent uses it.
 - `opn_get` reads the singleton resource `system.status`.
-- `opn_list` pages the collection resource `core.services`.
+- `opn_list` pages the collection resources `core.services` and `firewall.alias`. For aliases it lists the
+  **host entries only**, and the reported total counts those; other alias types are not shown.
 
-`READ_ONLY=true` is the default. No mutation tool is registered, so this preview cannot change firewall
-configuration. Future writes will be added only behind a verified backup and audit safety envelope.
+Three MCP prompts are also always registered — `diagnose_network_problem`, `publish_internal_service` and
+`block_domain_for_device`. They only produce a read-only preparation plan; they execute nothing.
+
+`READ_ONLY=true` is the default, and under it no write tool is listed or dispatchable.
+
+Two experimental write tools exist, `opn_create` and `opn_delete`, and they operate on host entries of
+`firewall.alias` only. Three conditions plus a supported transport decide whether they are **listed** at
+all:
+
+- `READ_ONLY=false`;
+- `ENABLED_FEATURE_FLAGS` contains `experimental-alias-write`;
+- `ALLOWED_RESOURCES` explicitly names `firewall.alias`. An absent or empty allow-list authorizes every
+  read and **no** write. The allow-list filters reads too, so name every scope you still want, for
+  example `ALLOWED_RESOURCES=server.status,system.status,core.services,firewall.alias`;
+- the transport is stdio or Streamable HTTP. Legacy SSE never lists or dispatches them.
+
+A fourth condition governs the **call** rather than the listing: the client must have negotiated form
+elicitation. A client without it still sees the tools and is refused with `CONFIRMATION_UNAVAILABLE` on
+every attempt, before any challenge or write.
+
+Every write runs this fixed envelope, in this order: authorization, a human confirmation naming the
+change, an exclusive lock on the target, a side-effect-free preflight, a redacted audit intent, a verified
+pre-change backup, a re-check that the observed state has not moved, the write, an outcome verification, a
+final audit record, and the lock release. Every failure after the backup preserves it and never
+blind-restores.
+
+**These writes are experimental for a reason.** The pre-change backup is written to a per-process
+temporary directory that is **deleted when the server shuts down**, so it cannot be consulted afterwards.
+The audit is an in-memory ring holding only the most recent 1024 records (two per write), with no
+persisted form and no tool that reads it. The lock is process-local, so two servers pointed at the same
+firewall do not exclude each other.
+
+What the envelope does guarantee is narrow but real: a write is refused unless a verified backup and an
+audit intent were recorded first. There is **no restore and no rollback** — if a failure occurs after the
+change was applied, the change stays applied and recovery is manual through OPNsense's own configuration
+history. Making this state durable is the next milestone.
 
 ## Quick local proof
 
@@ -39,7 +75,39 @@ stdio, checks that secrets never appear, closes on EOF, and removes every fixtur
 
 ## Connect your OPNsense instance
 
-Create a JSON file outside the repository and protect it with mode `0600`:
+The supported way to supply credentials is the interactive command, which writes the private file for you
+with the right ownership and modes. From a clone it is a subcommand of the built entry point:
+
+```bash
+if test -x /opt/homebrew/opt/node@22/bin/node; then
+  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+fi
+node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&
+node dist/main.js configure
+```
+
+The `opnsense-mcp` name exists only inside an installed tarball; there is no registry install.
+
+It prompts for the HTTPS origin, API key, API secret, and the optional CA file and TLS server name; the
+secrets are never echoed and never appear in a process argument. It refuses to run on Windows and refuses
+any argument.
+
+It always writes to the platform path and **ignores `OPNSENSE_CONFIG_FILE`**, which is a server-side
+variable:
+
+- macOS: `~/Library/Application Support/opnsense-mcp/config.json`;
+- Linux: `$XDG_CONFIG_HOME/opnsense-mcp/config.json`, else `~/.config/opnsense-mcp/config.json`.
+
+The server discovers those same paths, so the variable is only needed to read a file kept elsewhere. Each
+directory it owns is created with mode `0700` and the file with mode `0600`; symlinks, foreign owners and
+unsafe ancestors are refused.
+
+Two practical limits: it **never overwrites** an existing configuration, so rotate a key by deleting the
+file first; and it requires a real terminal on both streams, so it cannot be piped or run in CI. Every
+failure prints the single word `Error` on purpose — diagnostics are deliberately opaque so nothing about
+the private path or the credentials leaks.
+
+Alternatively, create the JSON file yourself outside the repository and protect it with mode `0600`:
 
 ```json
 {
@@ -51,11 +119,20 @@ Create a JSON file outside the repository and protect it with mode `0600`:
 }
 ```
 
-The file must be a regular, non-symlink file owned by the current user. `url` must be one exact HTTPS
-origin. `caFile` is optional when the firewall certificate already chains to a trusted CA.
+The file must be a regular, non-symlink file owned by the current user, at an absolute path, with exactly
+mode `0600`, exactly one hard link, and at most 16 KiB. `0400` is refused too. `url` must be one exact
+HTTPS origin. `caFile` is optional when the firewall certificate already chains to a trusted CA.
 `tlsServerName` is optional when the URL uses an IP address but the verified certificate uses a DNS name.
 TLS verification always remains enabled. Use a dedicated least-privilege OPNsense key; do not paste
 credentials into chat or command arguments.
+
+**Transports.** stdio is the default and the only transport exercised end to end by the packaged proofs;
+`dist/main.js` always starts stdio. A Streamable HTTP transport exists as a separate entry point
+(`npm run start:http`) behind `MCP_HTTP_ENABLED`, bound to loopback with a Host/Origin allow-list and a
+bearer `MCP_HTTP_TOKEN` of at least 32 characters; it is not covered by a client smoke, so no
+client-support claim is made for it. A legacy SSE compatibility surface exists behind
+`MCP_LEGACY_SSE_ENABLED`, which additionally requires `MCP_HTTP_ENABLED=true` — setting it alone is a
+startup error — and never exposes the confirmation-backed write tools.
 
 To run the protocol-clean stdio server directly:
 
@@ -85,11 +162,29 @@ packs and installs this npm package, calls `opn_get system.status` and `opn_list
 VM and removes the overlay, API credentials, certificate, and temporary package. The first run downloads an
 approximately 557 MB archive and creates a 3 GiB read-only base image in the user cache.
 
-The observed OPNsense 26 contract is `GET /api/core/system/status` and a bounded
-`POST /api/core/service/search` Bootgrid request. This proves only these two reads on disposable local
-firmware; it does not test a production firewall or an Internet-facing deployment. The sanitized
+The observed OPNsense 26 read contract is `GET /api/core/system/status` and a bounded
+`POST /api/core/service/search` Bootgrid request. **That is the whole of what the committed live evidence
+covers**, and it explicitly disclaims mutations.
+
+The alias write path targets `GET /api/core/backup/download/this` for the pre-change backup, then
+`POST /api/firewall/alias/searchItem`, `addItem` or `delItem/{uuid}`, then the `reconfigure` apply. Those
+are exercised against a synthetic HTTPS target, not against the VM: no sealed disposable-VM evidence for a
+write exists in this repository yet, so no live-mutation claim is made here. The sanitized
 [machine-readable live evidence](tests/fixtures/product1b.live.json) records the exact host, QEMU, firmware,
 transport, cleanup checks, and non-claims without retaining firewall data or credentials.
+
+**Disposable-account privileges.** The accounts are created with exactly these stock ACLs, and nothing
+else. Only the read-only profile has committed live evidence; the alias-write profile is what the runner
+provisions, not something a sealed run has yet confirmed:
+
+- read-only account: `page-system-status`, `page-status-services`, `user-config-readonly`;
+- alias-write account: `page-system-status`, `page-status-services`,
+  `page-diagnostics-configurationhistory`, `page-firewall-alias-edit`.
+
+`user-config-readonly` is deliberately **absent** from the alias-write account: we observed that it makes
+the OPNsense mutable-model controller reject alias saves. `page-diagnostics-configurationhistory` is
+granted for the pre-change configuration-backup request. Both statements come from our own bootstrap
+experience, not from a cited upstream mapping.
 
 ## OpenCode
 
@@ -126,6 +221,11 @@ own versioned smoke passes.
   and cleanup against a synthetic target.
 - Clean npm pack/install against a disposable OPNsense 26.1.6 VM for the status and service-list reads,
   including VM ownership, pinned image integrity, isolated credentials, TLS pinning, and reverse cleanup.
+  The firewall-alias lifecycle runner exists and passes offline, but no sealed live run is committed.
+- A hermetic package install **for the synthetic-target proof**: the consumer resolves every dependency
+  from a lock-derived loopback-only npm registry, with an empty cache and unreachable proxies, so no
+  Internet access is involved. The VM runners still install with `npm install --offline` against the
+  developer's own npm cache.
 - Targeted MCP interoperability checks for protocol versions `2025-11-25` and draft `2026-07-28`.
 - One real OpenCode 1.18.3 routing smoke using `opencode/north-mini-code-free`.
 
@@ -133,14 +233,24 @@ These checks prove the package, synthetic read path, and the two stated disposab
 yet prove:
 
 - public DNS, ACME, or HAProxy exposure on the Internet;
-- mutations, verified backups, restore, or audit behavior;
+- durable backups or a durable audit trail: both exist, but only for the lifetime of the process;
+- restore, or any automatic rollback of an applied change;
+- writes to anything other than host entries of `firewall.alias`;
+- any guarantee beyond the first 100 host aliases: the pre-change state digest and the read-back both read
+  a single page of 100, so past that a create can report an unverified outcome and a delete can only prove
+  that the entry was not on the page it read;
+- a live disposable-VM mutation: the lifecycle is proven against a synthetic target only;
 - native Windows installation or client operation;
 - a full agentic benchmark or a benchmark score.
 
 ## Product roadmap and example requests
 
-The next milestone is the central mutation safety envelope: verified backup, scoped authorization, redacted
-audit, outcome verification, and fail-closed cleanup before any public write tool exists.
+The mutation safety envelope — scoped authorization, human confirmation, verified backup, redacted audit,
+outcome verification, fail-closed cleanup — is implemented and proven against a synthetic HTTPS target. The
+next
+milestone is to make its state durable: a persistent state root, an inter-process lock, an append-only
+audit, and a local `reconcile` command, so the guarantees survive a restart. Only then can the
+`experimental` label on alias writes be reconsidered.
 
 Later guided workflows are deliberately user-level goals, for example:
 
@@ -150,6 +260,10 @@ Later guided workflows are deliberately user-level goals, for example:
 
 Those three workflows are roadmap examples, not Product 1A claims. Internet-facing publication with public
 DNS, Let's Encrypt, and HAProxy is a longer-term lab milestone after safe writes and private-VM coverage.
+
+**Distribution status:** this package is marked `private` and is **not published** to any registry. It is
+installed today from a locally built tarball, which is exactly what the packaged proofs exercise. No
+release, versioning, or upgrade guarantee is offered yet.
 
 **Platform status:** macOS and Linux are the currently verified development hosts. Native Windows remains a required product target, but package and client support are not claimed until the later `windows-2025` gate passes.
 
