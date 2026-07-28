@@ -560,7 +560,7 @@ describe('pre-handler policy authorization', () => {
     expect(JSON.stringify(result)).not.toContain('SENTINEL');
   });
 
-  it('checks transport before read-only, features, scopes, parsing, and handlers', async () => {
+  it('checks read-only before transport, features, scopes, parsing, and handlers', async () => {
     const handler = vi.fn(() => Promise.resolve({ echoed: 'unsafe' }));
     const capability = createKernelFixture({
       effect: 'local-write',
@@ -576,7 +576,7 @@ describe('pre-handler policy authorization', () => {
 
     expectRefusal(
       await dispatcher.dispatch(request('kernel_read', 'SENTINEL-INVALID'), stdioContext()),
-      'UNSUPPORTED_TRANSPORT'
+      'READ_ONLY'
     );
     expect(handler).not.toHaveBeenCalled();
   });

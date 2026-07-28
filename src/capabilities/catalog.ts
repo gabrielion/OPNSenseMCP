@@ -17,7 +17,6 @@ import {
 import { hasVisibleResourceScopes, isKernelDefinedCapability } from './kernel.js';
 
 function isExposed(capability: CapabilityDefinition, context: ExposureContext): boolean {
-  if (!capability.transports.includes(context.transport)) return false;
   if (context.readOnly && capability.policy.effect !== 'read') return false;
   if (
     capability.policy.requiredFeatureFlags.some((flag) => !context.enabledFeatureFlags.has(flag))
@@ -27,27 +26,43 @@ function isExposed(capability: CapabilityDefinition, context: ExposureContext): 
   if (!hasVisibleResourceScopes(capability, context.allowedResourceScopes)) {
     return false;
   }
+  if (!capability.transports.includes(context.transport)) return false;
   return true;
 }
 
 export class CapabilityCatalog {
   readonly all: readonly CapabilityDefinition[];
+  readonly #definitionIds = new Set<string>();
   readonly #byId = new Map<string, CapabilityDefinition>();
   readonly #byMcpName = new Map<string, CapabilityDefinition>();
+  readonly #unavailableByMcpName = new Map<string, CapabilityDefinition>();
 
-  constructor(definitions: readonly CapabilityDefinition[]) {
-    for (const definition of definitions) {
+  constructor(
+    definitions: readonly CapabilityDefinition[],
+    unavailableDefinitions: readonly CapabilityDefinition[] = []
+  ) {
+    for (const [definition, available] of [
+      ...definitions.map((candidate) => [candidate, true] as const),
+      ...unavailableDefinitions.map((candidate) => [candidate, false] as const)
+    ]) {
       if (!isKernelDefinedCapability(definition)) {
         throw new Error('Capability definition was not created by the policy kernel');
       }
-      if (this.#byId.has(definition.id)) {
+      if (this.#definitionIds.has(definition.id)) {
         throw new Error(`Duplicate capability id: ${definition.id}`);
       }
-      if (this.#byMcpName.has(definition.mcpName)) {
+      if (
+        this.#byMcpName.has(definition.mcpName) ||
+        this.#unavailableByMcpName.has(definition.mcpName)
+      ) {
         throw new Error(`Duplicate MCP capability name: ${definition.mcpName}`);
       }
-      this.#byId.set(definition.id, definition);
-      this.#byMcpName.set(definition.mcpName, definition);
+      this.#definitionIds.add(definition.id);
+      if (available) this.#byId.set(definition.id, definition);
+      (available ? this.#byMcpName : this.#unavailableByMcpName).set(
+        definition.mcpName,
+        definition
+      );
     }
     this.all = Object.freeze([...definitions]);
     Object.freeze(this);
@@ -59,6 +74,10 @@ export class CapabilityCatalog {
 
   getByMcpName(name: string): CapabilityDefinition | undefined {
     return this.#byMcpName.get(name);
+  }
+
+  getUnavailableByMcpName(name: string): CapabilityDefinition | undefined {
+    return this.#unavailableByMcpName.get(name);
   }
 
   listExposed(context: ExposureContext): readonly CapabilityDefinition[] {
@@ -80,13 +99,12 @@ export function createProductCapabilityCatalog(
     createOPNsenseGetCapability(adapter),
     createOPNsenseListCapability(adapter, aliasAdapter)
   ];
-  if (aliasAdapter.available) {
-    capabilities.push(
-      createOPNsenseCreateCapability(aliasAdapter),
-      createOPNsenseDeleteCapability(aliasAdapter)
-    );
-  }
-  return new CapabilityCatalog(capabilities);
+  const writes = [
+    createOPNsenseCreateCapability(aliasAdapter),
+    createOPNsenseDeleteCapability(aliasAdapter)
+  ];
+  if (aliasAdapter.available) capabilities.push(...writes);
+  return new CapabilityCatalog(capabilities, aliasAdapter.available ? [] : writes);
 }
 
 export const CAPABILITY_CATALOG = createProductCapabilityCatalog();

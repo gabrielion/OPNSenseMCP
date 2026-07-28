@@ -15,7 +15,11 @@ import {
 import type { FeatureFlag } from '../../src/config/feature-flags.js';
 import type { OPNsenseReadAdapter } from '../../src/opnsense/read-adapter.js';
 import type { OPNsenseAliasAdapter } from '../../src/opnsense/alias-adapter.js';
-import type { MutationEnvelopeServices, TransportKind } from '../../src/capabilities/types.js';
+import type {
+  ExposureContext,
+  MutationEnvelopeServices,
+  TransportKind
+} from '../../src/capabilities/types.js';
 import { createMutationFixture, createReadFixture } from '../fixtures/capabilities.js';
 import { KNOWN_RESOURCE_SCOPES } from '../../src/capabilities/resource-scopes.js';
 
@@ -36,6 +40,18 @@ describe('CapabilityCatalog', () => {
     expect(() => new CapabilityCatalog([read, read])).toThrow('Duplicate capability id: test.read');
     expect(() => new CapabilityCatalog([read, duplicateName])).toThrow(
       'Duplicate MCP capability name: test_read'
+    );
+  });
+
+  it('rejects duplicate MCP names across unavailable definitions', () => {
+    const first = createReadFixture({ id: 'test.unavailable-first', mcpName: 'test_unavailable' });
+    const second = createReadFixture({
+      id: 'test.unavailable-second',
+      mcpName: 'test_unavailable'
+    });
+
+    expect(() => new CapabilityCatalog([], [first, second])).toThrow(
+      'Duplicate MCP capability name: test_unavailable'
     );
   });
 
@@ -95,6 +111,48 @@ describe('CapabilityCatalog', () => {
         allowedResourceScopes: null
       })
     ).toEqual([]);
+  });
+
+  it('evaluates listing policy in read-only, feature, resource, transport order', () => {
+    const capability = createReadFixture({
+      requiredFeatureFlags: ['ssh'],
+      resourceScopes: ['test.read'],
+      transports: ['stdio']
+    });
+    const catalog = new CapabilityCatalog([capability]);
+    const visited: string[] = [];
+    const context = Object.defineProperties(
+      {},
+      {
+        readOnly: {
+          get: () => {
+            visited.push('read-only');
+            return false;
+          }
+        },
+        enabledFeatureFlags: {
+          get: () => {
+            visited.push('feature');
+            return new Set<FeatureFlag>(['ssh']);
+          }
+        },
+        allowedResourceScopes: {
+          get: () => {
+            visited.push('resource');
+            return new Set(['test.read']);
+          }
+        },
+        transport: {
+          get: () => {
+            visited.push('transport');
+            return 'stdio';
+          }
+        }
+      }
+    ) as ExposureContext;
+
+    expect(catalog.listExposed(context)).toEqual([capability]);
+    expect(visited).toEqual(['read-only', 'feature', 'resource', 'transport']);
   });
 
   it.each([
@@ -249,12 +307,18 @@ describe('product catalog write surface', () => {
   });
 
   it('omits the write verbs when the alias adapter is unavailable', () => {
-    expect(createProductCapabilityCatalog(readAdapter).all.map((c) => c.mcpName)).toEqual([
+    const catalog = createProductCapabilityCatalog(readAdapter);
+
+    expect(catalog.all.map((c) => c.mcpName)).toEqual([
       'server_status',
       'opn_describe',
       'opn_get',
       'opn_list'
     ]);
+    expect(catalog.getById('opnsense.create')).toBeUndefined();
+    expect(catalog.getById('opnsense.delete')).toBeUndefined();
+    expect(catalog.getByMcpName('opn_create')).toBeUndefined();
+    expect(catalog.getByMcpName('opn_delete')).toBeUndefined();
   });
 
   it('hides the write verbs under READ_ONLY', () => {

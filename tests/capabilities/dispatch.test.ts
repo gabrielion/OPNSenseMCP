@@ -87,12 +87,12 @@ const exactWriteFlag = new Set<FeatureFlag>(['experimental-alias-write']);
 const exactAliasScope = new Set(['firewall.alias']);
 const PRODUCT_WRITE_POLICY_MATRIX = [
   {
-    label: 'unsupported transport',
+    label: 'READ_ONLY before an unsupported transport',
     transport: 'unsupported',
     readOnly: true,
     enabledFeatureFlags: new Set<FeatureFlag>(),
     allowedResourceScopes: null,
-    expectedCode: 'UNSUPPORTED_TRANSPORT'
+    expectedCode: 'READ_ONLY'
   },
   {
     label: 'READ_ONLY',
@@ -105,6 +105,14 @@ const PRODUCT_WRITE_POLICY_MATRIX = [
   {
     label: 'missing feature flag',
     transport: 'stdio',
+    readOnly: false,
+    enabledFeatureFlags: new Set<FeatureFlag>(),
+    allowedResourceScopes: null,
+    expectedCode: 'FEATURE_DISABLED'
+  },
+  {
+    label: 'missing feature flag before an unsupported transport',
+    transport: 'unsupported',
     readOnly: false,
     enabledFeatureFlags: new Set<FeatureFlag>(),
     allowedResourceScopes: null,
@@ -133,6 +141,22 @@ const PRODUCT_WRITE_POLICY_MATRIX = [
     enabledFeatureFlags: exactWriteFlag,
     allowedResourceScopes: new Set(['system.status']),
     expectedCode: 'RESOURCE_NOT_ALLOWED'
+  },
+  {
+    label: 'wrong scope allow-list before an unsupported transport',
+    transport: 'unsupported',
+    readOnly: false,
+    enabledFeatureFlags: exactWriteFlag,
+    allowedResourceScopes: new Set(['system.status']),
+    expectedCode: 'RESOURCE_NOT_ALLOWED'
+  },
+  {
+    label: 'unsupported transport after eligible policy',
+    transport: 'unsupported',
+    readOnly: false,
+    enabledFeatureFlags: exactWriteFlag,
+    allowedResourceScopes: exactAliasScope,
+    expectedCode: 'UNSUPPORTED_TRANSPORT'
   },
   {
     label: 'eligible stdio policy',
@@ -191,6 +215,34 @@ function createProductWriteHarness(runtimeConfig: RuntimeConfig) {
       mutationServices.backup.create,
       mutationServices.backup.exists,
       mutationServices.audit.record
+    ] as const
+  };
+}
+
+function createUnavailableProductWriteHarness(runtimeConfig: RuntimeConfig) {
+  const readAdapter = {
+    available: false,
+    getSystemStatus: vi.fn(() => Promise.reject(new Error('read handler must not run'))),
+    listServices: vi.fn(() => Promise.reject(new Error('read handler must not run')))
+  } satisfies OPNsenseReadAdapter;
+  const aliasAdapter = {
+    available: false,
+    searchHostAliases: vi.fn(() => Promise.reject(new Error('alias preflight must not run'))),
+    createHostAlias: vi.fn(() => Promise.reject(new Error('create handler must not run'))),
+    deleteHostAlias: vi.fn(() => Promise.reject(new Error('delete handler must not run')))
+  } satisfies OPNsenseAliasAdapter;
+  const application = createApplicationContext(
+    runtimeConfig,
+    createProductCapabilityCatalog(readAdapter, aliasAdapter)
+  );
+  return {
+    application,
+    adapterSpies: [
+      readAdapter.getSystemStatus,
+      readAdapter.listServices,
+      aliasAdapter.searchHostAliases,
+      aliasAdapter.createHostAlias,
+      aliasAdapter.deleteHostAlias
     ] as const
   };
 }
@@ -353,4 +405,51 @@ describe('P0-B product write dispatch policy', () => {
       for (const spy of mutationSpies) expect(spy).not.toHaveBeenCalled();
     }
   );
+});
+
+describe('P0-B unavailable product write dispatch policy', () => {
+  it.each(PRODUCT_WRITE_POLICY_MATRIX)(
+    '$label applies before target availability for both product writes',
+    async (testCase) => {
+      const { application, adapterSpies } = createUnavailableProductWriteHarness(
+        config({
+          readOnly: testCase.readOnly,
+          enabledFeatureFlags: testCase.enabledFeatureFlags,
+          allowedResourceScopes: testCase.allowedResourceScopes
+        })
+      );
+
+      expect(application.catalog.all.map(({ mcpName }) => mcpName)).toEqual([
+        'server_status',
+        'opn_describe',
+        'opn_get',
+        'opn_list'
+      ]);
+
+      for (const request of PRODUCT_WRITE_REQUESTS) {
+        await expect(
+          dispatchCapability(request, context(application, testCase.transport as TransportKind))
+        ).resolves.toMatchObject({
+          kind: 'refused',
+          code: testCase.expectedCode ?? 'TARGET_UNAVAILABLE'
+        });
+      }
+      for (const spy of adapterSpies) expect(spy).not.toHaveBeenCalled();
+    }
+  );
+
+  it('keeps a genuinely unknown forged product name unknown without a target', async () => {
+    const application = createApplicationContext(
+      config({
+        readOnly: false,
+        enabledFeatureFlags: exactWriteFlag,
+        allowedResourceScopes: exactAliasScope
+      }),
+      createProductCapabilityCatalog()
+    );
+
+    await expect(
+      dispatchCapability({ name: 'opn_wipe', arguments: {} }, context(application))
+    ).resolves.toMatchObject({ kind: 'refused', code: 'UNKNOWN_CAPABILITY' });
+  });
 });

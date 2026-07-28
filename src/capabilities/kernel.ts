@@ -7,7 +7,6 @@ import type * as z from 'zod/v4';
 import { FeatureFlagSchema } from '../config/feature-flags.js';
 import type { FeatureFlag } from '../config/feature-flags.js';
 import { createCanonicalJsonSnapshot } from '../security/canonical-json.js';
-import { PRODUCT_MCP_NAMES } from './resource-scopes.js';
 import { areResourceScopesAllowedForEffect } from './exposure.js';
 import type {
   ChangeSummary,
@@ -284,6 +283,7 @@ export interface TypedResourceCapabilityDefinition<
 
 export interface CapabilityCatalogView {
   getByMcpName(name: string): CapabilityDefinition | undefined;
+  getUnavailableByMcpName?(name: string): CapabilityDefinition | undefined;
   listExposed(context: ExposureContext): readonly CapabilityDefinition[];
   /**
    * Every capability the catalogue holds, exposed or not. Used ONLY by the construction-time
@@ -1221,15 +1221,6 @@ export function hasVisibleResourceScopes(
   );
 }
 
-/**
- * A catalogued product tool that is not registered has no configured target; a name outside the
- * product vocabulary is genuinely unknown. Answering both with UNKNOWN_CAPABILITY left a client
- * unable to tell "you are not configured" from "you invented a tool".
- */
-function absentCapabilityRefusal(name: string): CapabilityResult {
-  return refusal(PRODUCT_MCP_NAMES.has(name) ? 'TARGET_UNAVAILABLE' : 'UNKNOWN_CAPABILITY');
-}
-
 function authorizeRequest(
   catalog: CapabilityCatalogView,
   options: SealedPolicyOptions,
@@ -1237,20 +1228,22 @@ function authorizeRequest(
   context: CapabilityInvocationContext
 ): AuthorizationResult {
   let capability: CapabilityDefinition | undefined;
+  let targetAvailable = true;
   try {
     capability = catalog.getByMcpName(request.name);
+    if (capability === undefined) {
+      capability = catalog.getUnavailableByMcpName?.(request.name);
+      targetAvailable = false;
+    }
   } catch {
-    return { kind: 'refused', result: absentCapabilityRefusal(request.name) };
+    return { kind: 'refused', result: refusal('UNKNOWN_CAPABILITY') };
   }
   if (capability === undefined) {
-    return { kind: 'refused', result: absentCapabilityRefusal(request.name) };
+    return { kind: 'refused', result: refusal('UNKNOWN_CAPABILITY') };
   }
 
   let visibleResourceScopes: readonly string[] | undefined;
   try {
-    if (!capability.transports.includes(context.transport)) {
-      return { kind: 'refused', result: refusal('UNSUPPORTED_TRANSPORT') };
-    }
     if (options.readOnly && capability.policy.effect !== 'read') {
       return { kind: 'refused', result: refusal('READ_ONLY') };
     }
@@ -1291,8 +1284,15 @@ function authorizeRequest(
         return { kind: 'refused', result: refusal('RESOURCE_NOT_ALLOWED') };
       }
     }
+    if (!capability.transports.includes(context.transport)) {
+      return { kind: 'refused', result: refusal('UNSUPPORTED_TRANSPORT') };
+    }
   } catch {
     return { kind: 'refused', result: refusal('INVALID_POLICY') };
+  }
+
+  if (!targetAvailable) {
+    return { kind: 'refused', result: refusal('TARGET_UNAVAILABLE') };
   }
 
   if (context.signal?.aborted === true) {
