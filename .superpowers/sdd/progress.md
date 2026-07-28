@@ -433,3 +433,53 @@ P0-B slice 7 (commit-bound disposable-VM attestation): COMPLETE
   - Once committed, this tracked ledger update will advance HEAD beyond the evidence-only commit. The
     real producer must renew the evidence after the remaining tracked P0-B exit-gate work; the verifier
     will then return 2 until that final renewal, never be bypassed or manually resealed.
+
+P0-B resumed exit-gate documentation correction: complete (commits aba410a..5d91d5f, review clean).
+  - Replaced the plan's two literal NUL bytes with textual `\0`, so the plan is valid UTF-8 text.
+  - README now names every excluded broad legacy surface required by the approved spec.
+  - CONTRIBUTING now distinguishes all four live MCP read-tool calls from the two downstream
+    OPNsense API calls made by the last two tools.
+  - TDD: the two assertions failed before the prose change and passed afterwards; the complete
+    documentation test file passed 18/18. Independent task review found no open finding.
+
+P0-B corrective policy-order slice: complete (commits 2ca0f83, 83f0275; review clean).
+  - Listing and direct/forged dispatch now apply READ_ONLY, feature flag, resource scope and
+    transport in the approved order, before target availability.
+  - With no target, only the four reads are listed; eligible forged alias writes return
+    TARGET_UNAVAILABLE only after all four policy gates, with no handler or network I/O.
+  - Unavailable write metadata lives in a kernel-private WeakMap, absent from the exported
+    catalogue surface. Alias-adapter availability is snapshot once at startup.
+  - TDD: initial priority/no-target regressions and both review regressions failed before their
+    fixes. Final focused gate passed 195/195, full verify passed 1105/1105, both conformance
+    profiles passed, and independent re-review found no open finding.
+
+P0-B installed-runtime cwd isolation: complete (commit e815ebd, review clean).
+  - Product 1A, Product 1B and Product 3 now carry the exact installed invocation
+    `{command, arguments, cwd}` and launch from the isolated consumer root.
+  - A shared validator rejects missing, relative, malformed or NUL-bearing invocation data before
+    any transport or process starts; the checkout is never reconstructed as the runtime cwd.
+  - TDD: Product 1A/1B/3 and portable-harness regressions failed before propagation. Final VM
+    runner gate passed 65/65, the focused cwd gate passed 9/9, the installed harness passed 19/19,
+    and independent review found no open finding.
+  - The complete verify/conformance gates remain reserved for the final combined candidate; one
+    combined Vitest run exited 0 without a readable summary and is not used as counted evidence.
+
+P0-B later-commit attestation worktree check: complete (commit f8b9800, review clean).
+  - The verifier now inventories staged, unstaged and non-ignored untracked paths in both
+    attestation states. Pre-evidence permits only the evidence path; a later evidence commit
+    requires a completely clean worktree and index.
+  - TDD: tracked unstaged, tracked staged and untracked later-commit fixtures each returned 0
+    before the fix and now return stale=2. The focused verifier block passed 10/10 and the complete
+    documentation test passed 21/21.
+  - No evidence file was edited or regenerated. Independent review found no open finding.
+
+P0-B Product 3 installed-process lifecycle: complete (commits 5954ce7, 472944e; review clean).
+  - Product 1B and Product 3 now share one hardened stdio lifecycle: validated consumer cwd,
+    bounded connect/request/total/close, actively consumed 1 MiB stderr ceiling with zero-byte
+    success policy, strict capabilities, idempotent close, and observed child exit 0/no signal.
+  - Product 3 retains pinned protocol 2026-07-28 and elicitation.form; every timeout, diagnostic,
+    stderr overflow, nonzero exit, signal or unconfirmed close fails the lifecycle and blocks the
+    attestation path.
+  - TDD: nine Product 3 lifecycle regressions failed before extraction. The final Product 1B +
+    Product 3 gate passed 77/77. Review found and TDD-corrected one lost Product 1B shallow-freeze
+    compatibility guarantee; independent re-review found no open finding.
