@@ -46,6 +46,19 @@ function soleEvidencePath(...outputs) {
   return paths.length === 1 && paths[0] === EVIDENCE_RELATIVE_PATH;
 }
 
+async function completeWorktreeMatches(repositoryRoot, allowedPaths) {
+  const trackedChanges = await runGit(['diff', '--name-only', '-z', 'HEAD', '--'], repositoryRoot);
+  const untracked = await runGit(
+    ['ls-files', '--others', '--exclude-standard', '-z'],
+    repositoryRoot
+  );
+  return (
+    trackedChanges.code === 0 &&
+    untracked.code === 0 &&
+    allowedPaths(nulSeparatedPaths(trackedChanges.stdout), nulSeparatedPaths(untracked.stdout))
+  );
+}
+
 async function readEvidenceFile(evidencePath) {
   let handle;
   try {
@@ -114,18 +127,11 @@ async function gitStateIsCoherent(repositoryRoot, attestation) {
   if (ancestor.code !== 0) return false;
 
   if (head === attestation.commit) {
-    const trackedChanges = await runGit(
-      ['diff', '--name-only', '-z', 'HEAD', '--'],
-      repositoryRoot
-    );
-    const untracked = await runGit(
-      ['ls-files', '--others', '--exclude-standard', '-z'],
-      repositoryRoot
-    );
-    return (
-      trackedChanges.code === 0 &&
-      untracked.code === 0 &&
-      soleEvidencePath(trackedChanges.stdout, untracked.stdout)
+    return completeWorktreeMatches(
+      repositoryRoot,
+      (trackedChanges, untracked) =>
+        trackedChanges.length + untracked.length === 1 &&
+        [...trackedChanges, ...untracked][0] === EVIDENCE_RELATIVE_PATH
     );
   }
 
@@ -134,11 +140,10 @@ async function gitStateIsCoherent(repositoryRoot, attestation) {
     repositoryRoot
   );
   if (changedPaths.code !== 0 || !soleEvidencePath(changedPaths.stdout)) return false;
-  const workingEvidence = await runGit(
-    ['diff', '--quiet', 'HEAD', '--', EVIDENCE_RELATIVE_PATH],
-    repositoryRoot
+  return completeWorktreeMatches(
+    repositoryRoot,
+    (trackedChanges, untracked) => trackedChanges.length === 0 && untracked.length === 0
   );
-  return workingEvidence.code === 0;
 }
 
 export async function verifyVmAttestation({

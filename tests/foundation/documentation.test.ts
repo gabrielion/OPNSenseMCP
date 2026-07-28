@@ -139,6 +139,11 @@ async function runVerifier(root: string): Promise<CommandResult> {
   return runCommand(process.execPath, [VM_ATTESTATION_SCRIPT], { cwd: root });
 }
 
+async function commitVmEvidence(root: string): Promise<void> {
+  await git(root, ['add', 'docs/evidence/product3-vm.json']);
+  await git(root, ['commit', '-qm', 'add VM evidence']);
+}
+
 function bashBlocks(document: string): readonly string[] {
   return [...document.matchAll(/```bash\n(?<body>[\s\S]*?)\n```/gu)].map(
     (match) => match.groups?.body ?? ''
@@ -563,11 +568,35 @@ describe('commit-bound VM attestation verifier', () => {
     const beforeCommit = await runVerifier(fixture.root);
     expect(beforeCommit).toEqual({ code: 0, stdout: '', stderr: '' });
 
-    await git(fixture.root, ['add', 'docs/evidence/product3-vm.json']);
-    await git(fixture.root, ['commit', '-qm', 'add VM evidence']);
+    await commitVmEvidence(fixture.root);
 
     const afterCommit = await runVerifier(fixture.root);
     expect(afterCommit).toEqual({ code: 0, stdout: '', stderr: '' });
+  });
+
+  it('rejects an unstaged tracked change after the later evidence commit', async () => {
+    const fixture = await verifierFixture();
+    await commitVmEvidence(fixture.root);
+    await writeFile(join(fixture.root, 'tracked.txt'), 'unstaged dirty bytes\n', 'utf8');
+
+    expect(await runVerifier(fixture.root)).toEqual({ code: 2, stdout: '', stderr: '' });
+  });
+
+  it('rejects a staged tracked change after the later evidence commit', async () => {
+    const fixture = await verifierFixture();
+    await commitVmEvidence(fixture.root);
+    await writeFile(join(fixture.root, 'tracked.txt'), 'staged dirty bytes\n', 'utf8');
+    await git(fixture.root, ['add', 'tracked.txt']);
+
+    expect(await runVerifier(fixture.root)).toEqual({ code: 2, stdout: '', stderr: '' });
+  });
+
+  it('rejects an untracked path after the later evidence commit', async () => {
+    const fixture = await verifierFixture();
+    await commitVmEvidence(fixture.root);
+    await writeFile(join(fixture.root, 'extra.txt'), 'untracked dirty bytes\n', 'utf8');
+
+    expect(await runVerifier(fixture.root)).toEqual({ code: 2, stdout: '', stderr: '' });
   });
 
   it('accepts replacement evidence when the tested commit contains older evidence', async () => {
