@@ -396,8 +396,8 @@ P0-B slice 6 (truthful public documentation): complete (commits 44acead, 0d4d0d9
   - Gate: verify exit 0, 1020/1020 across 58 files, lint/format/typecheck/license green.
     `npm run evidence:check` remains RED by design until the end-of-P0-B re-seal.
 
-P0-B slice 7 (commit-bound disposable-VM attestation): infrastructure complete; live evidence
-  BLOCKED pending a valid disposable-image factory credential (commits 6113770, f002f14).
+P0-B slice 7 (commit-bound disposable-VM attestation): COMPLETE
+  (commits 6113770, f002f14, 4981db1, 6f086b4, 7931d4b).
   - The producer now refuses a dirty tree and a non-absolute output, binds the exact tested commit,
     tree, policy inputs, pinned image and fixed checks, and writes canonical schema-v2 JSON only
     after lifecycle, VM cleanup and residue proof. The verifier returns 0 coherent, 2 stale and
@@ -406,14 +406,30 @@ P0-B slice 7 (commit-bound disposable-VM attestation): infrastructure complete; 
     VM cleanup, wrong image pin, symlink evidence, missing-parent durability and later evidence
     replacement each received a focused red/green proof. Independent task review found no open
     source-level Critical or Important issue.
-  - Fresh gate on f002f14 under Node 22.23.1: license passed; verify passed 58 files / 1043 tests;
-    both conformance eras passed with zero failures or warnings; git diff --check passed.
-  - The first live attempt was interrupted at the masked input prompt because no interactive
-    terminal was available; its cleanup reported vmStopped=true and residueFree=true. A second
-    attempt used a native hidden macOS dialog connected to stdin only by an anonymous pipe. It
-    reached bootstrap, but bootstrap authentication did not complete; package installation and
-    every alias lifecycle check remained false, while cleanup again reported vmStopped=true and
-    residueFree=true. An independent `vm:status` check reported STOPPED.
-  - No alias write occurred, no evidence file was created, and no attestation was synthesized.
-    Resume only by entering the valid disposable-image factory credential through the hidden native
-    dialog; never place it in chat, a command argument, a log or a tracked file.
+  - Correction to the prior blockage record: the sanitized Product 3 summary discarded
+    Product1bBootstrapError.stage, so `failureStage=bootstrap` proved only that bootstrap rejected;
+    it did NOT prove authentication failed or that the supplied value was invalid. The standalone
+    read-only bootstrap and the exact Product 3 ACL bootstrap later both completed against fresh
+    disposable overlays, showing that neither remained a supported persistent root-cause attribution.
+  - Commit 4981db1 now preserves only the twelve fixed, allow-listed bootstrap stages while rejecting
+    arbitrary stages and every error detail. Strict TDD included a negative teeth proof; full gates
+    passed, and independent review found no Critical, Important or Minor issue.
+  - The first complete post-diagnostic Product 3 run passed all twelve fixed checks and produced real
+    evidence. The required format gate then caught that Prettier attempted to own the compact canonical
+    bytes. Commit 6f086b4 excludes only `docs/evidence/product3-vm.json` from Prettier and pins that
+    boundary in a package-contract regression; the attestation verifier remains the format owner.
+  - The invalidated uncommitted artifact was deleted, never hand-edited. A second real producer run
+    against 6f086b4 passed doctor, VM start, bootstrap, package install, writable surface, alias
+    absence/create/read/delete/final absence, VM stop and residue proof. Commit 7931d4b contains only
+    the resulting `docs/evidence/product3-vm.json`.
+  - Fresh post-producer gates under Node 22.23.1: license passed; verify passed 58 files / 1045 tests;
+    both conformance eras passed every configured scenario with zero failures or warnings
+    (2025: 1/1, 1/1, 2/2; 2026: 2/2, 1/1, 13/13); `git diff --check` passed;
+    `npm run evidence:verify` returned 0 before and after the evidence-only commit. Independent
+    reviews of both producer artifacts found no Critical, Important or Minor issue.
+  - The recorded Product 3 producer attempts owned only the disposable local VM and completed cleanup
+    with vmStopped=true and residueFree=true. The final attested run proves the same properties; no
+    production target was contacted and no attestation was synthesized.
+  - Once committed, this tracked ledger update will advance HEAD beyond the evidence-only commit. The
+    real producer must renew the evidence after the remaining tracked P0-B exit-gate work; the verifier
+    will then return 2 until that final renewal, never be bypassed or manually resealed.
