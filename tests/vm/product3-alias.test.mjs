@@ -13,7 +13,10 @@ import {
   runProduct3Alias,
   writeVmAttestationAtomic
 } from '../../scripts/vm/product3-alias.mjs';
-import { FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES } from '../../scripts/vm/product1b-bootstrap.mjs';
+import {
+  FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES,
+  Product1bBootstrapError
+} from '../../scripts/vm/product1b-bootstrap.mjs';
 
 const UUID = '00000000-0000-0000-0000-000000000001';
 const COMMIT = '1'.repeat(40);
@@ -414,10 +417,36 @@ describe('Product 3 disposable-VM alias runner', () => {
     expect(deps.writeAttestation).not.toHaveBeenCalled();
   });
 
-  it('stops the owned VM when bootstrap fails before connection artifacts exist', async () => {
+  it('reports a safe Product 1B bootstrap stage after stopping the owned VM', async () => {
     const stdout = captureStream();
     const deps = dependencies({
-      bootstrap: vi.fn(async () => Promise.reject(new Error('SENTINEL_FAILURE')))
+      bootstrap: vi.fn(async () => Promise.reject(new Product1bBootstrapError('heredoc-lines')))
+    });
+
+    await expect(runProduct3Alias({ ...deps, stdout: stdout.stream })).resolves.toBe(2);
+
+    expect(deps.calls).toEqual(['start', 'stop']);
+    expect(deps.createArtifacts).not.toHaveBeenCalled();
+    expect(deps.createTemporaryRoot).not.toHaveBeenCalled();
+    expect(deps.verifyResidue).toHaveBeenCalledWith({
+      instanceRoot: deps.instanceRoot,
+      temporaryRoot: undefined
+    });
+    expect(JSON.parse(stdout.output())).toMatchObject({
+      status: 'failed',
+      failureStage: 'heredoc-lines',
+      checks: { vmStopped: true, residueFree: true }
+    });
+    expect(stdout.output()).not.toMatch(/SENTINEL|\/private/iu);
+  });
+
+  it('rejects an untrusted bootstrap stage after stopping the owned VM', async () => {
+    const stdout = captureStream();
+    const failure = new Product1bBootstrapError('SENTINEL_UNTRUSTED_STAGE');
+    failure.cause = new Error('SENTINEL_FAILURE');
+    failure.privatePath = '/private/SENTINEL_FAILURE';
+    const deps = dependencies({
+      bootstrap: vi.fn(async () => Promise.reject(failure))
     });
 
     await expect(runProduct3Alias({ ...deps, stdout: stdout.stream })).resolves.toBe(2);

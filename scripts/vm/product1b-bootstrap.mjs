@@ -151,6 +151,25 @@ const SHELL_PROMPT = /root@OPNsense:[^\r\n]*#\s*/u;
 const SHELL_CONTINUATION_PROMPT = /\?\s*/u;
 const HELPER_EOF = '__OPNSENSE_MCP_HELPER_EOF__';
 
+export const PRODUCT1B_BOOTSTRAP_SAFE_STAGES = Object.freeze([
+  'connecting',
+  'login',
+  'password',
+  'menu',
+  'shell',
+  'umask',
+  'heredoc-open',
+  'heredoc-lines',
+  'heredoc-close',
+  'decode',
+  'result',
+  'frame'
+]);
+
+export function isSafeProduct1bBootstrapStage(stage) {
+  return typeof stage === 'string' && PRODUCT1B_BOOTSTRAP_SAFE_STAGES.includes(stage);
+}
+
 export class Product1bBootstrapError extends Error {
   constructor(stage = 'validation') {
     super(FAILURE_CODE);

@@ -10,7 +10,12 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { buildVmAttestation, serializeVmAttestation } from './attestation.mjs';
-import { FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES, bootstrapProduct1b } from './product1b-bootstrap.mjs';
+import {
+  FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES,
+  Product1bBootstrapError,
+  bootstrapProduct1b,
+  isSafeProduct1bBootstrapStage
+} from './product1b-bootstrap.mjs';
 import { createConnectionArtifacts } from './product1b-connection.mjs';
 import { startDisposableVm, statusDisposableVm, stopDisposableVm } from './product1b-lifecycle.mjs';
 import {
@@ -524,7 +529,14 @@ export async function runProduct3Alias(options = {}) {
       });
       Object.assign(checks, lifecycleChecks);
       if (Object.values(lifecycleChecks).every(Boolean)) failureStage = null;
-    } catch {
+    } catch (error) {
+      if (
+        failureStage === 'bootstrap' &&
+        error instanceof Product1bBootstrapError &&
+        isSafeProduct1bBootstrapStage(error.stage)
+      ) {
+        failureStage = error.stage;
+      }
       // The final summary contains only fixed booleans; VM, credentials and firewall data stay private.
     } finally {
       if (ownedVm) {

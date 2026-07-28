@@ -7,7 +7,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bootstrapProduct1b } from './product1b-bootstrap.mjs';
+import { bootstrapProduct1b, isSafeProduct1bBootstrapStage } from './product1b-bootstrap.mjs';
 import { createConnectionArtifacts } from './product1b-connection.mjs';
 import {
   Product1bVmError,
@@ -893,21 +893,7 @@ export async function runVmBootstrapCli({
       typeof error === 'object' &&
       error !== null &&
       'stage' in error &&
-      typeof error.stage === 'string' &&
-      [
-        'connecting',
-        'login',
-        'password',
-        'menu',
-        'shell',
-        'umask',
-        'heredoc-open',
-        'heredoc-lines',
-        'heredoc-close',
-        'decode',
-        'result',
-        'frame'
-      ].includes(error.stage)
+      isSafeProduct1bBootstrapStage(error.stage)
         ? error.stage
         : failureStage;
     const cleanup = cleanupConfirmed
