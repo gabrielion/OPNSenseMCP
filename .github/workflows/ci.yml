@@ -43,6 +43,7 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm run verify
+      - run: npm run evidence:verify
       - name: Assert no generated or repository residue
         run: |
           git diff --check

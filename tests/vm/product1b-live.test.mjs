@@ -145,6 +145,11 @@ function sdkProcessHarness({
   child.pid = 42_424;
   child.exitCode = null;
   child.signalCode = null;
+  child.kill = vi.fn((signal) => {
+    child.signalCode = signal;
+    child.emit('close', null, signal);
+    return true;
+  });
   const stderr = new PassThrough();
   const transport = {
     _process: undefined,
@@ -208,6 +213,7 @@ function sdkProcessHarness({
     client,
     closeClient,
     transport,
+    child,
     closeTransport
   };
 }
@@ -461,6 +467,10 @@ describe('Product 1B one-command live runner', () => {
     await rejection;
     expect(harness.closeClient).toHaveBeenCalledOnce();
     expect(harness.closeTransport).toHaveBeenCalledOnce();
+    expect(harness.child.kill).toHaveBeenCalledOnce();
+    expect(harness.child.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(harness.child.signalCode).toBe('SIGKILL');
+    expect(harness.child.listenerCount('close')).toBe(0);
   });
 
   it('fails closed without console noise when the server omits its tools capability', async () => {

@@ -96,20 +96,25 @@ External model or capacity failure exits `3` and records `blocked`; it never bec
 
 ## Release gate
 
-`npm run verify` is the per-commit gate. One further check belongs to a release rather than to a commit:
+`npm run verify` is the per-commit gate. Two further checks belong to a release rather than to a commit:
 
 ```bash
 if test -x /opt/homebrew/opt/node@22/bin/node; then
   export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
 fi
 node -e "const [major, minor] = process.versions.node.split('.').map(Number); process.exit(major === 22 && minor >= 19 ? 0 : 1)" &&
-npm run evidence:check
+npm run evidence:check &&
+npm run evidence:verify
 ```
 
-It compares the sealed OpenCode evidence against the package this tree builds. Anything that is packed
-changes that package — `src/` through `dist/`, and also `README.md`, `LICENSE` and `package.json` — so this
-check is expected to fail until the evidence is re-sealed by its real producer, `npm run smoke:opencode`,
-which needs the OpenCode client and a model. Never hand-edit `tests/fixtures/opencode.product1a.json`.
+The first check compares the sealed OpenCode evidence against the package this tree builds. Anything that
+is packed changes that package — `src/` through `dist/`, and also `README.md`, `LICENSE` and
+`package.json` — so this check is expected to fail until the evidence is re-sealed by its real producer,
+`npm run smoke:opencode`, which needs the OpenCode client and a model. The second check requires the
+commit-bound Product 3 VM attestation to remain coherent with the release history. The VM verifier accepts
+either the exact pre-evidence commit and tree or one later commit whose sole change is
+`docs/evidence/product3-vm.json`. Never hand-edit either evidence document; renew each one only with its
+real producer.
 
 ## Change discipline
 

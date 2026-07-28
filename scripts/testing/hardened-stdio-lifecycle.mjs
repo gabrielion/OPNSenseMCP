@@ -28,6 +28,7 @@ function pinnedStdioChildProcess(transport) {
     child.pid <= 0 ||
     typeof child.once !== 'function' ||
     typeof child.off !== 'function' ||
+    typeof child.kill !== 'function' ||
     !(child.exitCode === null || Number.isSafeInteger(child.exitCode)) ||
     !(child.signalCode === null || typeof child.signalCode === 'string')
   ) {
@@ -137,6 +138,7 @@ export async function runHardenedStdioLifecycle(
   let stderrOverflow = false;
   let stderrFailed = false;
   let processCloseObserver;
+  let installedChild;
   let client;
   let closeClient = async () => undefined;
   let diagnosticsClean = () => false;
@@ -168,8 +170,8 @@ export async function runHardenedStdioLifecycle(
     const originalStart = transport.start.bind(transport);
     transport.start = async () => {
       await originalStart();
-      const child = pinnedStdioChildProcess(transport);
-      processCloseObserver = observeProcessClose(child);
+      installedChild = pinnedStdioChildProcess(transport);
+      processCloseObserver = observeProcessClose(installedChild);
     };
 
     const originalTransportClose = transport.close.bind(transport);
@@ -262,6 +264,18 @@ export async function runHardenedStdioLifecycle(
       }
     } catch {
       failed = true;
+      if (processCloseObserver !== undefined && installedChild !== undefined) {
+        try {
+          if (installedChild.exitCode === null && installedChild.signalCode === null) {
+            if (installedChild.kill('SIGKILL') !== true) {
+              failed = true;
+            }
+          }
+          processOutcome = await boundedByTimeout(processCloseObserver.settlement, closeTimeoutMs);
+        } catch {
+          failed = true;
+        }
+      }
     } finally {
       processCloseObserver?.cleanup();
       removeStderrListeners();

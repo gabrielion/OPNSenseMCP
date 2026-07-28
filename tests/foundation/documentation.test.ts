@@ -703,4 +703,19 @@ describe('commit-bound VM attestation verifier', () => {
     );
     expect(manifest.scripts['evidence:verify']).toBe('node scripts/verify-vm-attestation.mjs');
   });
+
+  it('makes commit-bound VM evidence verification mandatory in CI and the release gate', async () => {
+    const [workflow, contributing] = await Promise.all([
+      readFile('.github/workflows/ci.yml', 'utf8'),
+      readFile('CONTRIBUTING.md', 'utf8')
+    ]);
+
+    expect(workflow).toMatch(/- run: npm run verify\s+- run: npm run evidence:verify/u);
+    expect(contributing.replace(/\s+/gu, ' ')).toContain(
+      'npm run evidence:check && npm run evidence:verify'
+    );
+    expect(contributing.replace(/\s+/gu, ' ')).toContain(
+      'The VM verifier accepts either the exact pre-evidence commit and tree or one later commit whose sole change is `docs/evidence/product3-vm.json`.'
+    );
+  });
 });
