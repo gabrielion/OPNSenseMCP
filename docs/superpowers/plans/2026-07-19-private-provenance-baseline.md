@@ -17,9 +17,9 @@ destination-to-group mapping and expected digest projections.
 
 ## Global Constraints
 
-- Work only in `/Users/g.lion/dev/OPNSenseMCP-next` on `codex/mcp-v2-rebuild`; preserve unrelated changes.
+- Work only in the assigned isolated workspace and branch; preserve unrelated changes.
 - Do not read the owner bundle, old repository, owner worktree, baseline, environment file, VM, firewall,
-  credential, or `/Users/g.lion/dev/OPNSenseMCP`.
+  credential, or any other working copy.
 - Use only synthetic identities, paths, digests, byte counts, and contents generated in tests.
 - Task 2A1 performs no filesystem, environment, Git, subprocess, platform, clock, network, preparation,
   activation, copying, scanning, sealing, or release operation.
