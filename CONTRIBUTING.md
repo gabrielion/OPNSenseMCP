@@ -39,8 +39,10 @@ npm run vm:product3 -- --attestation-out "$PWD/docs/evidence/product3-vm.json"
 
 The first live run downloads the SHA-256-pinned official OPNsense 26.1.6 nano archive into the user cache.
 The test prompts for the disposable image's factory password without echoing it. It then owns start,
-least-privilege API bootstrap, TLS pinning, npm pack/install, the two MCP reads, stop, credential deletion,
-overlay deletion, and residue verification. A setup or read failure still runs cleanup and exits nonzero.
+least-privilege API bootstrap, TLS pinning, npm pack/install, all four MCP read-tool calls (`server_status`,
+`opn_describe system.status`, `opn_get system.status`, and `opn_list core.services`), the last two issuing
+the two remote OPNsense API calls, stop, credential deletion, overlay deletion, and residue verification. A
+setup or read failure still runs cleanup and exits nonzero.
 
 `vm:product3` runs the bounded firewall-alias lifecycle — list, create, read back, delete, prove absence.
 It boots and owns **its own** VM: it refuses to start while another managed VM is running, prompts for the

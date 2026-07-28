@@ -251,6 +251,8 @@ calls, and no more than the bounded lifecycle stated above. They do **not** prov
 - native Windows installation or client operation;
 - a full agentic benchmark or a benchmark score.
 
+Raw API dispatch, free-form shell/SSH, bulk IaC, a dashboard, and broad legacy parity are absent.
+
 ## Product roadmap and example requests
 
 The mutation safety envelope — scoped authorization, human confirmation, verified backup, redacted audit,
