@@ -223,6 +223,96 @@ describe('product documentation', () => {
     });
   });
 
+  it('publishes only the lifecycle proven by the commit-bound Product 3 VM attestation', async () => {
+    const [readme, attestationBytes] = await Promise.all([
+      readFile('README.md', 'utf8'),
+      readFile('docs/evidence/product3-vm.json', 'utf8')
+    ]);
+    const attestation = JSON.parse(attestationBytes) as {
+      readonly checks?: Readonly<Record<string, unknown>>;
+    };
+    expect(attestation.checks).toMatchObject({
+      vmStarted: true,
+      bootstrap: true,
+      packageInstalled: true,
+      writableSurface: true,
+      aliasAbsentBefore: true,
+      aliasCreated: true,
+      aliasPresent: true,
+      aliasDeleted: true,
+      aliasAbsentAfter: true,
+      vmStopped: true,
+      residueFree: true
+    });
+
+    const prose = readme.replace(/\s+/gu, ' ');
+    const lowerProse = prose.toLowerCase();
+    for (const obsoleteStatus of [
+      'no sealed disposable-vm evidence for a write exists',
+      'no sealed live run is committed',
+      'a live disposable-vm mutation: the lifecycle is proven against a synthetic target only'
+    ]) {
+      expect.soft(lowerProse).not.toContain(obsoleteStatus);
+    }
+    expect
+      .soft(readme)
+      .toContain('[commit-bound Product 3 VM attestation](docs/evidence/product3-vm.json)');
+    expect
+      .soft(prose)
+      .toContain(
+        '`test:product1b` owns the whole live test: it verifies and caches the pinned official OPNsense 26.1.6 nano image, starts one local VM, asks for the factory password without echoing or storing it, creates a disposable least-privilege API user, packs and installs this npm package, calls `server_status`, `opn_describe system.status`, `opn_get system.status` and `opn_list core.services` through one MCP session, then stops the VM and removes the overlay, API credentials, certificate, and temporary package.'
+      );
+    expect
+      .soft(prose)
+      .toContain(
+        'The historical Product 1B evidence remains the proof for only two remote calls: `GET /api/core/system/status` and `POST /api/core/service/search`.'
+      );
+    expect
+      .soft(prose)
+      .toContain(
+        'Product 3 proves on a disposable VM the following only: the writable surface and this exact `firewall.alias` lifecycle: absent, create, present, delete, absent, followed by VM cleanup and a residue-free check.'
+      );
+    expect
+      .soft(prose)
+      .toContain(
+        'Both ACL profiles now have live evidence only in their exact scenarios: the read-only profile in Product 1B and the alias-write profile in Product 3.'
+      );
+    expect
+      .soft(prose)
+      .toContain(
+        'The Product 3 attestation does not prove production use, durable state, durable backups, a durable audit trail, restore, or automatic rollback.'
+      );
+    const claimVerb =
+      /\b(?:attest|claim|confirm|cover|demonstrate|establish|prove|show|support|validate|verify)s?\b/iu;
+    const product3Reference = /\b(?:Product 3|attestation)\b/iu;
+    const product3Claims = readme
+      .split(/\n\s*\n/u)
+      .flatMap((paragraph) =>
+        paragraph
+          .replace(/\s+/gu, ' ')
+          .trim()
+          .split(/(?<=[.!?])\s+(?=[*#`A-Z])/u)
+      )
+      .filter((sentence) => product3Reference.test(sentence) && claimVerb.test(sentence));
+    expect
+      .soft(product3Claims)
+      .toEqual([
+        'Product 3 proves on a disposable VM the following only: the writable surface and this exact `firewall.alias` lifecycle: absent, create, present, delete, absent, followed by VM cleanup and a residue-free check.',
+        'The Product 3 attestation does not prove production use, durable state, durable backups, a durable audit trail, restore, or automatic rollback.'
+      ]);
+
+    const proofSection = prose.slice(
+      prose.indexOf('## Disposable OPNsense 26 proof'),
+      prose.indexOf('## OpenCode')
+    );
+    const positiveClaimsOnly = proofSection.replace(product3Claims[1] ?? '', '');
+    expect
+      .soft(positiveClaimsOnly)
+      .not.toMatch(
+        /\b(?:attest|claim|confirm|cover|demonstrate|establish|prove|show|support|validate|verify)s?\b[^.!?]{0,160}\b(?:production|durable|persistent|restore|rollback|public exposure|Internet-facing|outside `firewall\.alias`)\b/iu
+      );
+  });
+
   it('publishes exact guarded contributor commands', async () => {
     const [readme, contributing, stdioTest] = await Promise.all([
       readFile('README.md', 'utf8'),

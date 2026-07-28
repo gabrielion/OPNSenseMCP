@@ -158,24 +158,29 @@ npm run test:product1b
 `vm:doctor` reports each missing host dependency without changing the machine. `test:product1b` owns the
 whole live test: it verifies and caches the pinned official OPNsense 26.1.6 nano image, starts one local VM,
 asks for the factory password without echoing or storing it, creates a disposable least-privilege API user,
-packs and installs this npm package, calls `opn_get system.status` and `opn_list core.services`, then stops the
-VM and removes the overlay, API credentials, certificate, and temporary package. The first run downloads an
-approximately 557 MB archive and creates a 3 GiB read-only base image in the user cache.
+packs and installs this npm package, calls `server_status`, `opn_describe system.status`,
+`opn_get system.status` and `opn_list core.services` through one MCP session, then stops the VM and removes
+the overlay, API credentials, certificate, and temporary package. The first run downloads an approximately
+557 MB archive and creates a 3 GiB read-only base image in the user cache.
 
-The observed OPNsense 26 read contract is `GET /api/core/system/status` and a bounded
-`POST /api/core/service/search` Bootgrid request. **That is the whole of what the committed live evidence
-covers**, and it explicitly disclaims mutations.
+The historical Product 1B evidence remains the proof for only two remote calls:
+`GET /api/core/system/status` and `POST /api/core/service/search`. Its sanitized
+[machine-readable evidence](tests/fixtures/product1b.live.json) also records its exact host, QEMU, firmware,
+transport and cleanup checks without retaining firewall data or credentials.
 
-The alias write path targets `GET /api/core/backup/download/this` for the pre-change backup, then
+The alias-write implementation targets `GET /api/core/backup/download/this` for the pre-change backup, then
 `POST /api/firewall/alias/searchItem`, `addItem` or `delItem/{uuid}`, then the `reconfigure` apply. Those
-are exercised against a synthetic HTTPS target, not against the VM: no sealed disposable-VM evidence for a
-write exists in this repository yet, so no live-mutation claim is made here. The sanitized
-[machine-readable live evidence](tests/fixtures/product1b.live.json) records the exact host, QEMU, firmware,
-transport, cleanup checks, and non-claims without retaining firewall data or credentials.
+endpoint details have deterministic synthetic-target coverage. Product 3 proves on a disposable VM the
+following only: the writable surface and this exact `firewall.alias` lifecycle: absent, create, present,
+delete, absent, followed by VM cleanup and a residue-free check. The
+[commit-bound Product 3 VM attestation](docs/evidence/product3-vm.json) records the tested commit and tree,
+pinned firmware image, policy inputs and fixed lifecycle checks without retaining firewall data or
+credentials. The Product 3 attestation does not prove production use, durable state, durable backups, a
+durable audit trail, restore, or automatic rollback.
 
 **Disposable-account privileges.** The accounts are created with exactly these stock ACLs, and nothing
-else. Only the read-only profile has committed live evidence; the alias-write profile is what the runner
-provisions, not something a sealed run has yet confirmed:
+else. Both ACL profiles now have live evidence only in their exact scenarios: the read-only profile in
+Product 1B and the alias-write profile in Product 3.
 
 - read-only account: `page-system-status`, `page-status-services`, `user-config-readonly`;
 - alias-write account: `page-system-status`, `page-status-services`,
@@ -219,9 +224,12 @@ own versioned smoke passes.
 - Strict TypeScript, formatting, lint, license headers, and deterministic unit/integration tests.
 - Clean npm pack/install plus TLS, Basic authentication, response validation, secret redaction, shutdown,
   and cleanup against a synthetic target.
-- Clean npm pack/install against a disposable OPNsense 26.1.6 VM for the status and service-list reads,
-  including VM ownership, pinned image integrity, isolated credentials, TLS pinning, and reverse cleanup.
-  The firewall-alias lifecycle runner exists and passes offline, but no sealed live run is committed.
+- Historical clean npm pack/install against a disposable OPNsense 26.1.6 VM for the two Product 1B remote
+  calls, including VM ownership, pinned image integrity, isolated credentials, TLS pinning and reverse
+  cleanup.
+- A commit-bound Product 3 run against a disposable OPNsense 26.1.6 VM for the writable surface and exact
+  host-alias lifecycle: absent, create, present, delete, absent, followed by VM cleanup and a residue-free
+  check.
 - A hermetic package install **for the synthetic-target proof**: the consumer resolves every dependency
   from a lock-derived loopback-only npm registry, with an empty cache and unreachable proxies, so no
   Internet access is involved. The VM runners still install with `npm install --offline` against the
@@ -229,17 +237,17 @@ own versioned smoke passes.
 - Targeted MCP interoperability checks for protocol versions `2025-11-25` and draft `2026-07-28`.
 - One real OpenCode 1.18.3 routing smoke using `opencode/north-mini-code-free`.
 
-These checks prove the package, synthetic read path, and the two stated disposable-VM reads. They do **not**
-yet prove:
+Together, these checks cover the package, synthetic read path, the two stated historical Product 1B remote
+calls, and no more than the bounded lifecycle stated above. They do **not** prove:
 
 - public DNS, ACME, or HAProxy exposure on the Internet;
+- behavior against a production firewall;
 - durable backups or a durable audit trail: both exist, but only for the lifetime of the process;
 - restore, or any automatic rollback of an applied change;
 - writes to anything other than host entries of `firewall.alias`;
 - any guarantee beyond the first 100 host aliases: the pre-change state digest and the read-back both read
   a single page of 100, so past that a create can report an unverified outcome and a delete can only prove
   that the entry was not on the page it read;
-- a live disposable-VM mutation: the lifecycle is proven against a synthetic target only;
 - native Windows installation or client operation;
 - a full agentic benchmark or a benchmark score.
 
