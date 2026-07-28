@@ -205,13 +205,13 @@ Replace the fixed-message assertion at `tests/mcp/elicitation.test.ts:214-221` w
   it('bounds and sanitizes the described subject', async () => {
     const { elicitations } = await runCreateConfirmation({
       resource: 'firewall.alias',
-      name: `evil ${'a'.repeat(200)}`,
+      name: `evil\0${'a'.repeat(200)}`,
       content: ['192.0.2.10'],
       description: ''
     });
 
     const message = elicitations[0]?.message ?? '';
-    expect(message).not.toContain(' ');
+    expect(message).not.toContain('\0');
     expect(message.length).toBeLessThanOrEqual(200);
     expect(message.startsWith('Apply this exact OPNsense change? create firewall.alias "evil')).toBe(
       true

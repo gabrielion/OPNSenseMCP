@@ -223,6 +223,26 @@ describe('product documentation', () => {
     });
   });
 
+  it('states that every excluded broad legacy surface is absent', async () => {
+    const readme = await readFile('README.md', 'utf8');
+    const prose = readme.replace(/\s+/gu, ' ');
+
+    expect(prose).toContain(
+      'Raw API dispatch, free-form shell/SSH, bulk IaC, a dashboard, and broad legacy parity are absent.'
+    );
+  });
+
+  it('distinguishes all four live MCP reads from the two remote API calls', async () => {
+    const contributing = await readFile('CONTRIBUTING.md', 'utf8');
+    const prose = contributing.replace(/\s+/gu, ' ');
+
+    expect(prose).toContain(
+      'all four MCP read-tool calls (`server_status`, `opn_describe system.status`, `opn_get system.status`, and `opn_list core.services`)'
+    );
+    expect(prose).toContain('the last two issuing the two remote OPNsense API calls');
+    expect(prose).not.toContain('the two MCP reads');
+  });
+
   it('publishes only the lifecycle proven by the commit-bound Product 3 VM attestation', async () => {
     const [readme, attestationBytes] = await Promise.all([
       readFile('README.md', 'utf8'),
