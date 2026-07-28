@@ -5,8 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
+import { GENERATED_OPERATION_DESCRIPTORS } from '../../src/operations/generated/descriptors.ts';
 
-import { installCurrentPackage, runProduct1bLive } from '../../scripts/vm/product1b-live.mjs';
+import {
+  inspectReadResult,
+  installCurrentPackage,
+  runInstalledReads,
+  runProduct1bLive
+} from '../../scripts/vm/product1b-live.mjs';
 
 function captureStream() {
   const stream = new PassThrough();
@@ -17,49 +23,159 @@ function captureStream() {
   return { stream, output: () => output };
 }
 
-function successfulProtocolResult() {
-  const responses = [
-    { jsonrpc: '2.0', id: 1, result: { protocolVersion: '2025-11-25' } },
-    {
-      jsonrpc: '2.0',
-      id: 2,
-      result: {
-        tools: ['server_status', 'opn_describe', 'opn_get', 'opn_list'].map((name) => ({
-          name,
-          annotations: { readOnlyHint: true }
-        }))
-      }
-    },
-    {
-      jsonrpc: '2.0',
-      id: 3,
-      result: { structuredContent: { item: { status: 'ok' } } }
-    },
-    {
-      jsonrpc: '2.0',
-      id: 4,
-      result: {
-        structuredContent: {
-          page: 1,
-          pageSize: 10,
-          total: 1,
-          items: [
-            {
-              id: 'SENTINEL_SERVICE_ID',
-              name: 'SENTINEL_SERVICE_NAME',
-              description: 'SENTINEL_SERVICE_DESCRIPTION',
-              status: 'running'
-            }
-          ]
-        }
-      }
-    }
-  ];
+const systemStatusDescriptor = GENERATED_OPERATION_DESCRIPTORS.find(
+  ({ key }) => key === 'system.status'
+);
+if (systemStatusDescriptor === undefined) throw new Error('Missing system.status descriptor');
+
+function systemStatusDescription() {
+  const {
+    key,
+    label,
+    category,
+    description,
+    requiredPlugin,
+    requiredFeatures,
+    operations,
+    contractDigest
+  } = systemStatusDescriptor;
   return {
-    code: 0,
-    signal: null,
-    stderr: '',
-    stdout: `${responses.map((response) => JSON.stringify(response)).join('\n')}\n`
+    mode: 'resource',
+    resource: {
+      key,
+      label,
+      category,
+      description,
+      requiredPlugin,
+      requiredFeatures,
+      operations,
+      contractDigest
+    }
+  };
+}
+
+function listToolsResult() {
+  return {
+    tools: ['server_status', 'opn_describe', 'opn_get', 'opn_list'].map((name) => ({
+      name,
+      description: `${name} fixture`,
+      inputSchema: { type: 'object', properties: {} },
+      annotations: { readOnlyHint: true }
+    }))
+  };
+}
+
+function toolResult(structuredContent) {
+  return {
+    content: [{ type: 'text', text: JSON.stringify(structuredContent) }],
+    structuredContent
+  };
+}
+
+function refusalToolResult(code) {
+  return {
+    isError: true,
+    content: [{ type: 'text', text: 'Capability refused.' }],
+    structuredContent: { code }
+  };
+}
+
+function successfulReadResult() {
+  return {
+    tools: listToolsResult(),
+    serverStatus: toolResult({ status: 'ok', readOnly: true, version: '0.1.0' }),
+    resourceDescription: toolResult(systemStatusDescription()),
+    systemStatus: toolResult({ item: { status: 'ok' } }),
+    servicesPage: toolResult({
+      page: 1,
+      pageSize: 10,
+      total: 1,
+      items: [
+        {
+          id: 'SENTINEL_SERVICE_ID',
+          name: 'SENTINEL_SERVICE_NAME',
+          description: 'SENTINEL_SERVICE_DESCRIPTION',
+          status: 'running'
+        }
+      ]
+    })
+  };
+}
+
+const successfulChecks = Object.freeze({
+  readOnlySurface: true,
+  serverStatus: true,
+  resourceDescription: true,
+  systemStatus: true,
+  servicesPage: true
+});
+
+function mutateToolResult(resultKey, mutate) {
+  const result = structuredClone(successfulReadResult());
+  mutate(result[resultKey].structuredContent);
+  result[resultKey].content = [
+    { type: 'text', text: JSON.stringify(result[resultKey].structuredContent) }
+  ];
+  return result;
+}
+
+function expectOnlyFailed(result, check) {
+  expect(inspectReadResult(result)).toEqual({ ...successfulChecks, [check]: false });
+}
+
+function sdkProcessHarness({ exitCode = 0, signalCode = null, failHandshake = false } = {}) {
+  const responses = successfulReadResult();
+  const child = new EventEmitter();
+  child.pid = 42_424;
+  child.exitCode = null;
+  child.signalCode = null;
+  const stderr = new PassThrough();
+  const transport = {
+    _process: undefined,
+    stderr,
+    start: vi.fn(async () => {
+      transport._process = child;
+    })
+  };
+  const closeTransport = vi.fn(async () => {
+    transport._process = undefined;
+    child.exitCode = exitCode;
+    child.signalCode = signalCode;
+    child.emit('close', exitCode, signalCode);
+  });
+  transport.close = closeTransport;
+  let connectedTransport;
+  const client = {
+    connect: vi.fn(async (candidate) => {
+      connectedTransport = candidate;
+      await candidate.start();
+      if (failHandshake) {
+        void client.close();
+        throw new Error('SENTINEL_HANDSHAKE_FAILURE');
+      }
+    }),
+    listTools: vi.fn(async () => responses.tools),
+    callTool: vi.fn(async ({ name }) => {
+      return responses[
+        {
+          server_status: 'serverStatus',
+          opn_describe: 'resourceDescription',
+          opn_get: 'systemStatus',
+          opn_list: 'servicesPage'
+        }[name]
+      ];
+    }),
+    close: vi.fn(async () => connectedTransport?.close())
+  };
+  const createTransport = vi.fn(() => transport);
+  const createClient = vi.fn(() => client);
+  return {
+    sdkFactories: { createTransport, createClient },
+    createTransport,
+    createClient,
+    client,
+    transport,
+    closeTransport
   };
 }
 
@@ -93,7 +209,7 @@ function dependencies(overrides = {}) {
       command: `${temporaryRoot}/consumer/node_modules/.bin/opnsense-mcp`,
       arguments: []
     })),
-    runInstalled: vi.fn(async () => successfulProtocolResult()),
+    runInstalled: vi.fn(async () => successfulReadResult()),
     stopVm: vi.fn(async () => {
       calls.push('stop');
       return { state: 'stopped', cleaned: true };
@@ -108,6 +224,314 @@ function dependencies(overrides = {}) {
 }
 
 describe('Product 1B one-command live runner', () => {
+  it('opens one official MCP session, calls the four tools in order, and closes it', async () => {
+    const events = [];
+    const responses = successfulReadResult();
+    const client = {
+      listTools: vi.fn(async () => {
+        events.push('listTools');
+        return responses.tools;
+      }),
+      callTool: vi.fn(async (request) => {
+        events.push(request);
+        return responses[
+          {
+            server_status: 'serverStatus',
+            opn_describe: 'resourceDescription',
+            opn_get: 'systemStatus',
+            opn_list: 'servicesPage'
+          }[request.name]
+        ];
+      }),
+      close: vi.fn(async () => {
+        events.push('close');
+      }),
+      diagnosticsClean: vi.fn(() => {
+        events.push('diagnosticsClean');
+        return true;
+      })
+    };
+    const openClient = vi.fn(async ({ environment, signal }) => {
+      expect(environment).toMatchObject({
+        READ_ONLY: 'true',
+        OPNSENSE_CONFIG_FILE: '/private/SENTINEL_CONNECTION.json'
+      });
+      expect(environment.MCP_REQUEST_STATE_SECRET).toMatch(/^[A-Za-z0-9_-]+$/u);
+      expect(signal).toBeInstanceOf(AbortSignal);
+      return client;
+    });
+
+    await expect(
+      runInstalledReads({
+        invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+        configPath: '/private/SENTINEL_CONNECTION.json',
+        openClient
+      })
+    ).resolves.toEqual(responses);
+
+    expect(events).toEqual([
+      'listTools',
+      { name: 'server_status', arguments: {} },
+      { name: 'opn_describe', arguments: { resource: 'system.status' } },
+      { name: 'opn_get', arguments: { resource: 'system.status' } },
+      {
+        name: 'opn_list',
+        arguments: { resource: 'core.services', page: 1, pageSize: 10, query: '' }
+      },
+      'close',
+      'diagnosticsClean'
+    ]);
+    expect(openClient).toHaveBeenCalledWith({
+      invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+      environment: expect.any(Object),
+      signal: expect.any(AbortSignal)
+    });
+  });
+
+  it.each(['tool failure', 'stderr output'])(
+    'closes the installed MCP session and fails safely after %s',
+    async (condition) => {
+      const responses = successfulReadResult();
+      const close = vi.fn(async () => undefined);
+      const diagnosticsClean = vi.fn(() => condition !== 'stderr output');
+      const client = {
+        listTools: vi.fn(async () => responses.tools),
+        callTool: vi.fn(async ({ name }) => {
+          if (condition === 'tool failure' && name === 'opn_describe') {
+            throw new Error('SENTINEL_TOOL_FAILURE');
+          }
+          return responses[
+            {
+              server_status: 'serverStatus',
+              opn_describe: 'resourceDescription',
+              opn_get: 'systemStatus',
+              opn_list: 'servicesPage'
+            }[name]
+          ];
+        }),
+        close,
+        diagnosticsClean
+      };
+
+      await expect(
+        runInstalledReads({
+          invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+          configPath: '/private/SENTINEL_CONNECTION.json',
+          openClient: vi.fn(async () => client)
+        })
+      ).rejects.toThrow(/^Installed read failed$/);
+
+      expect(close).toHaveBeenCalledOnce();
+      expect(diagnosticsClean).toHaveBeenCalledOnce();
+    }
+  );
+
+  it('rejects an installed MCP process that exits with code 1', async () => {
+    const harness = sdkProcessHarness({ exitCode: 1 });
+
+    await expect(
+      runInstalledReads({
+        invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+        configPath: '/private/SENTINEL_CONNECTION.json',
+        sdkFactories: harness.sdkFactories
+      })
+    ).rejects.toThrow(/^Installed read failed$/);
+
+    expect(harness.createTransport).toHaveBeenCalledOnce();
+    expect(harness.closeTransport).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an installed MCP process terminated by a signal', async () => {
+    const harness = sdkProcessHarness({ exitCode: null, signalCode: 'SIGTERM' });
+
+    await expect(
+      runInstalledReads({
+        invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+        configPath: '/private/SENTINEL_CONNECTION.json',
+        sdkFactories: harness.sdkFactories
+      })
+    ).rejects.toThrow(/^Installed read failed$/);
+
+    expect(harness.createTransport).toHaveBeenCalledOnce();
+    expect(harness.closeTransport).toHaveBeenCalledOnce();
+  });
+
+  it('deduplicates handshake and runner transport closes', async () => {
+    const harness = sdkProcessHarness({ failHandshake: true });
+
+    await expect(
+      runInstalledReads({
+        invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+        configPath: '/private/SENTINEL_CONNECTION.json',
+        sdkFactories: harness.sdkFactories
+      })
+    ).rejects.toThrow(/^Installed read failed$/);
+
+    expect(harness.client.close).toHaveBeenCalledTimes(2);
+    expect(harness.closeTransport).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed without console noise when the server omits its tools capability', async () => {
+    const harness = sdkProcessHarness();
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => undefined);
+    harness.client.listTools.mockImplementation(async () => {
+      const clientOptions = harness.createClient.mock.calls[0]?.[1];
+      if (clientOptions?.enforceStrictCapabilities !== true) {
+        console.debug('SENTINEL_MISSING_TOOLS_CAPABILITY');
+        return successfulReadResult().tools;
+      }
+      throw new Error('SENTINEL_MISSING_TOOLS_CAPABILITY');
+    });
+
+    try {
+      await expect(
+        runInstalledReads({
+          invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+          configPath: '/private/SENTINEL_CONNECTION.json',
+          sdkFactories: harness.sdkFactories
+        })
+      ).rejects.toThrow(/^Installed read failed$/);
+
+      expect(harness.createClient).toHaveBeenCalledWith(
+        { name: 'product1b-live', version: '0.1.0' },
+        {
+          capabilities: {},
+          enforceStrictCapabilities: true,
+          versionNegotiation: { mode: 'legacy' }
+        }
+      );
+      expect(debug).not.toHaveBeenCalled();
+      expect(harness.closeTransport).toHaveBeenCalledOnce();
+    } finally {
+      debug.mockRestore();
+    }
+  });
+
+  it('rejects an abort that arrives while the MCP client is closing', async () => {
+    const responses = successfulReadResult();
+    const controller = new AbortController();
+    let markCloseStarted;
+    let releaseClose;
+    const closeStarted = new Promise((resolve) => {
+      markCloseStarted = resolve;
+    });
+    const heldClose = new Promise((resolve) => {
+      releaseClose = resolve;
+    });
+    const client = {
+      listTools: vi.fn(async () => responses.tools),
+      callTool: vi.fn(async ({ name }) => {
+        return responses[
+          {
+            server_status: 'serverStatus',
+            opn_describe: 'resourceDescription',
+            opn_get: 'systemStatus',
+            opn_list: 'servicesPage'
+          }[name]
+        ];
+      }),
+      close: vi.fn(async () => {
+        markCloseStarted();
+        await heldClose;
+      }),
+      diagnosticsClean: vi.fn(() => true)
+    };
+    const run = runInstalledReads({
+      invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+      configPath: '/private/SENTINEL_CONNECTION.json',
+      signal: controller.signal,
+      openClient: vi.fn(async () => client)
+    });
+
+    await closeStarted;
+    controller.abort();
+    releaseClose();
+
+    await expect(run).rejects.toThrow(/^Installed read failed$/);
+    expect(client.close).toHaveBeenCalledOnce();
+  });
+
+  it('accepts the exact generated system.status projection and bounded read results', () => {
+    expect(inspectReadResult(successfulReadResult())).toEqual(successfulChecks);
+  });
+
+  it.each([
+    [
+      'the input schema changes',
+      (description) => {
+        description.resource.operations[0].inputSchema.properties = {
+          poison: { type: 'string' }
+        };
+      }
+    ],
+    [
+      'the output schema changes',
+      (description) => {
+        description.resource.operations[0].outputSchema.properties.item.properties.status.maxLength = 63;
+      }
+    ],
+    [
+      'the input schema digest changes',
+      (description) => {
+        description.resource.operations[0].inputSchemaDigest = '0'.repeat(64);
+      }
+    ],
+    [
+      'the output schema digest changes',
+      (description) => {
+        description.resource.operations[0].outputSchemaDigest = '0'.repeat(64);
+      }
+    ],
+    [
+      'the contract digest changes',
+      (description) => {
+        description.resource.contractDigest = '0'.repeat(64);
+      }
+    ]
+  ])('rejects only the resource description when %s', (_label, mutate) => {
+    expectOnlyFailed(mutateToolResult('resourceDescription', mutate), 'resourceDescription');
+  });
+
+  it.each([
+    [
+      'server status is not read-only',
+      'serverStatus',
+      (status) => {
+        status.readOnly = false;
+      }
+    ],
+    [
+      'system status exceeds its bound',
+      'systemStatus',
+      (status) => {
+        status.item.status = 'x'.repeat(65);
+      }
+    ],
+    [
+      'page total is lower than the returned item count',
+      'servicesPage',
+      (page) => {
+        page.total = 0;
+      }
+    ],
+    [
+      'a service status is outside the closed vocabulary',
+      'servicesPage',
+      (page) => {
+        page.items[0].status = 'maintenance';
+      }
+    ],
+    [
+      'a service name exceeds its bound',
+      'servicesPage',
+      (page) => {
+        page.items[0].name = 'x'.repeat(129);
+      }
+    ]
+  ])('keeps the other checks green when %s', (_label, check, mutate) => {
+    expectOnlyFailed(mutateToolResult(check, mutate), check);
+  });
+
   it('runs the installed read-only product against one fresh VM and emits one sanitized summary', async () => {
     const stdout = captureStream();
     const deps = dependencies();
@@ -138,7 +562,8 @@ describe('Product 1B one-command live runner', () => {
         command: '/private/SENTINEL_TEMPORARY/consumer/node_modules/.bin/opnsense-mcp',
         arguments: []
       },
-      configPath: `${deps.instanceRoot}/SENTINEL_CONNECTION.json`
+      configPath: `${deps.instanceRoot}/SENTINEL_CONNECTION.json`,
+      signal: expect.any(AbortSignal)
     });
     expect(deps.calls).toEqual(['start', 'stop', 'remove']);
 
@@ -154,6 +579,8 @@ describe('Product 1B one-command live runner', () => {
         bootstrap: true,
         packageInstalled: true,
         readOnlySurface: true,
+        serverStatus: true,
+        resourceDescription: true,
         systemStatus: true,
         servicesPage: true,
         vmStopped: true,
@@ -167,12 +594,8 @@ describe('Product 1B one-command live runner', () => {
     const stdout = captureStream();
     const deps = dependencies({
       runInstalled: vi.fn(async () => ({
-        ...successfulProtocolResult(),
-        stdout: `${JSON.stringify({
-          jsonrpc: '2.0',
-          id: 3,
-          result: { isError: true, structuredContent: { code: 'SENTINEL_FAILURE' } }
-        })}\n`
+        ...successfulReadResult(),
+        serverStatus: refusalToolResult('SENTINEL_FAILURE')
       }))
     });
 
@@ -217,7 +640,7 @@ describe('Product 1B one-command live runner', () => {
     await Promise.resolve();
 
     expect(deps.stopVm).not.toHaveBeenCalled();
-    releaseRead(successfulProtocolResult());
+    releaseRead(successfulReadResult());
     await expect(run).resolves.toBe(3);
 
     expect(deps.calls).toEqual(['start', 'stop', 'remove']);
@@ -234,6 +657,8 @@ describe('Product 1B one-command live runner', () => {
         bootstrap: true,
         packageInstalled: true,
         readOnlySurface: true,
+        serverStatus: true,
+        resourceDescription: true,
         systemStatus: true,
         servicesPage: true,
         vmStopped: true,

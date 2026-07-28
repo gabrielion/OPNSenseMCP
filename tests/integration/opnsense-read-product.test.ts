@@ -5,7 +5,10 @@ import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createApplicationContext } from '../../src/app/application-context.js';
 import { createDefaultApplicationRuntime } from '../../src/app/default-application.js';
+import { createProductCapabilityCatalog } from '../../src/capabilities/catalog.js';
 import type { RuntimeConfig } from '../../src/config/runtime-config.js';
+import type { OPNsenseAliasAdapter } from '../../src/opnsense/alias-adapter.js';
+import type { OPNsenseReadAdapter } from '../../src/opnsense/read-adapter.js';
 import { MCP_ERAS } from '../helpers/connect.js';
 import { startSyntheticOPNsenseTarget } from '../support/https-opnsense-mock.js';
 
@@ -31,8 +34,22 @@ function unavailableConfig(): RuntimeConfig {
 }
 
 describe.each(MCP_ERAS)('$label Product 1A secure read composition', ({ connect }) => {
-  it('stays protocol-clean and returns sealed target refusals without configuration', async () => {
-    const connection = await connect(createApplicationContext(unavailableConfig()));
+  it('calls all four tools without configuration and performs zero target adapter I/O', async () => {
+    const getSystemStatus = vi.fn<OPNsenseReadAdapter['getSystemStatus']>();
+    const listServices = vi.fn<OPNsenseReadAdapter['listServices']>();
+    const searchHostAliases = vi.fn<OPNsenseAliasAdapter['searchHostAliases']>();
+    const createHostAlias = vi.fn<OPNsenseAliasAdapter['createHostAlias']>();
+    const deleteHostAlias = vi.fn<OPNsenseAliasAdapter['deleteHostAlias']>();
+    const catalog = createProductCapabilityCatalog(
+      { available: false, getSystemStatus, listServices },
+      {
+        available: false,
+        searchHostAliases,
+        createHostAlias,
+        deleteHostAlias
+      }
+    );
+    const connection = await connect(createApplicationContext(unavailableConfig(), catalog));
     try {
       expect((await connection.client.listTools()).tools.map(({ name }) => name)).toEqual([
         'server_status',
@@ -40,6 +57,19 @@ describe.each(MCP_ERAS)('$label Product 1A secure read composition', ({ connect 
         'opn_get',
         'opn_list'
       ]);
+      await expect(
+        connection.client.callTool({ name: 'server_status', arguments: {} })
+      ).resolves.toMatchObject({
+        structuredContent: { status: 'ok', readOnly: true, version: '0.1.0' }
+      });
+      await expect(
+        connection.client.callTool({
+          name: 'opn_describe',
+          arguments: { resource: 'system.status' }
+        })
+      ).resolves.toMatchObject({
+        structuredContent: { mode: 'resource', resource: { key: 'system.status' } }
+      });
       await expect(
         connection.client.callTool({ name: 'opn_get', arguments: { resource: 'system.status' } })
       ).resolves.toMatchObject({
@@ -61,6 +91,11 @@ describe.each(MCP_ERAS)('$label Product 1A secure read composition', ({ connect 
           details: { resource: 'core.services', operation: 'list' }
         }
       });
+      expect(getSystemStatus).not.toHaveBeenCalled();
+      expect(listServices).not.toHaveBeenCalled();
+      expect(searchHostAliases).not.toHaveBeenCalled();
+      expect(createHostAlias).not.toHaveBeenCalled();
+      expect(deleteHostAlias).not.toHaveBeenCalled();
     } finally {
       await connection.close();
     }

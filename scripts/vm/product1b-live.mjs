@@ -6,6 +6,9 @@ import { chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/pr
 import { homedir, tmpdir } from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { bootstrapProduct1b } from './product1b-bootstrap.mjs';
 import { createConnectionArtifacts } from './product1b-connection.mjs';
 import { startDisposableVm, statusDisposableVm, stopDisposableVm } from './product1b-lifecycle.mjs';
@@ -17,7 +20,54 @@ const COMMAND_CLEANUP_TIMEOUT_MS = 2000;
 const PACK_TIMEOUT_MS = 120_000;
 const INSTALL_TIMEOUT_MS = 120_000;
 const READ_TIMEOUT_MS = 30_000;
+const PROCESS_CLOSE_TIMEOUT_MS = 10_000;
 const TEMPORARY_PREFIX = 'opnsense-mcp-product1b-';
+const MCP_CLIENT_VERSION = '0.1.0';
+const EXPECTED_SYSTEM_STATUS_DESCRIPTION = {
+  mode: 'resource',
+  resource: {
+    key: 'system.status',
+    label: 'System status',
+    category: 'System',
+    description: 'Read the bounded health status reported by the OPNsense system API.',
+    requiredPlugin: null,
+    requiredFeatures: [],
+    operations: [
+      {
+        name: 'get',
+        effect: 'read',
+        inputSchema: {
+          type: 'object',
+          additionalProperties: false,
+          required: [],
+          properties: {}
+        },
+        outputSchema: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['item'],
+          properties: {
+            item: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['status'],
+              properties: {
+                status: {
+                  type: 'string',
+                  minLength: 1,
+                  maxLength: 64
+                }
+              }
+            }
+          }
+        },
+        inputSchemaDigest: 'd746974fa9afd5e951f76f9af38954b0ad7f436f2120dc974da65e5ee39f856f',
+        outputSchemaDigest: '11e1bc49417ca3079e04578cc82bb0a52b44dda433c678e444817591b8e7651f'
+      }
+    ],
+    contractDigest: '23946c5283a23e8952ee39049285b255d0ab5ad06d1c7cd41f28baccb32e85da'
+  }
+};
 
 function userCacheRoot() {
   return process.platform === 'darwin'
@@ -32,6 +82,8 @@ function emptyChecks() {
     bootstrap: false,
     packageInstalled: false,
     readOnlySurface: false,
+    serverStatus: false,
+    resourceDescription: false,
     systemStatus: false,
     servicesPage: false,
     vmStopped: false,
@@ -216,57 +268,244 @@ export async function installCurrentPackage({
   });
 }
 
-function readRequests() {
-  return [
+function installedReadEnvironment(configPath) {
+  return Object.freeze({
+    PATH: process.env.PATH ?? '',
+    READ_ONLY: 'true',
+    OPNSENSE_CONFIG_FILE: configPath,
+    MCP_REQUEST_STATE_SECRET: randomBytes(32).toString('base64url')
+  });
+}
+
+const DEFAULT_SDK_FACTORIES = Object.freeze({
+  createTransport: (options) => new StdioClientTransport(options),
+  createClient: (clientInfo, options) => new Client(clientInfo, options)
+});
+
+/*
+ * Pinned SDK boundary: StdioClientTransport exposes only `pid` publicly, while this runner must
+ * retain the exact ChildProcess to verify its exit code and signal. Keep the private access here,
+ * validate the runtime shape fail-closed, and revisit it whenever the pinned SDK is upgraded.
+ */
+function pinnedStdioChildProcess(transport) {
+  const child = isRecord(transport) ? transport._process : undefined;
+  if (
+    !isRecord(child) ||
+    !Number.isSafeInteger(child.pid) ||
+    child.pid <= 0 ||
+    typeof child.once !== 'function' ||
+    typeof child.off !== 'function' ||
+    !(child.exitCode === null || Number.isSafeInteger(child.exitCode)) ||
+    !(child.signalCode === null || typeof child.signalCode === 'string')
+  ) {
+    throw new Error('Installed read failed');
+  }
+  return child;
+}
+
+function observeProcessClose(child) {
+  return new Promise((resolveClose) => {
+    child.once('close', (code, signal) => {
+      resolveClose(Object.freeze({ code, signal }));
+    });
+  });
+}
+
+async function waitForProcessClose(closeSettlement) {
+  if (closeSettlement === undefined) throw new Error('Installed read failed');
+  let timeout;
+  try {
+    return await Promise.race([
+      closeSettlement,
+      new Promise((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('Installed read failed')),
+          PROCESS_CLOSE_TIMEOUT_MS
+        );
+      })
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function openSdkClient({
+  invocation,
+  environment,
+  signal,
+  sdkFactories = DEFAULT_SDK_FACTORIES
+}) {
+  const transport = sdkFactories.createTransport({
+    command: invocation.command,
+    args: [...invocation.arguments],
+    cwd: resolve('.'),
+    env: environment,
+    stderr: 'pipe',
+    maxBufferSize: COMMAND_OUTPUT_LIMIT_BYTES
+  });
+  const client = sdkFactories.createClient(
+    { name: 'product1b-live', version: MCP_CLIENT_VERSION },
     {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-11-25',
-        capabilities: {},
-        clientInfo: { name: 'product1b-live', version: '0.1.0' }
-      }
-    },
-    { jsonrpc: '2.0', method: 'notifications/initialized', params: {} },
-    { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
-    {
-      jsonrpc: '2.0',
-      id: 3,
-      method: 'tools/call',
-      params: { name: 'opn_get', arguments: { resource: 'system.status' } }
-    },
-    {
-      jsonrpc: '2.0',
-      id: 4,
-      method: 'tools/call',
-      params: {
-        name: 'opn_list',
-        arguments: { resource: 'core.services', page: 1, pageSize: 10, query: '' }
-      }
+      capabilities: {},
+      enforceStrictCapabilities: true,
+      versionNegotiation: { mode: 'legacy' }
     }
-  ];
+  );
+  let stderrBytes = 0;
+  let stderrOverflow = false;
+  let stderrFailed = transport.stderr === null;
+  let processCloseSettlement;
+  const removeStderrListeners = () => {
+    transport.stderr?.off('data', observeStderr);
+    transport.stderr?.off('error', observeStderrFailure);
+  };
+  const originalStart = transport.start.bind(transport);
+  transport.start = async () => {
+    await originalStart();
+    const child = pinnedStdioChildProcess(transport);
+    processCloseSettlement = observeProcessClose(child);
+    void processCloseSettlement.then(removeStderrListeners);
+  };
+  const originalTransportClose = transport.close.bind(transport);
+  let transportCloseSettlement;
+  transport.close = () => {
+    transportCloseSettlement ??= Promise.resolve().then(originalTransportClose);
+    return transportCloseSettlement;
+  };
+  let closeSettlement;
+  const closeClient = () => {
+    closeSettlement ??= Promise.resolve().then(() => client.close());
+    return closeSettlement;
+  };
+  const observeStderr = (chunk) => {
+    if (stderrOverflow) return;
+    try {
+      stderrBytes = Math.min(
+        COMMAND_OUTPUT_LIMIT_BYTES + 1,
+        stderrBytes + Buffer.byteLength(chunk)
+      );
+    } catch {
+      stderrFailed = true;
+    }
+    if (stderrBytes > COMMAND_OUTPUT_LIMIT_BYTES || stderrFailed) {
+      stderrOverflow = true;
+      void closeClient().catch(() => undefined);
+    }
+  };
+  const observeStderrFailure = () => {
+    stderrFailed = true;
+    void closeClient().catch(() => undefined);
+  };
+  transport.stderr?.on('data', observeStderr);
+  transport.stderr?.once('error', observeStderrFailure);
+  const abort = () => {
+    void closeClient().catch(() => undefined);
+  };
+  const closeAndInspectProcess = async () => {
+    let closeFailed = false;
+    try {
+      await closeClient();
+    } catch {
+      closeFailed = true;
+    }
+    let processOutcome;
+    try {
+      processOutcome = await waitForProcessClose(processCloseSettlement);
+    } catch {
+      closeFailed = true;
+    }
+    return (
+      !closeFailed &&
+      processOutcome !== undefined &&
+      processOutcome.code === 0 &&
+      processOutcome.signal === null
+    );
+  };
+  signal.addEventListener('abort', abort, { once: true });
+  try {
+    await client.connect(transport, {
+      signal,
+      timeout: READ_TIMEOUT_MS,
+      maxTotalTimeout: READ_TIMEOUT_MS
+    });
+    if (signal.aborted) throw new Error('Installed read failed');
+  } catch {
+    signal.removeEventListener('abort', abort);
+    await closeAndInspectProcess();
+    throw new Error('Installed read failed');
+  }
+  const requestOptions = Object.freeze({
+    signal,
+    timeout: READ_TIMEOUT_MS,
+    maxTotalTimeout: READ_TIMEOUT_MS
+  });
+  return Object.freeze({
+    listTools: () => client.listTools(undefined, requestOptions),
+    callTool: (request) => client.callTool(request, requestOptions),
+    diagnosticsClean: () => stderrBytes === 0 && !stderrOverflow && !stderrFailed,
+    close: async () => {
+      signal.removeEventListener('abort', abort);
+      if (!(await closeAndInspectProcess())) throw new Error('Installed read failed');
+    }
+  });
 }
 
 export async function runInstalledReads({
   invocation,
   configPath,
-  runCommand = runBoundedSubprocess
+  signal = new AbortController().signal,
+  openClient = openSdkClient,
+  sdkFactories
 }) {
-  const input = `${readRequests()
-    .map((request) => JSON.stringify(request))
-    .join('\n')}\n`;
-  return runCommand(invocation, {
-    cwd: resolve('.'),
-    environment: {
-      PATH: process.env.PATH ?? '',
-      READ_ONLY: 'true',
-      OPNSENSE_CONFIG_FILE: configPath,
-      MCP_REQUEST_STATE_SECRET: randomBytes(32).toString('base64url')
-    },
-    input,
-    timeoutMs: READ_TIMEOUT_MS
-  });
+  const operationSignal = AbortSignal.any([signal, AbortSignal.timeout(READ_TIMEOUT_MS)]);
+  if (operationSignal.aborted) throw new Error('Installed read failed');
+  let client;
+  try {
+    client = await openClient({
+      invocation,
+      environment: installedReadEnvironment(configPath),
+      signal: operationSignal,
+      ...(sdkFactories === undefined ? {} : { sdkFactories })
+    });
+  } catch {
+    throw new Error('Installed read failed');
+  }
+
+  let result;
+  let failed = false;
+  try {
+    result = {
+      tools: await client.listTools(),
+      serverStatus: await client.callTool({ name: 'server_status', arguments: {} }),
+      resourceDescription: await client.callTool({
+        name: 'opn_describe',
+        arguments: { resource: 'system.status' }
+      }),
+      systemStatus: await client.callTool({
+        name: 'opn_get',
+        arguments: { resource: 'system.status' }
+      }),
+      servicesPage: await client.callTool({
+        name: 'opn_list',
+        arguments: { resource: 'core.services', page: 1, pageSize: 10, query: '' }
+      })
+    };
+  } catch {
+    failed = true;
+  }
+  try {
+    await client.close();
+  } catch {
+    failed = true;
+  }
+  if (operationSignal.aborted) failed = true;
+  try {
+    if (client.diagnosticsClean() !== true) failed = true;
+  } catch {
+    failed = true;
+  }
+  if (failed || result === undefined) throw new Error('Installed read failed');
+  return Object.freeze(result);
 }
 
 function isRecord(value) {
@@ -274,71 +513,104 @@ function isRecord(value) {
 }
 
 function successfulToolResult(response) {
+  const structuredContent = isRecord(response) ? response.structuredContent : undefined;
+  const content = isRecord(response) ? response.content : undefined;
   return (
     isRecord(response) &&
-    !Object.hasOwn(response, 'error') &&
-    isRecord(response.result) &&
-    response.result.isError !== true &&
-    isRecord(response.result.structuredContent)
+    response.isError !== true &&
+    isRecord(structuredContent) &&
+    Array.isArray(content) &&
+    content.length === 1 &&
+    exactKeys(content[0], ['type', 'text']) &&
+    content[0].type === 'text' &&
+    content[0].text === JSON.stringify(structuredContent)
+  );
+}
+
+function boundedString(value, minimum, maximum) {
+  return typeof value === 'string' && value.length >= minimum && value.length <= maximum;
+}
+
+function exactKeys(record, keys) {
+  return (
+    isRecord(record) &&
+    JSON.stringify(Object.keys(record).sort()) === JSON.stringify([...keys].sort())
   );
 }
 
 export function inspectReadResult(result) {
-  const checks = { readOnlySurface: false, systemStatus: false, servicesPage: false };
-  if (!processSucceeded(result) || result.stderr !== '') return checks;
-  let responses;
-  try {
-    const lines = result.stdout.trim().split('\n').filter(Boolean);
-    responses = lines.map((line) => JSON.parse(line));
-  } catch {
-    return checks;
-  }
-  if (
-    responses.length !== 4 ||
-    responses.some((response) => !isRecord(response) || response.jsonrpc !== '2.0')
-  ) {
-    return checks;
-  }
-  const byId = new Map(responses.map((response) => [response.id, response]));
-  if (byId.size !== 4 || !isRecord(byId.get(1)?.result)) return checks;
+  const checks = {
+    readOnlySurface: false,
+    serverStatus: false,
+    resourceDescription: false,
+    systemStatus: false,
+    servicesPage: false
+  };
+  if (!isRecord(result)) return checks;
 
-  const listed = byId.get(2)?.result?.tools;
+  const listed = isRecord(result.tools) ? result.tools.tools : undefined;
   if (Array.isArray(listed) && listed.length === EXPECTED_TOOLS.length) {
     const names = listed.map((tool) => (isRecord(tool) ? tool.name : undefined)).sort();
     checks.readOnlySurface =
       JSON.stringify(names) === JSON.stringify([...EXPECTED_TOOLS].sort()) &&
       listed.every(
         (tool) =>
-          isRecord(tool) && isRecord(tool.annotations) && tool.annotations.readOnlyHint === true
+          isRecord(tool) &&
+          isRecord(tool.inputSchema) &&
+          tool.inputSchema.type === 'object' &&
+          isRecord(tool.annotations) &&
+          tool.annotations.readOnlyHint === true
       );
   }
 
-  const statusResponse = byId.get(3);
-  if (successfulToolResult(statusResponse)) {
-    const status = statusResponse.result.structuredContent.item?.status;
-    checks.systemStatus = typeof status === 'string' && status.trim().length > 0;
+  const serverStatusResponse = result.serverStatus;
+  if (successfulToolResult(serverStatusResponse)) {
+    const status = serverStatusResponse.structuredContent;
+    checks.serverStatus =
+      exactKeys(status, ['status', 'readOnly', 'version']) &&
+      status.status === 'ok' &&
+      status.readOnly === true &&
+      status.version === '0.1.0';
   }
 
-  const servicesResponse = byId.get(4);
+  const descriptionResponse = result.resourceDescription;
+  if (successfulToolResult(descriptionResponse)) {
+    checks.resourceDescription = isDeepStrictEqual(
+      descriptionResponse.structuredContent,
+      EXPECTED_SYSTEM_STATUS_DESCRIPTION
+    );
+  }
+
+  const statusResponse = result.systemStatus;
+  if (
+    successfulToolResult(statusResponse) &&
+    exactKeys(statusResponse.structuredContent, ['item']) &&
+    exactKeys(statusResponse.structuredContent.item, ['status'])
+  ) {
+    const status = statusResponse.structuredContent.item.status;
+    checks.systemStatus = boundedString(status, 1, 64) && status.trim().length > 0;
+  }
+
+  const servicesResponse = result.servicesPage;
   if (successfulToolResult(servicesResponse)) {
-    const page = servicesResponse.result.structuredContent;
+    const page = servicesResponse.structuredContent;
     checks.servicesPage =
+      exactKeys(page, ['page', 'pageSize', 'total', 'items']) &&
       page.page === 1 &&
       page.pageSize === 10 &&
       Number.isSafeInteger(page.total) &&
       page.total >= 0 &&
+      page.total <= 1_000_000 &&
       Array.isArray(page.items) &&
       page.items.length <= page.pageSize &&
+      page.total >= page.items.length &&
       page.items.every(
         (item) =>
-          isRecord(item) &&
-          typeof item.id === 'string' &&
-          item.id.length > 0 &&
-          typeof item.name === 'string' &&
-          item.name.length > 0 &&
-          typeof item.description === 'string' &&
-          typeof item.status === 'string' &&
-          item.status.length > 0
+          exactKeys(item, ['id', 'name', 'description', 'status']) &&
+          boundedString(item.id, 1, 128) &&
+          boundedString(item.name, 1, 128) &&
+          boundedString(item.description, 0, 512) &&
+          (item.status === 'running' || item.status === 'stopped')
       );
   }
   return checks;
@@ -458,7 +730,11 @@ export async function runProduct1bLive(options = {}) {
       throwIfInterrupted();
       failureStage = 'reads';
       const readChecks = inspectReadResult(
-        await runInstalled({ invocation, configPath: artifacts.configPath })
+        await runInstalled({
+          invocation,
+          configPath: artifacts.configPath,
+          signal: interruption.signal
+        })
       );
       Object.assign(checks, readChecks);
       if (Object.values(readChecks).every(Boolean)) failureStage = null;
