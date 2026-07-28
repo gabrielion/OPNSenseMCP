@@ -483,3 +483,28 @@ P0-B Product 3 installed-process lifecycle: complete (commits 5954ce7, 472944e; 
   - TDD: nine Product 3 lifecycle regressions failed before extraction. The final Product 1B +
     Product 3 gate passed 77/77. Review found and TDD-corrected one lost Product 1B shallow-freeze
     compatibility guarantee; independent re-review found no open finding.
+
+P0-B resumed final exit gate: complete through the pre-attestation candidate
+  (commits 0c42e43, 368c8c8; final adversarial review clean).
+  - The real OpenCode Product 1A producer passed against the installed package and changed only
+    `tests/fixtures/opencode.product1a.json`. Its sealed-package check passed before the evidence
+    commit; the evidence was never hand-edited.
+  - A whole-branch adversarial review found two Important defects. First, a timed-out SDK close
+    could return while its installed MCP child remained alive. The shared lifecycle now requires
+    the captured ChildProcess termination surface, sends SIGKILL after a failed bounded close, and
+    observes the child close under a second bound before returning. Product 1B and Product 3 tests
+    prove the forced termination and listener cleanup.
+  - Second, public CI and the documented release gate could remain green while
+    `evidence:verify` declared the commit-bound VM attestation stale. CI now runs the official
+    verifier, and the release gate requires both package evidence and VM-attestation verification.
+    The wording records the exact supported evidence-only successor-commit rule.
+  - TDD: the lifecycle and gate assertions failed in the expected three cases before the fixes.
+    The combined Product 1B, Product 3 and documentation gate passed 99/99. The final re-review
+    found no open Critical, Important or Minor issue.
+  - Fresh pre-attestation gates under Node 22.23.1: license passed; verify passed 58 files /
+    1127 tests; both conformance eras passed every configured scenario with zero failures or
+    warnings (2025: 1/1, 1/1, 2/2; 2026: 2/2, 1/1, 13/13); provenance and sealed OpenCode
+    evidence passed; `git diff --check` passed.
+  - This ledger commit intentionally precedes the final real Product 3 producer. The VM evidence
+    verifier must remain stale until that producer succeeds against the final clean candidate and
+    an evidence-only commit is created.
