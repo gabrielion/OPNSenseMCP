@@ -14,7 +14,11 @@ import {
   UNAVAILABLE_OPNSENSE_ALIAS_ADAPTER,
   type OPNsenseAliasAdapter
 } from '../opnsense/alias-adapter.js';
-import { hasVisibleResourceScopes, isKernelDefinedCapability } from './kernel.js';
+import {
+  hasVisibleResourceScopes,
+  isKernelDefinedCapability,
+  sealUnavailableCapabilities
+} from './kernel.js';
 
 function isExposed(capability: CapabilityDefinition, context: ExposureContext): boolean {
   if (context.readOnly && capability.policy.effect !== 'read') return false;
@@ -32,37 +36,22 @@ function isExposed(capability: CapabilityDefinition, context: ExposureContext): 
 
 export class CapabilityCatalog {
   readonly all: readonly CapabilityDefinition[];
-  readonly #definitionIds = new Set<string>();
   readonly #byId = new Map<string, CapabilityDefinition>();
   readonly #byMcpName = new Map<string, CapabilityDefinition>();
-  readonly #unavailableByMcpName = new Map<string, CapabilityDefinition>();
 
-  constructor(
-    definitions: readonly CapabilityDefinition[],
-    unavailableDefinitions: readonly CapabilityDefinition[] = []
-  ) {
-    for (const [definition, available] of [
-      ...definitions.map((candidate) => [candidate, true] as const),
-      ...unavailableDefinitions.map((candidate) => [candidate, false] as const)
-    ]) {
+  constructor(definitions: readonly CapabilityDefinition[]) {
+    for (const definition of definitions) {
       if (!isKernelDefinedCapability(definition)) {
         throw new Error('Capability definition was not created by the policy kernel');
       }
-      if (this.#definitionIds.has(definition.id)) {
+      if (this.#byId.has(definition.id)) {
         throw new Error(`Duplicate capability id: ${definition.id}`);
       }
-      if (
-        this.#byMcpName.has(definition.mcpName) ||
-        this.#unavailableByMcpName.has(definition.mcpName)
-      ) {
+      if (this.#byMcpName.has(definition.mcpName)) {
         throw new Error(`Duplicate MCP capability name: ${definition.mcpName}`);
       }
-      this.#definitionIds.add(definition.id);
-      if (available) this.#byId.set(definition.id, definition);
-      (available ? this.#byMcpName : this.#unavailableByMcpName).set(
-        definition.mcpName,
-        definition
-      );
+      this.#byId.set(definition.id, definition);
+      this.#byMcpName.set(definition.mcpName, definition);
     }
     this.all = Object.freeze([...definitions]);
     Object.freeze(this);
@@ -74,10 +63,6 @@ export class CapabilityCatalog {
 
   getByMcpName(name: string): CapabilityDefinition | undefined {
     return this.#byMcpName.get(name);
-  }
-
-  getUnavailableByMcpName(name: string): CapabilityDefinition | undefined {
-    return this.#unavailableByMcpName.get(name);
   }
 
   listExposed(context: ExposureContext): readonly CapabilityDefinition[] {
@@ -93,6 +78,7 @@ export function createProductCapabilityCatalog(
   adapter: OPNsenseReadAdapter = UNAVAILABLE_OPNSENSE_READ_ADAPTER,
   aliasAdapter: OPNsenseAliasAdapter = UNAVAILABLE_OPNSENSE_ALIAS_ADAPTER
 ): CapabilityCatalog {
+  const aliasTargetAvailable = aliasAdapter.available;
   const capabilities: CapabilityDefinition[] = [
     serverStatusCapability,
     opnDescribeCapability,
@@ -103,8 +89,10 @@ export function createProductCapabilityCatalog(
     createOPNsenseCreateCapability(aliasAdapter),
     createOPNsenseDeleteCapability(aliasAdapter)
   ];
-  if (aliasAdapter.available) capabilities.push(...writes);
-  return new CapabilityCatalog(capabilities, aliasAdapter.available ? [] : writes);
+  if (aliasTargetAvailable) capabilities.push(...writes);
+  const catalog = new CapabilityCatalog(capabilities);
+  if (!aliasTargetAvailable) sealUnavailableCapabilities(catalog, writes);
+  return catalog;
 }
 
 export const CAPABILITY_CATALOG = createProductCapabilityCatalog();

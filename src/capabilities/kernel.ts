@@ -169,6 +169,10 @@ type CapabilityHandler = (
 
 const capabilityHandlers = new WeakMap<CapabilityDefinition, CapabilityHandler>();
 const kernelDefinedCapabilities = new WeakSet<CapabilityDefinition>();
+const unavailableCapabilitiesByCatalog = new WeakMap<
+  CapabilityCatalogView,
+  ReadonlyMap<string, CapabilityDefinition>
+>();
 type ResourceResolver = (
   input: Record<string, unknown>,
   context: ResourceResolutionContext
@@ -283,7 +287,6 @@ export interface TypedResourceCapabilityDefinition<
 
 export interface CapabilityCatalogView {
   getByMcpName(name: string): CapabilityDefinition | undefined;
-  getUnavailableByMcpName?(name: string): CapabilityDefinition | undefined;
   listExposed(context: ExposureContext): readonly CapabilityDefinition[];
   /**
    * Every capability the catalogue holds, exposed or not. Used ONLY by the construction-time
@@ -1199,6 +1202,38 @@ export function isKernelDefinedCapability(capability: CapabilityDefinition): boo
   return kernelDefinedCapabilities.has(capability);
 }
 
+/**
+ * Installs policy metadata for target-dependent capabilities without adding any public catalogue
+ * traversal. This internal module export is intentionally absent from the package root.
+ */
+export function sealUnavailableCapabilities(
+  catalog: CapabilityCatalogView,
+  definitions: readonly CapabilityDefinition[]
+): void {
+  if (unavailableCapabilitiesByCatalog.has(catalog)) {
+    throw new Error('Unavailable capability metadata is already sealed');
+  }
+  const activeDefinitions = catalog.listAll?.() ?? [];
+  const ids = new Set(activeDefinitions.map(({ id }) => id));
+  const names = new Set(activeDefinitions.map(({ mcpName }) => mcpName));
+  const byName = new Map<string, CapabilityDefinition>();
+  for (const definition of definitions) {
+    if (!isKernelDefinedCapability(definition)) {
+      throw new Error('Capability definition was not created by the policy kernel');
+    }
+    if (ids.has(definition.id)) {
+      throw new Error(`Duplicate capability id: ${definition.id}`);
+    }
+    if (names.has(definition.mcpName)) {
+      throw new Error(`Duplicate MCP capability name: ${definition.mcpName}`);
+    }
+    ids.add(definition.id);
+    names.add(definition.mcpName);
+    byName.set(definition.mcpName, definition);
+  }
+  unavailableCapabilitiesByCatalog.set(catalog, byName);
+}
+
 export function hasVisibleResourceScopes(
   capability: CapabilityDefinition,
   allowedResourceScopes: ReadonlySet<string> | null
@@ -1232,7 +1267,7 @@ function authorizeRequest(
   try {
     capability = catalog.getByMcpName(request.name);
     if (capability === undefined) {
-      capability = catalog.getUnavailableByMcpName?.(request.name);
+      capability = unavailableCapabilitiesByCatalog.get(catalog)?.get(request.name);
       targetAvailable = false;
     }
   } catch {

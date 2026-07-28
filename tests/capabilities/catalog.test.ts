@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
 import * as z from 'zod/v4';
+import * as publicApi from '../../src/index.js';
 import {
   CAPABILITY_CATALOG,
   CapabilityCatalog,
@@ -40,18 +41,6 @@ describe('CapabilityCatalog', () => {
     expect(() => new CapabilityCatalog([read, read])).toThrow('Duplicate capability id: test.read');
     expect(() => new CapabilityCatalog([read, duplicateName])).toThrow(
       'Duplicate MCP capability name: test_read'
-    );
-  });
-
-  it('rejects duplicate MCP names across unavailable definitions', () => {
-    const first = createReadFixture({ id: 'test.unavailable-first', mcpName: 'test_unavailable' });
-    const second = createReadFixture({
-      id: 'test.unavailable-second',
-      mcpName: 'test_unavailable'
-    });
-
-    expect(() => new CapabilityCatalog([], [first, second])).toThrow(
-      'Duplicate MCP capability name: test_unavailable'
     );
   });
 
@@ -319,6 +308,64 @@ describe('product catalog write surface', () => {
     expect(catalog.getById('opnsense.delete')).toBeUndefined();
     expect(catalog.getByMcpName('opn_create')).toBeUndefined();
     expect(catalog.getByMcpName('opn_delete')).toBeUndefined();
+  });
+
+  it('keeps unavailable definitions outside every public catalogue lookup', () => {
+    const catalog = createProductCapabilityCatalog(readAdapter);
+
+    expect(Object.getOwnPropertyNames(CapabilityCatalog.prototype)).toEqual([
+      'constructor',
+      'getById',
+      'getByMcpName',
+      'listExposed',
+      'listAll'
+    ]);
+    expect(Object.getOwnPropertySymbols(CapabilityCatalog.prototype)).toEqual([]);
+    expect(Object.getOwnPropertyNames(catalog)).toEqual(['all']);
+    expect(Object.getOwnPropertySymbols(catalog)).toEqual([]);
+    expect(catalog.listAll()).toBe(catalog.all);
+    expect(catalog.listAll().map(({ mcpName }) => mcpName)).toEqual([
+      'server_status',
+      'opn_describe',
+      'opn_get',
+      'opn_list'
+    ]);
+    expect(Reflect.get(catalog, 'getUnavailableByMcpName')).toBeUndefined();
+    expect(Reflect.get(publicApi, 'sealUnavailableCapabilities')).toBeUndefined();
+  });
+
+  it('snapshots a variable alias target availability exactly once', async () => {
+    let availabilityReads = 0;
+    const variableAliasAdapter = {
+      get available() {
+        availabilityReads += 1;
+        return availabilityReads !== 1;
+      },
+      searchHostAliases: () => Promise.reject(new Error('unused')),
+      createHostAlias: () => Promise.reject(new Error('unused')),
+      deleteHostAlias: () => Promise.reject(new Error('unused'))
+    } satisfies OPNsenseAliasAdapter;
+    const catalog = createProductCapabilityCatalog(readAdapter, variableAliasAdapter);
+
+    expect(availabilityReads).toBe(1);
+    expect(catalog.all.map(({ mcpName }) => mcpName)).toEqual([
+      'server_status',
+      'opn_describe',
+      'opn_get',
+      'opn_list'
+    ]);
+    const dispatcher = createCapabilityDispatcher(catalog, {
+      readOnly: false,
+      allowedResourceScopes: new Set(['firewall.alias']),
+      enabledFeatureFlags: new Set<FeatureFlag>(['experimental-alias-write'])
+    });
+    await expect(
+      dispatcher.dispatch(
+        { name: 'opn_create', arguments: { SENTINEL_INVALID: true } },
+        { transport: 'stdio' }
+      )
+    ).resolves.toMatchObject({ kind: 'refused', code: 'TARGET_UNAVAILABLE' });
+    expect(availabilityReads).toBe(1);
   });
 
   it('hides the write verbs under READ_ONLY', () => {
