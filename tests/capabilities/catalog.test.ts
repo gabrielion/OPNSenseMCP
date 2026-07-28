@@ -15,7 +15,7 @@ import {
 import type { FeatureFlag } from '../../src/config/feature-flags.js';
 import type { OPNsenseReadAdapter } from '../../src/opnsense/read-adapter.js';
 import type { OPNsenseAliasAdapter } from '../../src/opnsense/alias-adapter.js';
-import type { MutationEnvelopeServices } from '../../src/capabilities/types.js';
+import type { MutationEnvelopeServices, TransportKind } from '../../src/capabilities/types.js';
 import { createMutationFixture, createReadFixture } from '../fixtures/capabilities.js';
 import { KNOWN_RESOURCE_SCOPES } from '../../src/capabilities/resource-scopes.js';
 
@@ -288,6 +288,9 @@ describe('product catalog write surface', () => {
 });
 
 describe('write containment (P0-B)', () => {
+  const writeNames = ['opn_create', 'opn_delete'] as const;
+  const exactWriteFlag = new Set<FeatureFlag>(['experimental-alias-write']);
+  const exactAliasScope = new Set(['firewall.alias']);
   const aliasAdapter = {
     available: true,
     listHostAliases: () => Promise.resolve({ items: [], total: 0 }),
@@ -309,6 +312,86 @@ describe('write containment (P0-B)', () => {
         allowedResourceScopes
       })
       .map(({ mcpName }) => mcpName);
+
+  it.each([
+    {
+      label: 'unsupported transport',
+      transport: 'unsupported',
+      readOnly: false,
+      enabledFeatureFlags: exactWriteFlag,
+      allowedResourceScopes: exactAliasScope,
+      visible: false
+    },
+    {
+      label: 'READ_ONLY',
+      transport: 'stdio',
+      readOnly: true,
+      enabledFeatureFlags: exactWriteFlag,
+      allowedResourceScopes: exactAliasScope,
+      visible: false
+    },
+    {
+      label: 'missing feature flag',
+      transport: 'stdio',
+      readOnly: false,
+      enabledFeatureFlags: new Set<FeatureFlag>(),
+      allowedResourceScopes: exactAliasScope,
+      visible: false
+    },
+    {
+      label: 'absent scope allow-list',
+      transport: 'stdio',
+      readOnly: false,
+      enabledFeatureFlags: exactWriteFlag,
+      allowedResourceScopes: null,
+      visible: false
+    },
+    {
+      label: 'empty scope allow-list',
+      transport: 'stdio',
+      readOnly: false,
+      enabledFeatureFlags: exactWriteFlag,
+      allowedResourceScopes: new Set<string>(),
+      visible: false
+    },
+    {
+      label: 'wrong scope allow-list',
+      transport: 'stdio',
+      readOnly: false,
+      enabledFeatureFlags: exactWriteFlag,
+      allowedResourceScopes: new Set(['system.status']),
+      visible: false
+    },
+    {
+      label: 'eligible stdio policy',
+      transport: 'stdio',
+      readOnly: false,
+      enabledFeatureFlags: exactWriteFlag,
+      allowedResourceScopes: exactAliasScope,
+      visible: true
+    },
+    {
+      label: 'eligible HTTP policy',
+      transport: 'http',
+      readOnly: false,
+      enabledFeatureFlags: exactWriteFlag,
+      allowedResourceScopes: exactAliasScope,
+      visible: true
+    }
+  ] as const)('$label lists both product write verbs only when eligible', (testCase) => {
+    const exposed = catalog
+      .listExposed({
+        readOnly: testCase.readOnly,
+        transport: testCase.transport as TransportKind,
+        enabledFeatureFlags: testCase.enabledFeatureFlags,
+        allowedResourceScopes: testCase.allowedResourceScopes
+      })
+      .map(({ mcpName }) => mcpName);
+
+    expect(writeNames.filter((name) => exposed.includes(name))).toEqual(
+      testCase.visible ? writeNames : []
+    );
+  });
 
   it('authorizes every read but no write when the allow-list is absent', () => {
     // An absent allow-list still means "every catalogued scope" for reads, but a write must always

@@ -2,18 +2,35 @@
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it, vi } from 'vitest';
 import { createApplicationContext } from '../../src/app/application-context.js';
-import { CapabilityCatalog } from '../../src/capabilities/catalog.js';
+import {
+  CapabilityCatalog,
+  createProductCapabilityCatalog
+} from '../../src/capabilities/catalog.js';
 import { dispatchCapability } from '../../src/capabilities/dispatch.js';
-import type { RefusalCode, ServerContext } from '../../src/capabilities/types.js';
-import type { RuntimeConfig } from '../../src/config/runtime-config.js';
+import type {
+  CapabilityRequest,
+  MutationEnvelopeServices,
+  RefusalCode,
+  ServerContext,
+  TransportKind
+} from '../../src/capabilities/types.js';
+import type { FeatureFlag } from '../../src/config/feature-flags.js';
+import { loadRuntimeConfig, type RuntimeConfig } from '../../src/config/runtime-config.js';
 import { formatCapabilityResult, refusalResult } from '../../src/mcp/results.js';
+import type { OPNsenseAliasAdapter } from '../../src/opnsense/alias-adapter.js';
+import type { OPNsenseReadAdapter } from '../../src/opnsense/read-adapter.js';
 import { createReadFixture } from '../fixtures/capabilities.js';
 
-function config(): RuntimeConfig {
+type PolicyConfigOverrides = Partial<
+  Pick<RuntimeConfig, 'readOnly' | 'allowedResourceScopes' | 'enabledFeatureFlags'>
+>;
+
+function config(overrides: PolicyConfigOverrides = {}): RuntimeConfig {
   return {
     readOnly: false,
     allowedResourceScopes: null,
     enabledFeatureFlags: new Set(),
+    ...overrides,
     requestStateKey: new TextEncoder().encode('0123456789abcdef0123456789abcdef'),
     http: {
       enabled: false,
@@ -26,8 +43,156 @@ function config(): RuntimeConfig {
   };
 }
 
-function context(application: ReturnType<typeof createApplicationContext>): ServerContext {
-  return { application, transport: 'stdio' };
+function context(
+  application: ReturnType<typeof createApplicationContext>,
+  transport: TransportKind = 'stdio'
+): ServerContext {
+  return { application, transport };
+}
+
+const PRODUCT_CREATE_REQUEST: CapabilityRequest = {
+  name: 'opn_create',
+  arguments: {
+    resource: 'firewall.alias',
+    attributes: {
+      name: 'policy_matrix',
+      type: 'host',
+      content: ['192.0.2.10'],
+      description: 'policy matrix'
+    }
+  }
+};
+const PRODUCT_DELETE_REQUEST: CapabilityRequest = {
+  name: 'opn_delete',
+  arguments: {
+    resource: 'firewall.alias',
+    id: '00000000-0000-0000-0000-000000000001'
+  }
+};
+const PRODUCT_WRITE_REQUESTS: readonly CapabilityRequest[] = [
+  PRODUCT_CREATE_REQUEST,
+  PRODUCT_DELETE_REQUEST
+];
+
+interface ProductWritePolicyCase {
+  readonly label: string;
+  readonly transport: TransportKind | 'unsupported';
+  readonly readOnly: boolean;
+  readonly enabledFeatureFlags: ReadonlySet<FeatureFlag>;
+  readonly allowedResourceScopes: ReadonlySet<string> | null;
+  readonly expectedCode: RefusalCode | null;
+}
+
+const exactWriteFlag = new Set<FeatureFlag>(['experimental-alias-write']);
+const exactAliasScope = new Set(['firewall.alias']);
+const PRODUCT_WRITE_POLICY_MATRIX = [
+  {
+    label: 'unsupported transport',
+    transport: 'unsupported',
+    readOnly: true,
+    enabledFeatureFlags: new Set<FeatureFlag>(),
+    allowedResourceScopes: null,
+    expectedCode: 'UNSUPPORTED_TRANSPORT'
+  },
+  {
+    label: 'READ_ONLY',
+    transport: 'stdio',
+    readOnly: true,
+    enabledFeatureFlags: new Set<FeatureFlag>(),
+    allowedResourceScopes: null,
+    expectedCode: 'READ_ONLY'
+  },
+  {
+    label: 'missing feature flag',
+    transport: 'stdio',
+    readOnly: false,
+    enabledFeatureFlags: new Set<FeatureFlag>(),
+    allowedResourceScopes: null,
+    expectedCode: 'FEATURE_DISABLED'
+  },
+  {
+    label: 'absent scope allow-list',
+    transport: 'stdio',
+    readOnly: false,
+    enabledFeatureFlags: exactWriteFlag,
+    allowedResourceScopes: null,
+    expectedCode: 'RESOURCE_NOT_ALLOWED'
+  },
+  {
+    label: 'empty scope allow-list',
+    transport: 'stdio',
+    readOnly: false,
+    enabledFeatureFlags: exactWriteFlag,
+    allowedResourceScopes: new Set<string>(),
+    expectedCode: 'RESOURCE_NOT_ALLOWED'
+  },
+  {
+    label: 'wrong scope allow-list',
+    transport: 'stdio',
+    readOnly: false,
+    enabledFeatureFlags: exactWriteFlag,
+    allowedResourceScopes: new Set(['system.status']),
+    expectedCode: 'RESOURCE_NOT_ALLOWED'
+  },
+  {
+    label: 'eligible stdio policy',
+    transport: 'stdio',
+    readOnly: false,
+    enabledFeatureFlags: exactWriteFlag,
+    allowedResourceScopes: exactAliasScope,
+    expectedCode: null
+  },
+  {
+    label: 'eligible HTTP policy',
+    transport: 'http',
+    readOnly: false,
+    enabledFeatureFlags: exactWriteFlag,
+    allowedResourceScopes: exactAliasScope,
+    expectedCode: null
+  }
+] as const satisfies readonly ProductWritePolicyCase[];
+
+function createProductWriteHarness(runtimeConfig: RuntimeConfig) {
+  const readAdapter = {
+    available: true,
+    getSystemStatus: vi.fn(() => Promise.reject(new Error('read handler must not run'))),
+    listServices: vi.fn(() => Promise.reject(new Error('read handler must not run')))
+  } satisfies OPNsenseReadAdapter;
+  const aliasAdapter = {
+    available: true,
+    searchHostAliases: vi.fn(() => Promise.reject(new Error('alias preflight must not run'))),
+    createHostAlias: vi.fn(() => Promise.reject(new Error('create handler must not run'))),
+    deleteHostAlias: vi.fn(() => Promise.reject(new Error('delete handler must not run')))
+  } satisfies OPNsenseAliasAdapter;
+  const mutationServices = {
+    lock: {
+      acquire: vi.fn(() => Promise.reject(new Error('mutation lock must not run')))
+    },
+    backup: {
+      create: vi.fn(() => Promise.reject(new Error('backup must not run'))),
+      exists: vi.fn(() => Promise.reject(new Error('backup verification must not run')))
+    },
+    audit: {
+      record: vi.fn()
+    }
+  } satisfies MutationEnvelopeServices;
+  const application = createApplicationContext(
+    runtimeConfig,
+    createProductCapabilityCatalog(readAdapter, aliasAdapter),
+    mutationServices
+  );
+  return {
+    application,
+    mutationSpies: [
+      aliasAdapter.searchHostAliases,
+      aliasAdapter.createHostAlias,
+      aliasAdapter.deleteHostAlias,
+      mutationServices.lock.acquire,
+      mutationServices.backup.create,
+      mutationServices.backup.exists,
+      mutationServices.audit.record
+    ] as const
+  };
 }
 
 describe('opaque application dispatch', () => {
@@ -124,4 +289,68 @@ describe('opaque application dispatch', () => {
       );
     }
   });
+});
+
+describe('P0-B product write dispatch policy', () => {
+  it.each(PRODUCT_WRITE_POLICY_MATRIX)(
+    '$label applies before either product write handler',
+    async (testCase) => {
+      const { application, mutationSpies } = createProductWriteHarness(
+        config({
+          readOnly: testCase.readOnly,
+          enabledFeatureFlags: testCase.enabledFeatureFlags,
+          allowedResourceScopes: testCase.allowedResourceScopes
+        })
+      );
+
+      for (const request of PRODUCT_WRITE_REQUESTS) {
+        const result = await dispatchCapability(
+          request,
+          context(application, testCase.transport as TransportKind)
+        );
+        if (testCase.expectedCode === null) {
+          expect(result).toMatchObject({
+            kind: 'confirmation-required',
+            challenge: {
+              capabilityId: request.name === 'opn_create' ? 'opnsense.create' : 'opnsense.delete'
+            }
+          });
+        } else {
+          expect(result).toMatchObject({ kind: 'refused', code: testCase.expectedCode });
+        }
+      }
+
+      for (const spy of mutationSpies) expect(spy).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([
+    {
+      label: 'absent',
+      environment: {
+        READ_ONLY: 'false',
+        ENABLED_FEATURE_FLAGS: 'experimental-alias-write'
+      }
+    },
+    {
+      label: 'an empty string',
+      environment: {
+        READ_ONLY: 'false',
+        ENABLED_FEATURE_FLAGS: 'experimental-alias-write',
+        ALLOWED_RESOURCES: ''
+      }
+    }
+  ])(
+    'normalizes an $label ALLOWED_RESOURCES input and refuses opn_create before its handler',
+    async ({ environment }) => {
+      const runtimeConfig = loadRuntimeConfig(environment);
+      expect(runtimeConfig.allowedResourceScopes).toBeNull();
+      const { application, mutationSpies } = createProductWriteHarness(runtimeConfig);
+
+      await expect(
+        dispatchCapability(PRODUCT_CREATE_REQUEST, context(application))
+      ).resolves.toMatchObject({ kind: 'refused', code: 'RESOURCE_NOT_ALLOWED' });
+      for (const spy of mutationSpies) expect(spy).not.toHaveBeenCalled();
+    }
+  );
 });

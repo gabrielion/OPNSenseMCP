@@ -118,6 +118,26 @@ describe('loadRuntimeConfig', () => {
 });
 
 describe('P0-B policy inputs', () => {
+  it.each([
+    {
+      label: 'is absent',
+      environment: {
+        READ_ONLY: 'false',
+        ENABLED_FEATURE_FLAGS: 'experimental-alias-write'
+      }
+    },
+    {
+      label: 'is an empty string',
+      environment: {
+        READ_ONLY: 'false',
+        ENABLED_FEATURE_FLAGS: 'experimental-alias-write',
+        ALLOWED_RESOURCES: ''
+      }
+    }
+  ])('normalizes ALLOWED_RESOURCES to null when it $label', ({ environment }) => {
+    expect(loadRuntimeConfig(environment).allowedResourceScopes).toBeNull();
+  });
+
   it('accepts the exact experimental alias write flag token', () => {
     const config = loadRuntimeConfig({
       READ_ONLY: 'false',
