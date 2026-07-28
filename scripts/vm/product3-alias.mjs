@@ -9,6 +9,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { validateInstalledInvocation } from '../testing/installed-invocation.mjs';
 import { buildVmAttestation, serializeVmAttestation } from './attestation.mjs';
 import {
   FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES,
@@ -301,9 +302,11 @@ function lifecycleEnvironment(configPath) {
 }
 
 async function openSdkClient({ invocation, environment, signal }) {
+  const validatedInvocation = validateInstalledInvocation(invocation);
   const transport = new StdioClientTransport({
-    command: invocation.command,
-    args: [...invocation.arguments],
+    command: validatedInvocation.command,
+    args: [...validatedInvocation.arguments],
+    cwd: validatedInvocation.cwd,
     env: environment,
     stderr: 'pipe'
   });
@@ -345,8 +348,9 @@ export async function runInstalledAliasLifecycle({
   signal = new AbortController().signal,
   openClient = openSdkClient
 }) {
+  const validatedInvocation = validateInstalledInvocation(invocation);
   const client = await openClient({
-    invocation,
+    invocation: validatedInvocation,
     environment: lifecycleEnvironment(configPath),
     signal
   });

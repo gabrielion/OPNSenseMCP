@@ -1,12 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { access, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
-import {
-  runBoundedCommand,
-  type CommandInvocation,
-  type CommandResult
-} from '../support/installed-package-harness.js';
+import { afterAll, describe, expect, it, vi } from 'vitest';
+import { runBoundedCommand, type CommandResult } from '../support/installed-package-harness.js';
 import { startSyntheticOPNsenseTarget } from '../support/https-opnsense-mock.js';
 import {
   createPrivateFixtureRoot,
@@ -17,6 +13,7 @@ import {
   prepareInstalledPackage,
   type PreparedInstalledPackage
 } from '../../scripts/testing/prepare-installed-package.mjs';
+import { validateInstalledInvocation } from '../../scripts/testing/installed-invocation.mjs';
 import { PACKAGE_TEST_TIMEOUT_MS } from './installed-package-budget.js';
 
 const MCP_COMMAND_TIMEOUT_MS = 3_000;
@@ -66,23 +63,28 @@ async function withInstalledPackage(
 }
 
 function runInstalledCommand(
-  installedCommand: CommandInvocation,
+  installedCommand: PreparedInstalledPackage['installedCommand'],
   readOnly: string,
   input: string,
-  opnsenseConfigFile?: string
+  opnsenseConfigFile?: string,
+  run = runBoundedCommand
 ): Promise<CommandResult> {
-  return runBoundedCommand(installedCommand, {
-    cwd: resolve('.'),
-    environment: {
-      PATH: process.env.PATH ?? '',
-      READ_ONLY: readOnly,
-      MCP_REQUEST_STATE_SECRET: 'INSTALLED_PACKAGE_SENTINEL_0123456789',
-      ...(opnsenseConfigFile === undefined ? {} : { OPNSENSE_CONFIG_FILE: opnsenseConfigFile })
-    },
-    input,
-    timeoutMs: MCP_COMMAND_TIMEOUT_MS,
-    cleanupTimeoutMs: COMMAND_CLEANUP_TIMEOUT_MS
-  });
+  const invocation = validateInstalledInvocation(installedCommand);
+  return run(
+    { command: invocation.command, arguments: invocation.arguments },
+    {
+      cwd: invocation.cwd,
+      environment: {
+        PATH: process.env.PATH ?? '',
+        READ_ONLY: readOnly,
+        MCP_REQUEST_STATE_SECRET: 'INSTALLED_PACKAGE_SENTINEL_0123456789',
+        ...(opnsenseConfigFile === undefined ? {} : { OPNSENSE_CONFIG_FILE: opnsenseConfigFile })
+      },
+      input,
+      timeoutMs: MCP_COMMAND_TIMEOUT_MS,
+      cleanupTimeoutMs: COMMAND_CLEANUP_TIMEOUT_MS
+    }
+  );
 }
 
 function protocolLines(stdout: string): Record<string, unknown>[] {
@@ -94,10 +96,63 @@ function protocolLines(stdout: string): Record<string, unknown>[] {
 }
 
 describe('installed npm executable', () => {
+  it('runs the installed command from its declared consumer root', async () => {
+    const run = vi.fn(() =>
+      Promise.resolve({
+        code: 0,
+        signal: null,
+        stdout: '',
+        stderr: ''
+      })
+    );
+    const installedCommand = {
+      command: '/private/consumer/node_modules/.bin/opnsense-mcp',
+      arguments: [],
+      cwd: '/private/consumer'
+    };
+
+    await runInstalledCommand(installedCommand, 'true', '', undefined, run);
+
+    expect(run).toHaveBeenCalledWith(
+      { command: installedCommand.command, arguments: installedCommand.arguments },
+      expect.objectContaining({ cwd: installedCommand.cwd })
+    );
+  });
+
+  it('fails closed before execution when the installed cwd is absent', () => {
+    const run = vi.fn(() =>
+      Promise.resolve({
+        code: 0,
+        signal: null,
+        stdout: '',
+        stderr: ''
+      })
+    );
+
+    expect(() =>
+      runInstalledCommand(
+        {
+          command: '/private/consumer/node_modules/.bin/opnsense-mcp',
+          arguments: []
+        } as unknown as PreparedInstalledPackage['installedCommand'],
+        'true',
+        '',
+        undefined,
+        run
+      )
+    ).toThrow('Invalid installed invocation');
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it(
     'builds a clean package copy before packing and installs a shebang-bearing bin target',
     () =>
-      withInstalledPackage(async ({ installedTarget }) => {
+      withInstalledPackage(async ({ installedCommand, installedTarget, consumerRoot }) => {
+        expect(installedCommand).toEqual({
+          command: join(consumerRoot, 'node_modules/.bin/opnsense-mcp'),
+          arguments: [],
+          cwd: consumerRoot
+        });
         const emitted = await readFile(installedTarget);
         const prefix = Buffer.from(
           '#!/usr/bin/env node\n// SPDX-License-Identifier: AGPL-3.0-or-later\n',

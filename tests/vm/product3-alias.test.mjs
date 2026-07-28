@@ -6,6 +6,87 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+const SDK_STATE = vi.hoisted(() => ({ transportOptions: [] }));
+
+vi.mock('@modelcontextprotocol/client/stdio', () => ({
+  StdioClientTransport: function StdioClientTransport(options) {
+    SDK_STATE.transportOptions.push(options);
+  }
+}));
+
+vi.mock('@modelcontextprotocol/client', () => ({
+  Client: class {
+    listCount = 0;
+
+    setRequestHandler() {
+      return undefined;
+    }
+
+    connect() {
+      return Promise.resolve();
+    }
+
+    close() {
+      return Promise.resolve();
+    }
+
+    async listTools() {
+      return {
+        tools: [
+          'server_status',
+          'opn_describe',
+          'opn_get',
+          'opn_list',
+          'opn_create',
+          'opn_delete'
+        ].map((name) => ({ name, annotations: { readOnlyHint: false } }))
+      };
+    }
+
+    async callTool({ name }) {
+      if (name === 'opn_list') {
+        this.listCount += 1;
+        if (this.listCount === 2) {
+          return {
+            structuredContent: {
+              page: 1,
+              pageSize: 10,
+              total: 1,
+              items: [
+                {
+                  uuid: '00000000-0000-0000-0000-000000000001',
+                  name: 'product3_vm_alias',
+                  type: 'host',
+                  description: 'Disposable Product 3 verification alias'
+                }
+              ]
+            }
+          };
+        }
+        return {
+          structuredContent: { page: 1, pageSize: 10, total: 0, items: [] }
+        };
+      }
+      if (name === 'opn_create') {
+        return {
+          structuredContent: {
+            item: {
+              uuid: '00000000-0000-0000-0000-000000000001',
+              name: 'product3_vm_alias',
+              type: 'host',
+              content: ['192.0.2.10'],
+              description: 'Disposable Product 3 verification alias'
+            }
+          }
+        };
+      }
+      return {
+        structuredContent: { item: { id: '00000000-0000-0000-0000-000000000001' } }
+      };
+    }
+  }
+}));
+
 import { buildVmAttestation, serializeVmAttestation } from '../../scripts/vm/attestation.mjs';
 import {
   parseProduct3Arguments,
@@ -121,7 +202,8 @@ function dependencies(overrides = {}) {
     createTemporaryRoot: vi.fn(async () => temporaryRoot),
     installPackage: vi.fn(async () => ({
       command: `${temporaryRoot}/consumer/node_modules/.bin/opnsense-mcp`,
-      arguments: []
+      arguments: [],
+      cwd: `${temporaryRoot}/consumer`
     })),
     runInstalled: vi.fn(async () => lifecycleChecks()),
     stopVm: vi.fn(async () => {
@@ -142,6 +224,40 @@ function toolResult(structuredContent) {
 }
 
 describe('Product 3 disposable-VM alias runner', () => {
+  it('passes the installed consumer cwd to the stdio transport', async () => {
+    SDK_STATE.transportOptions.length = 0;
+
+    await expect(
+      runInstalledAliasLifecycle({
+        invocation: {
+          command: '/private/SENTINEL_INSTALLED_MCP',
+          arguments: [],
+          cwd: '/private/SENTINEL_CONSUMER'
+        },
+        configPath: '/private/SENTINEL_CONNECTION.json'
+      })
+    ).resolves.toEqual(lifecycleChecks());
+
+    expect(SDK_STATE.transportOptions).toEqual([
+      expect.objectContaining({ cwd: '/private/SENTINEL_CONSUMER' })
+    ]);
+  });
+
+  it('fails closed before transport creation when the invocation cwd is absent', async () => {
+    SDK_STATE.transportOptions.length = 0;
+
+    await expect(
+      runInstalledAliasLifecycle({
+        invocation: {
+          command: '/private/SENTINEL_INSTALLED_MCP',
+          arguments: []
+        },
+        configPath: '/private/SENTINEL_CONNECTION.json'
+      })
+    ).rejects.toThrow();
+    expect(SDK_STATE.transportOptions).toEqual([]);
+  });
+
   it('requires a stopped VM, boots with the alias ACL, and emits one sanitized boolean-only summary', async () => {
     const stdout = captureStream();
     const deps = dependencies();
@@ -164,7 +280,8 @@ describe('Product 3 disposable-VM alias runner', () => {
       expect.objectContaining({
         invocation: {
           command: '/private/SENTINEL_TEMPORARY/consumer/node_modules/.bin/opnsense-mcp',
-          arguments: []
+          arguments: [],
+          cwd: '/private/SENTINEL_TEMPORARY/consumer'
         },
         configPath: `${deps.instanceRoot}/SENTINEL_CONNECTION.json`,
         signal: expect.any(AbortSignal)
@@ -260,7 +377,11 @@ describe('Product 3 disposable-VM alias runner', () => {
 
     await expect(
       runInstalledAliasLifecycle({
-        invocation: { command: '/private/SENTINEL_INSTALLED_MCP', arguments: [] },
+        invocation: {
+          command: '/private/SENTINEL_INSTALLED_MCP',
+          arguments: [],
+          cwd: '/private/SENTINEL_CONSUMER'
+        },
         configPath: '/private/SENTINEL_CONNECTION.json',
         openClient
       })
@@ -332,7 +453,11 @@ describe('Product 3 disposable-VM alias runner', () => {
       }));
 
       const result = await runInstalledAliasLifecycle({
-        invocation: { command: '/private/SENTINEL_INSTALLED_MCP', arguments: [] },
+        invocation: {
+          command: '/private/SENTINEL_INSTALLED_MCP',
+          arguments: [],
+          cwd: '/private/SENTINEL_CONSUMER'
+        },
         configPath: '/private/SENTINEL_CONNECTION.json',
         openClient
       });

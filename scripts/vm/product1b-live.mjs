@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { validateInstalledInvocation } from '../testing/installed-invocation.mjs';
 import { bootstrapProduct1b } from './product1b-bootstrap.mjs';
 import { createConnectionArtifacts } from './product1b-connection.mjs';
 import { startDisposableVm, statusDisposableVm, stopDisposableVm } from './product1b-lifecycle.mjs';
@@ -264,7 +265,8 @@ export async function installCurrentPackage({
   if (!processSucceeded(installed)) throw new Error('Install failed');
   return Object.freeze({
     command: join(consumer, 'node_modules', '.bin', 'opnsense-mcp'),
-    arguments: Object.freeze([])
+    arguments: Object.freeze([]),
+    cwd: consumer
   });
 }
 
@@ -335,10 +337,11 @@ async function openSdkClient({
   signal,
   sdkFactories = DEFAULT_SDK_FACTORIES
 }) {
+  const validatedInvocation = validateInstalledInvocation(invocation);
   const transport = sdkFactories.createTransport({
-    command: invocation.command,
-    args: [...invocation.arguments],
-    cwd: resolve('.'),
+    command: validatedInvocation.command,
+    args: [...validatedInvocation.arguments],
+    cwd: validatedInvocation.cwd,
     env: environment,
     stderr: 'pipe',
     maxBufferSize: COMMAND_OUTPUT_LIMIT_BYTES
@@ -459,10 +462,16 @@ export async function runInstalledReads({
 }) {
   const operationSignal = AbortSignal.any([signal, AbortSignal.timeout(READ_TIMEOUT_MS)]);
   if (operationSignal.aborted) throw new Error('Installed read failed');
+  let validatedInvocation;
+  try {
+    validatedInvocation = validateInstalledInvocation(invocation);
+  } catch {
+    throw new Error('Installed read failed');
+  }
   let client;
   try {
     client = await openClient({
-      invocation,
+      invocation: validatedInvocation,
       environment: installedReadEnvironment(configPath),
       signal: operationSignal,
       ...(sdkFactories === undefined ? {} : { sdkFactories })

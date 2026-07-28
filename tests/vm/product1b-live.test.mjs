@@ -207,7 +207,8 @@ function dependencies(overrides = {}) {
     createTemporaryRoot: vi.fn(async () => temporaryRoot),
     installPackage: vi.fn(async () => ({
       command: `${temporaryRoot}/consumer/node_modules/.bin/opnsense-mcp`,
-      arguments: []
+      arguments: [],
+      cwd: `${temporaryRoot}/consumer`
     })),
     runInstalled: vi.fn(async () => successfulReadResult()),
     stopVm: vi.fn(async () => {
@@ -263,7 +264,11 @@ describe('Product 1B one-command live runner', () => {
 
     await expect(
       runInstalledReads({
-        invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+        invocation: {
+          command: '/private/SENTINEL_INSTALLED_COMMAND',
+          arguments: [],
+          cwd: '/private/SENTINEL_CONSUMER'
+        },
         configPath: '/private/SENTINEL_CONNECTION.json',
         openClient
       })
@@ -282,10 +287,50 @@ describe('Product 1B one-command live runner', () => {
       'diagnosticsClean'
     ]);
     expect(openClient).toHaveBeenCalledWith({
-      invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+      invocation: {
+        command: '/private/SENTINEL_INSTALLED_COMMAND',
+        arguments: [],
+        cwd: '/private/SENTINEL_CONSUMER'
+      },
       environment: expect.any(Object),
       signal: expect.any(AbortSignal)
     });
+  });
+
+  it('passes the installed consumer cwd to the stdio transport', async () => {
+    const harness = sdkProcessHarness();
+
+    await runInstalledReads({
+      invocation: {
+        command: '/private/SENTINEL_INSTALLED_COMMAND',
+        arguments: [],
+        cwd: '/private/SENTINEL_CONSUMER'
+      },
+      configPath: '/private/SENTINEL_CONNECTION.json',
+      sdkFactories: harness.sdkFactories
+    });
+
+    expect(harness.createTransport).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: '/private/SENTINEL_CONSUMER' })
+    );
+  });
+
+  it('fails closed before transport creation when the invocation cwd is absent or invalid', async () => {
+    for (const cwd of [undefined, '', 'relative/consumer']) {
+      const harness = sdkProcessHarness();
+      await expect(
+        runInstalledReads({
+          invocation: {
+            command: '/private/SENTINEL_INSTALLED_COMMAND',
+            arguments: [],
+            ...(cwd === undefined ? {} : { cwd })
+          },
+          configPath: '/private/SENTINEL_CONNECTION.json',
+          sdkFactories: harness.sdkFactories
+        })
+      ).rejects.toThrow(/^Installed read failed$/);
+      expect(harness.createTransport).not.toHaveBeenCalled();
+    }
   });
 
   it.each(['tool failure', 'stderr output'])(
@@ -315,7 +360,11 @@ describe('Product 1B one-command live runner', () => {
 
       await expect(
         runInstalledReads({
-          invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+          invocation: {
+            command: '/private/SENTINEL_INSTALLED_COMMAND',
+            arguments: [],
+            cwd: '/private/SENTINEL_CONSUMER'
+          },
           configPath: '/private/SENTINEL_CONNECTION.json',
           openClient: vi.fn(async () => client)
         })
@@ -331,7 +380,11 @@ describe('Product 1B one-command live runner', () => {
 
     await expect(
       runInstalledReads({
-        invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+        invocation: {
+          command: '/private/SENTINEL_INSTALLED_COMMAND',
+          arguments: [],
+          cwd: '/private/SENTINEL_CONSUMER'
+        },
         configPath: '/private/SENTINEL_CONNECTION.json',
         sdkFactories: harness.sdkFactories
       })
@@ -346,7 +399,11 @@ describe('Product 1B one-command live runner', () => {
 
     await expect(
       runInstalledReads({
-        invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+        invocation: {
+          command: '/private/SENTINEL_INSTALLED_COMMAND',
+          arguments: [],
+          cwd: '/private/SENTINEL_CONSUMER'
+        },
         configPath: '/private/SENTINEL_CONNECTION.json',
         sdkFactories: harness.sdkFactories
       })
@@ -361,7 +418,11 @@ describe('Product 1B one-command live runner', () => {
 
     await expect(
       runInstalledReads({
-        invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+        invocation: {
+          command: '/private/SENTINEL_INSTALLED_COMMAND',
+          arguments: [],
+          cwd: '/private/SENTINEL_CONSUMER'
+        },
         configPath: '/private/SENTINEL_CONNECTION.json',
         sdkFactories: harness.sdkFactories
       })
@@ -386,7 +447,11 @@ describe('Product 1B one-command live runner', () => {
     try {
       await expect(
         runInstalledReads({
-          invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+          invocation: {
+            command: '/private/SENTINEL_INSTALLED_COMMAND',
+            arguments: [],
+            cwd: '/private/SENTINEL_CONSUMER'
+          },
           configPath: '/private/SENTINEL_CONNECTION.json',
           sdkFactories: harness.sdkFactories
         })
@@ -437,7 +502,11 @@ describe('Product 1B one-command live runner', () => {
       diagnosticsClean: vi.fn(() => true)
     };
     const run = runInstalledReads({
-      invocation: { command: '/private/SENTINEL_INSTALLED_COMMAND', arguments: [] },
+      invocation: {
+        command: '/private/SENTINEL_INSTALLED_COMMAND',
+        arguments: [],
+        cwd: '/private/SENTINEL_CONSUMER'
+      },
       configPath: '/private/SENTINEL_CONNECTION.json',
       signal: controller.signal,
       openClient: vi.fn(async () => client)
@@ -560,7 +629,8 @@ describe('Product 1B one-command live runner', () => {
     expect(deps.runInstalled).toHaveBeenCalledWith({
       invocation: {
         command: '/private/SENTINEL_TEMPORARY/consumer/node_modules/.bin/opnsense-mcp',
-        arguments: []
+        arguments: [],
+        cwd: '/private/SENTINEL_TEMPORARY/consumer'
       },
       configPath: `${deps.instanceRoot}/SENTINEL_CONNECTION.json`,
       signal: expect.any(AbortSignal)
@@ -787,7 +857,8 @@ describe('Product 1B one-command live runner', () => {
         })
       ).resolves.toEqual({
         command: join(temporaryRoot, 'consumer', 'node_modules', '.bin', 'opnsense-mcp'),
-        arguments: []
+        arguments: [],
+        cwd: join(temporaryRoot, 'consumer')
       });
 
       expect(calls[0]).toMatchObject({

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import type { InstalledInvocation } from './installed-invocation.mjs';
+
 export interface PreparedCommandResult {
   readonly code: number | null;
   readonly signal: NodeJS.Signals | null;
@@ -22,7 +24,7 @@ export interface PreparedInstalledPackage {
   readonly archiveTarSha256: string;
   readonly packageName: string;
   readonly packageVersion: string;
-  readonly installedCommand: { readonly command: string; readonly arguments: readonly string[] };
+  readonly installedCommand: InstalledInvocation;
   readonly installedTarget: string;
   readonly consumerRoot: string;
   readonly registryUnknownRequests: readonly string[];

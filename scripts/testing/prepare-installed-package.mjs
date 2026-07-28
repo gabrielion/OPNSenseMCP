@@ -278,7 +278,8 @@ export async function prepareInstalledPackage(options) {
       packageVersion: manifest.version,
       installedCommand: Object.freeze({
         command: join(consumer, 'node_modules/.bin/opnsense-mcp'),
-        arguments: Object.freeze([])
+        arguments: Object.freeze([]),
+        cwd: consumer
       }),
       installedTarget,
       consumerRoot: consumer,

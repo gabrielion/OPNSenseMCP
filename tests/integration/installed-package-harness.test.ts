@@ -192,7 +192,8 @@ describe('installed-package harness portability', () => {
       installedTarget: posix.join(consumer, 'node_modules/@gabrielion/opnsense-mcp/dist/main.js'),
       installedCommand: {
         command: posix.join(consumer, 'node_modules/.bin/opnsense-mcp'),
-        arguments: []
+        arguments: [],
+        cwd: consumer
       }
     });
   });
@@ -219,7 +220,8 @@ describe('installed-package harness portability', () => {
     );
     expect(harness.installedCommand).toEqual({
       command: 'C:\\Windows\\System32\\cmd.exe',
-      arguments: ['/d', '/s', '/c', `"${harness.installedShim}"`]
+      arguments: ['/d', '/s', '/c', `"${harness.installedShim}"`],
+      cwd: consumer
     });
   });
 

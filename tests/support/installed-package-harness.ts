@@ -8,6 +8,10 @@ export interface CommandInvocation {
   readonly arguments: readonly string[];
 }
 
+export interface InstalledCommandInvocation extends CommandInvocation {
+  readonly cwd: string;
+}
+
 export interface CommandResult {
   readonly code: number | null;
   readonly signal: NodeJS.Signals | null;
@@ -29,7 +33,7 @@ interface PackageHarnessPlatform {
   readonly npm: CommandInvocation;
   readonly installedShim: string;
   readonly installedTarget: string;
-  readonly installedCommand: CommandInvocation;
+  readonly installedCommand: InstalledCommandInvocation;
 }
 
 interface BoundedCommandOptions {
@@ -249,9 +253,10 @@ export function packageHarnessPlatform(input: PackageHarnessPlatformInput): Pack
       input.platform === 'win32'
         ? {
             command: windowsSystemExecutable(input.windowsSystemRoot, 'cmd.exe'),
-            arguments: Object.freeze(['/d', '/s', '/c', `"${installedShim}"`])
+            arguments: Object.freeze(['/d', '/s', '/c', `"${installedShim}"`]),
+            cwd: input.consumer
           }
-        : { command: installedShim, arguments: Object.freeze([]) }
+        : { command: installedShim, arguments: Object.freeze([]), cwd: input.consumer }
     )
   });
 }
