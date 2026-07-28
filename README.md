@@ -237,6 +237,13 @@ own versioned smoke passes.
 - Targeted MCP interoperability checks for protocol versions `2025-11-25` and draft `2026-07-28`.
 - One real OpenCode 1.18.3 routing smoke using `opencode/north-mini-code-free`.
 
+The complete development state and machine-to-machine handoff are recorded in
+[`docs/project-status.md`](docs/project-status.md). The planned canonical agent evaluation is specified in
+the [DeepEval and OPNsense evaluation design](docs/superpowers/specs/2026-07-28-deepeval-opnsense-agent-evaluation-design.md):
+it will evaluate Claude Code's MCP tool use and final response while separately requiring deterministic
+MCP readback of the disposable VM state. Those tests and any benchmark score are not implemented or claimed
+yet.
+
 Together, these checks cover the package, synthetic read path, the two stated historical Product 1B remote
 calls, and no more than the bounded lifecycle stated above. They do **not** prove:
 

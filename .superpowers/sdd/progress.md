@@ -508,3 +508,27 @@ P0-B resumed final exit gate: complete through the pre-attestation candidate
   - This ledger commit intentionally precedes the final real Product 3 producer. The VM evidence
     verifier must remain stale until that producer succeeds against the final clean candidate and
     an evidence-only commit is created.
+
+DeepEval + real OPNsense agent-evaluation design and handoff: documentation candidate
+  (2026-07-28; no implementation or benchmark result yet).
+  - The owner selected DeepEval as the canonical open-source framework and approved the high-level
+    architecture: Claude Code host -> installed OPNSenseMCP -> owned disposable OPNsense VM -> MCP
+    readback, followed by deterministic state-transition gates and DeepEval agent-quality metrics.
+  - The written design follows the current DeepEval MCP model and pins the first implementation to
+    `deepeval==4.1.4`, the PyPI release checked on 2026-07-28 (the versionless docs still display a
+    “DeepEval 4.0” banner). It covers live tool-catalogue/call/result capture, single- and multi-turn
+    metrics, repeat policy, privacy, failure classification, report boundaries and a success-shaped no-op
+    regression. LLM-judged scores cannot override a failed VM state or cleanup check.
+  - The initial alias mutation contract is absent -> create -> same UUID present -> delete same UUID ->
+    absent, observed through the installed MCP server. This is real configuration readback, not packet-flow
+    proof and not broad production coverage.
+  - The 28 historical `tests/agentic/**` destinations remain `approved-pending-migration` with no public
+    content digest. The superseded migration task is not executable. Initial work therefore uses clean-room
+    `tests/evals/**` and `scripts/evals/**` paths; historical behaviors inform requirements only.
+  - `docs/project-status.md` now records project vision, reachable tools, P0-A/B/C state, evidence lifecycle,
+    commands, provenance constraints, traps, exact next gate and a copy/paste prompt for a context-free
+    session on another machine. Root `AGENTS.md` now points agents to that durable state and makes proof,
+    credential, review and handoff rules explicit.
+  - Next design gate: the owner reviews the complete written specification. Only after approval should
+    `superpowers:writing-plans` produce the TDD implementation plan. There is no canonical agentic score to
+    publish at this point.
