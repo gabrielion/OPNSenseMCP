@@ -126,6 +126,17 @@ describe('package contract', () => {
     expect(lockText).not.toContain('node_modules/@modelcontextprotocol/core-internal');
   });
 
+  it('keeps producer-canonical VM evidence outside Prettier ownership', async () => {
+    const ignoredPaths = (await readFile('.prettierignore', 'utf8'))
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => line !== '' && !line.startsWith('#'));
+
+    expect(ignoredPaths.filter((path) => path === 'docs/evidence/product3-vm.json')).toEqual([
+      'docs/evidence/product3-vm.json'
+    ]);
+  });
+
   it('gives repository agents the minimum runtime, safety, and gate contract', async () => {
     const [agents, claude] = await Promise.all([
       readFile('AGENTS.md', 'utf8'),
