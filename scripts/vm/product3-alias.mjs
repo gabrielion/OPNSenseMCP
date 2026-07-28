@@ -7,9 +7,7 @@ import { mkdir, open, rename, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Client } from '@modelcontextprotocol/client';
-import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
-import { validateInstalledInvocation } from '../testing/installed-invocation.mjs';
+import { runHardenedStdioLifecycle } from '../testing/hardened-stdio-lifecycle.mjs';
 import { buildVmAttestation, serializeVmAttestation } from './attestation.mjs';
 import {
   FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES,
@@ -44,6 +42,9 @@ const ALIAS_ATTRIBUTES = Object.freeze({
 });
 const MCP_PROTOCOL_VERSION = '2026-07-28';
 const MCP_CLIENT_VERSION = '0.1.0';
+const MCP_OPERATION_TIMEOUT_MS = 30_000;
+const MCP_CLOSE_TIMEOUT_MS = 10_000;
+const MCP_STDERR_LIMIT_BYTES = 1024 * 1024;
 const ATTESTATION_USAGE = 'Usage: product3-alias.mjs --attestation-out <absolute-path>';
 const GIT_OBJECT_PATTERN = /^[0-9a-f]{40}$/u;
 const GIT_MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -301,44 +302,77 @@ function lifecycleEnvironment(configPath) {
   });
 }
 
-async function openSdkClient({ invocation, environment, signal }) {
-  const validatedInvocation = validateInstalledInvocation(invocation);
-  const transport = new StdioClientTransport({
-    command: validatedInvocation.command,
-    args: [...validatedInvocation.arguments],
-    cwd: validatedInvocation.cwd,
-    env: environment,
-    stderr: 'pipe'
-  });
-  const client = new Client(
-    { name: 'product3-alias', version: MCP_CLIENT_VERSION },
-    {
-      capabilities: { elicitation: { form: {} } },
-      versionNegotiation: { mode: { pin: MCP_PROTOCOL_VERSION } }
-    }
+async function runAliasOperations(client, requestSignal) {
+  const writableSurface = writableToolSurface(await client.listTools(requestSignal));
+  const listArguments = { resource: 'firewall.alias', page: 1, pageSize: 10, query: '' };
+  const absentBefore = isAliasPage(
+    await client.callTool({ name: 'opn_list', arguments: listArguments }, requestSignal),
+    0
   );
-  client.setRequestHandler('elicitation/create', () =>
-    Promise.resolve({ action: 'accept', content: { confirm: true } })
-  );
-  const abort = () => {
-    void client.close();
-  };
-  signal.addEventListener('abort', abort, { once: true });
-  try {
-    await client.connect(transport);
-    if (signal.aborted) throw new Error('Interrupted');
-  } catch (error) {
-    signal.removeEventListener('abort', abort);
-    await client.close().catch(() => undefined);
-    throw error;
+  if (!writableSurface || !absentBefore) {
+    return Object.freeze({
+      writableSurface,
+      aliasAbsentBefore: absentBefore,
+      aliasCreated: false,
+      aliasPresent: false,
+      aliasDeleted: false,
+      aliasAbsentAfter: false
+    });
   }
+  const created = await client.callTool(
+    {
+      name: 'opn_create',
+      arguments: { resource: 'firewall.alias', attributes: ALIAS_ATTRIBUTES }
+    },
+    requestSignal
+  );
+  const item = successfulToolResult(created) ? created.structuredContent.item : undefined;
+  const createdUuid =
+    isRecord(item) &&
+    typeof item.uuid === 'string' &&
+    ALIAS_UUID_PATTERN.test(item.uuid) &&
+    item.name === ALIAS_ATTRIBUTES.name &&
+    item.type === ALIAS_ATTRIBUTES.type &&
+    Array.isArray(item.content) &&
+    JSON.stringify(item.content) === JSON.stringify(ALIAS_ATTRIBUTES.content) &&
+    item.description === ALIAS_ATTRIBUTES.description
+      ? item.uuid
+      : undefined;
+  const aliasCreated = createdUuid !== undefined;
+  const aliasPresent =
+    createdUuid !== undefined &&
+    isAliasPage(
+      await client.callTool({ name: 'opn_list', arguments: listArguments }, requestSignal),
+      1,
+      createdUuid
+    );
+  const deleted =
+    createdUuid !== undefined
+      ? await client.callTool(
+          {
+            name: 'opn_delete',
+            arguments: { resource: 'firewall.alias', id: createdUuid }
+          },
+          requestSignal
+        )
+      : undefined;
+  const aliasDeleted =
+    successfulToolResult(deleted) &&
+    isRecord(deleted.structuredContent.item) &&
+    deleted.structuredContent.item.id === createdUuid;
+  const aliasAbsentAfter =
+    aliasDeleted &&
+    isAliasPage(
+      await client.callTool({ name: 'opn_list', arguments: listArguments }, requestSignal),
+      0
+    );
   return Object.freeze({
-    listTools: () => client.listTools(undefined, { signal }),
-    callTool: (request) => client.callTool(request, { signal }),
-    close: async () => {
-      signal.removeEventListener('abort', abort);
-      await client.close();
-    }
+    writableSurface,
+    aliasAbsentBefore: absentBefore,
+    aliasCreated,
+    aliasPresent,
+    aliasDeleted,
+    aliasAbsentAfter
   });
 }
 
@@ -346,86 +380,34 @@ export async function runInstalledAliasLifecycle({
   invocation,
   configPath,
   signal = new AbortController().signal,
-  openClient = openSdkClient
+  sdkFactories,
+  operationTimeoutMs = MCP_OPERATION_TIMEOUT_MS,
+  closeTimeoutMs = MCP_CLOSE_TIMEOUT_MS
 }) {
-  const validatedInvocation = validateInstalledInvocation(invocation);
-  const client = await openClient({
-    invocation: validatedInvocation,
-    environment: lifecycleEnvironment(configPath),
-    signal
-  });
-  try {
-    const writableSurface = writableToolSurface(await client.listTools(signal));
-    const listArguments = { resource: 'firewall.alias', page: 1, pageSize: 10, query: '' };
-    const absentBefore = isAliasPage(
-      await client.callTool({ name: 'opn_list', arguments: listArguments }, signal),
-      0
-    );
-    if (!writableSurface || !absentBefore) {
-      return Object.freeze({
-        writableSurface,
-        aliasAbsentBefore: absentBefore,
-        aliasCreated: false,
-        aliasPresent: false,
-        aliasDeleted: false,
-        aliasAbsentAfter: false
-      });
-    }
-    const created = await client.callTool(
-      {
-        name: 'opn_create',
-        arguments: { resource: 'firewall.alias', attributes: ALIAS_ATTRIBUTES }
+  return runHardenedStdioLifecycle(
+    {
+      invocation,
+      environment: lifecycleEnvironment(configPath),
+      signal,
+      clientInfo: { name: 'product3-alias', version: MCP_CLIENT_VERSION },
+      clientOptions: {
+        capabilities: { elicitation: { form: {} } },
+        enforceStrictCapabilities: true,
+        versionNegotiation: { mode: { pin: MCP_PROTOCOL_VERSION } }
       },
-      signal
-    );
-    const item = successfulToolResult(created) ? created.structuredContent.item : undefined;
-    const createdUuid =
-      isRecord(item) &&
-      typeof item.uuid === 'string' &&
-      ALIAS_UUID_PATTERN.test(item.uuid) &&
-      item.name === ALIAS_ATTRIBUTES.name &&
-      item.type === ALIAS_ATTRIBUTES.type &&
-      Array.isArray(item.content) &&
-      JSON.stringify(item.content) === JSON.stringify(ALIAS_ATTRIBUTES.content) &&
-      item.description === ALIAS_ATTRIBUTES.description
-        ? item.uuid
-        : undefined;
-    const aliasCreated = createdUuid !== undefined;
-    const aliasPresent =
-      createdUuid !== undefined &&
-      isAliasPage(
-        await client.callTool({ name: 'opn_list', arguments: listArguments }, signal),
-        1,
-        createdUuid
-      );
-    const deleted =
-      createdUuid !== undefined
-        ? await client.callTool(
-            {
-              name: 'opn_delete',
-              arguments: { resource: 'firewall.alias', id: createdUuid }
-            },
-            signal
-          )
-        : undefined;
-    const aliasDeleted =
-      successfulToolResult(deleted) &&
-      isRecord(deleted.structuredContent.item) &&
-      deleted.structuredContent.item.id === createdUuid;
-    const aliasAbsentAfter =
-      aliasDeleted &&
-      isAliasPage(await client.callTool({ name: 'opn_list', arguments: listArguments }, signal), 0);
-    return Object.freeze({
-      writableSurface,
-      aliasAbsentBefore: absentBefore,
-      aliasCreated,
-      aliasPresent,
-      aliasDeleted,
-      aliasAbsentAfter
-    });
-  } finally {
-    await client.close();
-  }
+      configureClient: (client) => {
+        client.setRequestHandler('elicitation/create', () =>
+          Promise.resolve({ action: 'accept', content: { confirm: true } })
+        );
+      },
+      ...(sdkFactories === undefined ? {} : { sdkFactories }),
+      operationTimeoutMs,
+      closeTimeoutMs,
+      stderrLimitBytes: MCP_STDERR_LIMIT_BYTES,
+      failureMessage: 'Installed alias lifecycle failed'
+    },
+    (client) => runAliasOperations(client)
+  );
 }
 
 export async function runProduct3Alias(options = {}) {

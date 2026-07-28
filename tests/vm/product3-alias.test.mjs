@@ -6,87 +6,6 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const SDK_STATE = vi.hoisted(() => ({ transportOptions: [] }));
-
-vi.mock('@modelcontextprotocol/client/stdio', () => ({
-  StdioClientTransport: function StdioClientTransport(options) {
-    SDK_STATE.transportOptions.push(options);
-  }
-}));
-
-vi.mock('@modelcontextprotocol/client', () => ({
-  Client: class {
-    listCount = 0;
-
-    setRequestHandler() {
-      return undefined;
-    }
-
-    connect() {
-      return Promise.resolve();
-    }
-
-    close() {
-      return Promise.resolve();
-    }
-
-    async listTools() {
-      return {
-        tools: [
-          'server_status',
-          'opn_describe',
-          'opn_get',
-          'opn_list',
-          'opn_create',
-          'opn_delete'
-        ].map((name) => ({ name, annotations: { readOnlyHint: false } }))
-      };
-    }
-
-    async callTool({ name }) {
-      if (name === 'opn_list') {
-        this.listCount += 1;
-        if (this.listCount === 2) {
-          return {
-            structuredContent: {
-              page: 1,
-              pageSize: 10,
-              total: 1,
-              items: [
-                {
-                  uuid: '00000000-0000-0000-0000-000000000001',
-                  name: 'product3_vm_alias',
-                  type: 'host',
-                  description: 'Disposable Product 3 verification alias'
-                }
-              ]
-            }
-          };
-        }
-        return {
-          structuredContent: { page: 1, pageSize: 10, total: 0, items: [] }
-        };
-      }
-      if (name === 'opn_create') {
-        return {
-          structuredContent: {
-            item: {
-              uuid: '00000000-0000-0000-0000-000000000001',
-              name: 'product3_vm_alias',
-              type: 'host',
-              content: ['192.0.2.10'],
-              description: 'Disposable Product 3 verification alias'
-            }
-          }
-        };
-      }
-      return {
-        structuredContent: { item: { id: '00000000-0000-0000-0000-000000000001' } }
-      };
-    }
-  }
-}));
-
 import { buildVmAttestation, serializeVmAttestation } from '../../scripts/vm/attestation.mjs';
 import {
   parseProduct3Arguments,
@@ -105,6 +24,7 @@ const TREE = '2'.repeat(40);
 const FIXTURE_ROOTS = [];
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(
     FIXTURE_ROOTS.splice(0).map((root) => rm(root, { recursive: true, force: true }))
   );
@@ -223,28 +143,285 @@ function toolResult(structuredContent) {
   return { isError: false, structuredContent };
 }
 
+function sdkAliasHarness({
+  exitCode = 0,
+  signalCode = null,
+  holdConnect = false,
+  holdRequest = false,
+  holdClose = false,
+  stderrChunks = [],
+  toolNames = ['server_status', 'opn_describe', 'opn_get', 'opn_list', 'opn_create', 'opn_delete'],
+  initialAliasItems = []
+} = {}) {
+  const child = new EventEmitter();
+  child.pid = 42_424;
+  child.exitCode = null;
+  child.signalCode = null;
+  const stderr = new PassThrough();
+  const transport = {
+    _process: undefined,
+    stderr,
+    start: vi.fn(async () => {
+      transport._process = child;
+      for (const chunk of stderrChunks) stderr.write(chunk);
+    })
+  };
+  const closeTransport = vi.fn(async () => {
+    if (holdClose) return new Promise(() => undefined);
+    transport._process = undefined;
+    child.exitCode = exitCode;
+    child.signalCode = signalCode;
+    child.emit('close', exitCode, signalCode);
+  });
+  transport.close = closeTransport;
+
+  let connectedTransport;
+  let listCount = 0;
+  const client = {
+    setRequestHandler: vi.fn(),
+    connect: vi.fn(async (candidate) => {
+      connectedTransport = candidate;
+      await candidate.start();
+      if (holdConnect) return new Promise(() => undefined);
+    }),
+    listTools: vi.fn(async () => {
+      if (holdRequest) return new Promise(() => undefined);
+      return {
+        tools: toolNames.map((name) => ({ name, annotations: { readOnlyHint: false } }))
+      };
+    }),
+    callTool: vi.fn(async ({ name }) => {
+      if (holdRequest) return new Promise(() => undefined);
+      if (name === 'opn_list') {
+        listCount += 1;
+        if (listCount === 1 && initialAliasItems.length > 0) {
+          return toolResult({
+            page: 1,
+            pageSize: 10,
+            total: initialAliasItems.length,
+            items: initialAliasItems
+          });
+        }
+        if (listCount === 2) {
+          return toolResult({
+            page: 1,
+            pageSize: 10,
+            total: 1,
+            items: [
+              {
+                uuid: UUID,
+                name: 'product3_vm_alias',
+                type: 'host',
+                description: 'Disposable Product 3 verification alias'
+              }
+            ]
+          });
+        }
+        return toolResult({ page: 1, pageSize: 10, total: 0, items: [] });
+      }
+      if (name === 'opn_create') {
+        return toolResult({
+          item: {
+            uuid: UUID,
+            name: 'product3_vm_alias',
+            type: 'host',
+            content: ['192.0.2.10'],
+            description: 'Disposable Product 3 verification alias'
+          }
+        });
+      }
+      return toolResult({ item: { id: UUID } });
+    }),
+    close: vi.fn(async () => connectedTransport?.close())
+  };
+  const closeClient = client.close;
+  const createTransport = vi.fn(() => transport);
+  const createClient = vi.fn(() => client);
+  return {
+    sdkFactories: { createTransport, createClient },
+    createTransport,
+    createClient,
+    client,
+    closeClient,
+    transport,
+    child,
+    stderr,
+    closeTransport
+  };
+}
+
+function installedAliasOptions(harness, overrides = {}) {
+  return {
+    invocation: {
+      command: '/private/SENTINEL_INSTALLED_MCP',
+      arguments: [],
+      cwd: '/private/SENTINEL_CONSUMER'
+    },
+    configPath: '/private/SENTINEL_CONNECTION.json',
+    sdkFactories: harness.sdkFactories,
+    operationTimeoutMs: 30_000,
+    closeTimeoutMs: 10_000,
+    ...overrides
+  };
+}
+
 describe('Product 3 disposable-VM alias runner', () => {
-  it('passes the installed consumer cwd to the stdio transport', async () => {
-    SDK_STATE.transportOptions.length = 0;
+  it('configures strict capabilities, protocol pinning, and confirmation elicitation', async () => {
+    const harness = sdkAliasHarness();
 
-    await expect(
-      runInstalledAliasLifecycle({
-        invocation: {
-          command: '/private/SENTINEL_INSTALLED_MCP',
-          arguments: [],
-          cwd: '/private/SENTINEL_CONSUMER'
-        },
-        configPath: '/private/SENTINEL_CONNECTION.json'
+    await expect(runInstalledAliasLifecycle(installedAliasOptions(harness))).resolves.toEqual(
+      lifecycleChecks()
+    );
+
+    expect(harness.createClient).toHaveBeenCalledWith(
+      { name: 'product3-alias', version: '0.1.0' },
+      {
+        capabilities: { elicitation: { form: {} } },
+        enforceStrictCapabilities: true,
+        versionNegotiation: { mode: { pin: '2026-07-28' } }
+      }
+    );
+    expect(harness.client.setRequestHandler).toHaveBeenCalledOnce();
+    expect(harness.client.setRequestHandler.mock.calls[0]?.[0]).toBe('elicitation/create');
+    await expect(harness.client.setRequestHandler.mock.calls[0]?.[1]()).resolves.toEqual({
+      action: 'accept',
+      content: { confirm: true }
+    });
+    expect(harness.createTransport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: '/private/SENTINEL_CONSUMER',
+        stderr: 'pipe',
+        maxBufferSize: 1024 * 1024
       })
-    ).resolves.toEqual(lifecycleChecks());
+    );
+    expect(harness.client.connect).toHaveBeenCalledWith(
+      harness.transport,
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        timeout: 30_000,
+        maxTotalTimeout: 30_000
+      })
+    );
+    expect(harness.client.listTools).toHaveBeenCalledWith(
+      undefined,
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        timeout: 30_000,
+        maxTotalTimeout: 30_000
+      })
+    );
+    expect(harness.client.callTool).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        timeout: 30_000,
+        maxTotalTimeout: 30_000
+      })
+    );
+  });
 
-    expect(SDK_STATE.transportOptions).toEqual([
+  it.each([
+    ['one stderr byte', [Buffer.from('x')]],
+    ['aggregate stderr overflow', [Buffer.alloc(768 * 1024), Buffer.alloc(256 * 1024 + 1)]]
+  ])('fails the installed lifecycle after %s', async (_condition, stderrChunks) => {
+    const harness = sdkAliasHarness({ stderrChunks });
+
+    await expect(runInstalledAliasLifecycle(installedAliasOptions(harness))).rejects.toThrow(
+      /^Installed alias lifecycle failed$/
+    );
+
+    expect(harness.closeClient).toHaveBeenCalledOnce();
+    expect(harness.closeTransport).toHaveBeenCalledOnce();
+    expect(harness.child.listenerCount('close')).toBe(0);
+    expect(harness.stderr.listenerCount('data')).toBe(0);
+    expect(harness.stderr.listenerCount('error')).toBe(0);
+  });
+
+  it.each([
+    ['exit code 1', { exitCode: 1, signalCode: null }],
+    ['termination signal', { exitCode: null, signalCode: 'SIGTERM' }]
+  ])('fails the installed lifecycle after child %s', async (_condition, processOutcome) => {
+    const harness = sdkAliasHarness(processOutcome);
+
+    await expect(runInstalledAliasLifecycle(installedAliasOptions(harness))).rejects.toThrow(
+      /^Installed alias lifecycle failed$/
+    );
+
+    expect(harness.closeTransport).toHaveBeenCalledOnce();
+    expect(harness.child.listenerCount('close')).toBe(0);
+    expect(harness.stderr.listenerCount('data')).toBe(0);
+    expect(harness.stderr.listenerCount('error')).toBe(0);
+  });
+
+  it.each(['connect', 'request'])('bounds a held MCP %s', async (heldStage) => {
+    vi.useFakeTimers();
+    const harness = sdkAliasHarness({
+      holdConnect: heldStage === 'connect',
+      holdRequest: heldStage === 'request'
+    });
+    const run = runInstalledAliasLifecycle(
+      installedAliasOptions(harness, { operationTimeoutMs: 1_000 })
+    );
+    const rejection = expect(run).rejects.toThrow(/^Installed alias lifecycle failed$/);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await rejection;
+    expect(harness.closeClient).toHaveBeenCalledOnce();
+    expect(harness.closeTransport).toHaveBeenCalledOnce();
+    expect(harness.child.listenerCount('close')).toBe(0);
+    expect(harness.stderr.listenerCount('data')).toBe(0);
+    expect(harness.stderr.listenerCount('error')).toBe(0);
+  });
+
+  it('bounds a held installed process close and fails', async () => {
+    vi.useFakeTimers();
+    const harness = sdkAliasHarness({ holdClose: true });
+    const run = runInstalledAliasLifecycle(
+      installedAliasOptions(harness, { operationTimeoutMs: 30_000, closeTimeoutMs: 1_000 })
+    );
+    const rejection = expect(run).rejects.toThrow(/^Installed alias lifecycle failed$/);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await rejection;
+    expect(harness.closeClient).toHaveBeenCalledOnce();
+    expect(harness.closeTransport).toHaveBeenCalledOnce();
+    expect(harness.child.listenerCount('close')).toBe(0);
+    expect(harness.stderr.listenerCount('data')).toBe(0);
+    expect(harness.stderr.listenerCount('error')).toBe(0);
+  });
+
+  it('closes once and accepts only child exit zero without a signal', async () => {
+    const harness = sdkAliasHarness();
+
+    await expect(runInstalledAliasLifecycle(installedAliasOptions(harness))).resolves.toEqual(
+      lifecycleChecks()
+    );
+
+    expect(harness.closeClient).toHaveBeenCalledOnce();
+    expect(harness.closeTransport).toHaveBeenCalledOnce();
+    expect(harness.child.exitCode).toBe(0);
+    expect(harness.child.signalCode).toBeNull();
+    expect(harness.child.listenerCount('close')).toBe(0);
+    expect(harness.stderr.listenerCount('data')).toBe(0);
+    expect(harness.stderr.listenerCount('error')).toBe(0);
+  });
+
+  it('passes the installed consumer cwd to the stdio transport', async () => {
+    const harness = sdkAliasHarness();
+
+    await expect(runInstalledAliasLifecycle(installedAliasOptions(harness))).resolves.toEqual(
+      lifecycleChecks()
+    );
+
+    expect(harness.createTransport).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: '/private/SENTINEL_CONSUMER' })
-    ]);
+    );
   });
 
   it('fails closed before transport creation when the invocation cwd is absent', async () => {
-    SDK_STATE.transportOptions.length = 0;
+    const harness = sdkAliasHarness();
 
     await expect(
       runInstalledAliasLifecycle({
@@ -252,10 +429,11 @@ describe('Product 3 disposable-VM alias runner', () => {
           command: '/private/SENTINEL_INSTALLED_MCP',
           arguments: []
         },
-        configPath: '/private/SENTINEL_CONNECTION.json'
+        configPath: '/private/SENTINEL_CONNECTION.json',
+        sdkFactories: harness.sdkFactories
       })
     ).rejects.toThrow();
-    expect(SDK_STATE.transportOptions).toEqual([]);
+    expect(harness.createTransport).not.toHaveBeenCalled();
   });
 
   it('requires a stopped VM, boots with the alias ACL, and emits one sanitized boolean-only summary', async () => {
@@ -315,79 +493,24 @@ describe('Product 3 disposable-VM alias runner', () => {
   });
 
   it('records the exact MCP list-create-list-delete-list lifecycle with READ_ONLY=false', async () => {
-    const calls = [];
-    const close = vi.fn(async () => undefined);
-    const client = {
-      listTools: vi.fn(async () => ({
-        tools: [
-          'server_status',
-          'opn_describe',
-          'opn_get',
-          'opn_list',
-          'opn_create',
-          'opn_delete'
-        ].map((name) => ({ name, annotations: { readOnlyHint: false } }))
-      })),
-      callTool: vi.fn(async ({ name, arguments: args }) => {
-        calls.push({ name, arguments: args });
-        if (name === 'opn_list' && calls.length === 1) {
-          return toolResult({ page: 1, pageSize: 10, total: 0, items: [] });
-        }
-        if (name === 'opn_create') {
-          return toolResult({
-            item: {
-              uuid: UUID,
-              name: 'product3_vm_alias',
-              type: 'host',
-              content: ['192.0.2.10'],
-              description: 'Disposable Product 3 verification alias'
-            }
-          });
-        }
-        if (name === 'opn_list' && calls.length === 3) {
-          return toolResult({
-            page: 1,
-            pageSize: 10,
-            total: 1,
-            items: [
-              {
-                uuid: UUID,
-                name: 'product3_vm_alias',
-                type: 'host',
-                description: 'Disposable Product 3 verification alias'
-              }
-            ]
-          });
-        }
-        if (name === 'opn_delete') return toolResult({ item: { id: UUID } });
-        return toolResult({ page: 1, pageSize: 10, total: 0, items: [] });
-      }),
-      close
-    };
-    const openClient = vi.fn(async ({ environment }) => {
-      expect(environment.READ_ONLY).toBe('false');
-      expect(environment.ENABLED_FEATURE_FLAGS).toBe('experimental-alias-write');
-      expect(environment.ALLOWED_RESOURCES).toBe(
-        'server.status,system.status,core.services,firewall.alias'
-      );
-      expect(environment.OPNSENSE_CONFIG_FILE).toBe('/private/SENTINEL_CONNECTION.json');
-      expect(environment.MCP_REQUEST_STATE_SECRET).toMatch(/^[A-Za-z0-9_-]+$/u);
-      return client;
-    });
+    const harness = sdkAliasHarness();
 
-    await expect(
-      runInstalledAliasLifecycle({
-        invocation: {
-          command: '/private/SENTINEL_INSTALLED_MCP',
-          arguments: [],
-          cwd: '/private/SENTINEL_CONSUMER'
-        },
-        configPath: '/private/SENTINEL_CONNECTION.json',
-        openClient
+    await expect(runInstalledAliasLifecycle(installedAliasOptions(harness))).resolves.toEqual(
+      lifecycleChecks()
+    );
+
+    expect(harness.createTransport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        env: expect.objectContaining({
+          READ_ONLY: 'false',
+          ENABLED_FEATURE_FLAGS: 'experimental-alias-write',
+          ALLOWED_RESOURCES: 'server.status,system.status,core.services,firewall.alias',
+          OPNSENSE_CONFIG_FILE: '/private/SENTINEL_CONNECTION.json',
+          MCP_REQUEST_STATE_SECRET: expect.stringMatching(/^[A-Za-z0-9_-]+$/u)
+        })
       })
-    ).resolves.toEqual(lifecycleChecks());
-
-    expect(calls).toEqual([
+    );
+    expect(harness.client.callTool.mock.calls.map(([request]) => request)).toEqual([
       {
         name: 'opn_list',
         arguments: { resource: 'firewall.alias', page: 1, pageSize: 10, query: '' }
@@ -414,62 +537,33 @@ describe('Product 3 disposable-VM alias runner', () => {
         arguments: { resource: 'firewall.alias', page: 1, pageSize: 10, query: '' }
       }
     ]);
-    expect(close).toHaveBeenCalledOnce();
+    expect(harness.closeClient).toHaveBeenCalledOnce();
   });
 
   it.each(['invalid writable surface', 'alias already present'])(
     'refuses before creation when the %s',
     async (condition) => {
-      const callTool = vi.fn(async ({ name }) => {
-        if (name === 'opn_list') {
-          return toolResult({
-            page: 1,
-            pageSize: 10,
-            total: condition === 'alias already present' ? 1 : 0,
-            items:
-              condition === 'alias already present'
-                ? [{ uuid: UUID, name: 'existing', type: 'host', description: 'existing' }]
-                : []
-          });
-        }
-        throw new Error('opn_create must not be called');
+      const harness = sdkAliasHarness({
+        toolNames:
+          condition === 'invalid writable surface'
+            ? []
+            : ['server_status', 'opn_describe', 'opn_get', 'opn_list', 'opn_create', 'opn_delete'],
+        initialAliasItems:
+          condition === 'alias already present'
+            ? [{ uuid: UUID, name: 'existing', type: 'host', description: 'existing' }]
+            : []
       });
-      const openClient = vi.fn(async () => ({
-        listTools: vi.fn(async () => ({
-          tools:
-            condition === 'invalid writable surface'
-              ? []
-              : [
-                  'server_status',
-                  'opn_describe',
-                  'opn_get',
-                  'opn_list',
-                  'opn_create',
-                  'opn_delete'
-                ].map((name) => ({ name, annotations: { readOnlyHint: false } }))
-        })),
-        callTool,
-        close: vi.fn(async () => undefined)
-      }));
 
-      const result = await runInstalledAliasLifecycle({
-        invocation: {
-          command: '/private/SENTINEL_INSTALLED_MCP',
-          arguments: [],
-          cwd: '/private/SENTINEL_CONSUMER'
-        },
-        configPath: '/private/SENTINEL_CONNECTION.json',
-        openClient
-      });
+      const result = await runInstalledAliasLifecycle(installedAliasOptions(harness));
 
       expect(result.aliasCreated).toBe(false);
-      expect(callTool).toHaveBeenCalledTimes(1);
-      expect(callTool).toHaveBeenCalledWith(
+      expect(harness.client.callTool).toHaveBeenCalledTimes(1);
+      expect(harness.client.callTool).toHaveBeenCalledWith(
         {
           name: 'opn_list',
           arguments: { resource: 'firewall.alias', page: 1, pageSize: 10, query: '' }
         },
-        expect.any(AbortSignal)
+        expect.objectContaining({ signal: expect.any(AbortSignal) })
       );
     }
   );

@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GENERATED_OPERATION_DESCRIPTORS } from '../../src/operations/generated/descriptors.ts';
 
 import {
@@ -13,6 +13,10 @@ import {
   runInstalledReads,
   runProduct1bLive
 } from '../../scripts/vm/product1b-live.mjs';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function captureStream() {
   const stream = new PassThrough();
@@ -123,7 +127,19 @@ function expectOnlyFailed(result, check) {
   expect(inspectReadResult(result)).toEqual({ ...successfulChecks, [check]: false });
 }
 
-function sdkProcessHarness({ exitCode = 0, signalCode = null, failHandshake = false } = {}) {
+function sdkProcessHarness({
+  exitCode = 0,
+  signalCode = null,
+  failHandshake = false,
+  failTool,
+  holdConnect = false,
+  holdRequest = false,
+  holdClose = false,
+  closeSettlement,
+  closeStarted,
+  stderrChunks = [],
+  events
+} = {}) {
   const responses = successfulReadResult();
   const child = new EventEmitter();
   child.pid = 42_424;
@@ -135,9 +151,13 @@ function sdkProcessHarness({ exitCode = 0, signalCode = null, failHandshake = fa
     stderr,
     start: vi.fn(async () => {
       transport._process = child;
+      for (const chunk of stderrChunks) stderr.write(chunk);
     })
   };
   const closeTransport = vi.fn(async () => {
+    if (holdClose) return new Promise(() => undefined);
+    closeStarted?.();
+    if (closeSettlement !== undefined) await closeSettlement;
     transport._process = undefined;
     child.exitCode = exitCode;
     child.signalCode = signalCode;
@@ -153,9 +173,17 @@ function sdkProcessHarness({ exitCode = 0, signalCode = null, failHandshake = fa
         void client.close();
         throw new Error('SENTINEL_HANDSHAKE_FAILURE');
       }
+      if (holdConnect) return new Promise(() => undefined);
     }),
-    listTools: vi.fn(async () => responses.tools),
-    callTool: vi.fn(async ({ name }) => {
+    listTools: vi.fn(async () => {
+      if (holdRequest) return new Promise(() => undefined);
+      events?.push('listTools');
+      return responses.tools;
+    }),
+    callTool: vi.fn(async (request) => {
+      const { name } = request;
+      events?.push(request);
+      if (name === failTool) throw new Error('SENTINEL_TOOL_FAILURE');
       return responses[
         {
           server_status: 'serverStatus',
@@ -165,8 +193,12 @@ function sdkProcessHarness({ exitCode = 0, signalCode = null, failHandshake = fa
         }[name]
       ];
     }),
-    close: vi.fn(async () => connectedTransport?.close())
+    close: vi.fn(async () => {
+      events?.push('close');
+      return connectedTransport?.close();
+    })
   };
+  const closeClient = client.close;
   const createTransport = vi.fn(() => transport);
   const createClient = vi.fn(() => client);
   return {
@@ -174,6 +206,7 @@ function sdkProcessHarness({ exitCode = 0, signalCode = null, failHandshake = fa
     createTransport,
     createClient,
     client,
+    closeClient,
     transport,
     closeTransport
   };
@@ -228,39 +261,7 @@ describe('Product 1B one-command live runner', () => {
   it('opens one official MCP session, calls the four tools in order, and closes it', async () => {
     const events = [];
     const responses = successfulReadResult();
-    const client = {
-      listTools: vi.fn(async () => {
-        events.push('listTools');
-        return responses.tools;
-      }),
-      callTool: vi.fn(async (request) => {
-        events.push(request);
-        return responses[
-          {
-            server_status: 'serverStatus',
-            opn_describe: 'resourceDescription',
-            opn_get: 'systemStatus',
-            opn_list: 'servicesPage'
-          }[request.name]
-        ];
-      }),
-      close: vi.fn(async () => {
-        events.push('close');
-      }),
-      diagnosticsClean: vi.fn(() => {
-        events.push('diagnosticsClean');
-        return true;
-      })
-    };
-    const openClient = vi.fn(async ({ environment, signal }) => {
-      expect(environment).toMatchObject({
-        READ_ONLY: 'true',
-        OPNSENSE_CONFIG_FILE: '/private/SENTINEL_CONNECTION.json'
-      });
-      expect(environment.MCP_REQUEST_STATE_SECRET).toMatch(/^[A-Za-z0-9_-]+$/u);
-      expect(signal).toBeInstanceOf(AbortSignal);
-      return client;
-    });
+    const harness = sdkProcessHarness({ events });
 
     await expect(
       runInstalledReads({
@@ -270,7 +271,7 @@ describe('Product 1B one-command live runner', () => {
           cwd: '/private/SENTINEL_CONSUMER'
         },
         configPath: '/private/SENTINEL_CONNECTION.json',
-        openClient
+        sdkFactories: harness.sdkFactories
       })
     ).resolves.toEqual(responses);
 
@@ -283,18 +284,17 @@ describe('Product 1B one-command live runner', () => {
         name: 'opn_list',
         arguments: { resource: 'core.services', page: 1, pageSize: 10, query: '' }
       },
-      'close',
-      'diagnosticsClean'
+      'close'
     ]);
-    expect(openClient).toHaveBeenCalledWith({
-      invocation: {
-        command: '/private/SENTINEL_INSTALLED_COMMAND',
-        arguments: [],
-        cwd: '/private/SENTINEL_CONSUMER'
-      },
-      environment: expect.any(Object),
-      signal: expect.any(AbortSignal)
-    });
+    expect(harness.createTransport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        env: expect.objectContaining({
+          READ_ONLY: 'true',
+          OPNSENSE_CONFIG_FILE: '/private/SENTINEL_CONNECTION.json',
+          MCP_REQUEST_STATE_SECRET: expect.stringMatching(/^[A-Za-z0-9_-]+$/u)
+        })
+      })
+    );
   });
 
   it('passes the installed consumer cwd to the stdio transport', async () => {
@@ -336,27 +336,10 @@ describe('Product 1B one-command live runner', () => {
   it.each(['tool failure', 'stderr output'])(
     'closes the installed MCP session and fails safely after %s',
     async (condition) => {
-      const responses = successfulReadResult();
-      const close = vi.fn(async () => undefined);
-      const diagnosticsClean = vi.fn(() => condition !== 'stderr output');
-      const client = {
-        listTools: vi.fn(async () => responses.tools),
-        callTool: vi.fn(async ({ name }) => {
-          if (condition === 'tool failure' && name === 'opn_describe') {
-            throw new Error('SENTINEL_TOOL_FAILURE');
-          }
-          return responses[
-            {
-              server_status: 'serverStatus',
-              opn_describe: 'resourceDescription',
-              opn_get: 'systemStatus',
-              opn_list: 'servicesPage'
-            }[name]
-          ];
-        }),
-        close,
-        diagnosticsClean
-      };
+      const harness = sdkProcessHarness({
+        failTool: condition === 'tool failure' ? 'opn_describe' : undefined,
+        stderrChunks: condition === 'stderr output' ? [Buffer.from('x')] : []
+      });
 
       await expect(
         runInstalledReads({
@@ -366,12 +349,12 @@ describe('Product 1B one-command live runner', () => {
             cwd: '/private/SENTINEL_CONSUMER'
           },
           configPath: '/private/SENTINEL_CONNECTION.json',
-          openClient: vi.fn(async () => client)
+          sdkFactories: harness.sdkFactories
         })
       ).rejects.toThrow(/^Installed read failed$/);
 
-      expect(close).toHaveBeenCalledOnce();
-      expect(diagnosticsClean).toHaveBeenCalledOnce();
+      expect(harness.closeClient).toHaveBeenCalledOnce();
+      expect(harness.closeTransport).toHaveBeenCalledOnce();
     }
   );
 
@@ -413,7 +396,7 @@ describe('Product 1B one-command live runner', () => {
     expect(harness.closeTransport).toHaveBeenCalledOnce();
   });
 
-  it('deduplicates handshake and runner transport closes', async () => {
+  it('deduplicates handshake and runner client and transport closes', async () => {
     const harness = sdkProcessHarness({ failHandshake: true });
 
     await expect(
@@ -428,7 +411,54 @@ describe('Product 1B one-command live runner', () => {
       })
     ).rejects.toThrow(/^Installed read failed$/);
 
-    expect(harness.client.close).toHaveBeenCalledTimes(2);
+    expect(harness.closeClient).toHaveBeenCalledOnce();
+    expect(harness.closeTransport).toHaveBeenCalledOnce();
+  });
+
+  it.each(['connect', 'request'])('bounds a held installed MCP %s', async (heldStage) => {
+    vi.useFakeTimers();
+    const harness = sdkProcessHarness({
+      holdConnect: heldStage === 'connect',
+      holdRequest: heldStage === 'request'
+    });
+    const run = runInstalledReads({
+      invocation: {
+        command: '/private/SENTINEL_INSTALLED_COMMAND',
+        arguments: [],
+        cwd: '/private/SENTINEL_CONSUMER'
+      },
+      configPath: '/private/SENTINEL_CONNECTION.json',
+      sdkFactories: harness.sdkFactories,
+      operationTimeoutMs: 1_000
+    });
+    const rejection = expect(run).rejects.toThrow(/^Installed read failed$/);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await rejection;
+    expect(harness.closeClient).toHaveBeenCalledOnce();
+    expect(harness.closeTransport).toHaveBeenCalledOnce();
+  });
+
+  it('bounds a held installed MCP process close', async () => {
+    vi.useFakeTimers();
+    const harness = sdkProcessHarness({ holdClose: true });
+    const run = runInstalledReads({
+      invocation: {
+        command: '/private/SENTINEL_INSTALLED_COMMAND',
+        arguments: [],
+        cwd: '/private/SENTINEL_CONSUMER'
+      },
+      configPath: '/private/SENTINEL_CONNECTION.json',
+      sdkFactories: harness.sdkFactories,
+      closeTimeoutMs: 1_000
+    });
+    const rejection = expect(run).rejects.toThrow(/^Installed read failed$/);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await rejection;
+    expect(harness.closeClient).toHaveBeenCalledOnce();
     expect(harness.closeTransport).toHaveBeenCalledOnce();
   });
 
@@ -473,7 +503,6 @@ describe('Product 1B one-command live runner', () => {
   });
 
   it('rejects an abort that arrives while the MCP client is closing', async () => {
-    const responses = successfulReadResult();
     const controller = new AbortController();
     let markCloseStarted;
     let releaseClose;
@@ -483,24 +512,10 @@ describe('Product 1B one-command live runner', () => {
     const heldClose = new Promise((resolve) => {
       releaseClose = resolve;
     });
-    const client = {
-      listTools: vi.fn(async () => responses.tools),
-      callTool: vi.fn(async ({ name }) => {
-        return responses[
-          {
-            server_status: 'serverStatus',
-            opn_describe: 'resourceDescription',
-            opn_get: 'systemStatus',
-            opn_list: 'servicesPage'
-          }[name]
-        ];
-      }),
-      close: vi.fn(async () => {
-        markCloseStarted();
-        await heldClose;
-      }),
-      diagnosticsClean: vi.fn(() => true)
-    };
+    const harness = sdkProcessHarness({
+      closeSettlement: heldClose,
+      closeStarted: markCloseStarted
+    });
     const run = runInstalledReads({
       invocation: {
         command: '/private/SENTINEL_INSTALLED_COMMAND',
@@ -509,7 +524,7 @@ describe('Product 1B one-command live runner', () => {
       },
       configPath: '/private/SENTINEL_CONNECTION.json',
       signal: controller.signal,
-      openClient: vi.fn(async () => client)
+      sdkFactories: harness.sdkFactories
     });
 
     await closeStarted;
@@ -517,7 +532,8 @@ describe('Product 1B one-command live runner', () => {
     releaseClose();
 
     await expect(run).rejects.toThrow(/^Installed read failed$/);
-    expect(client.close).toHaveBeenCalledOnce();
+    expect(harness.closeClient).toHaveBeenCalledOnce();
+    expect(harness.closeTransport).toHaveBeenCalledOnce();
   });
 
   it('accepts the exact generated system.status projection and bounded read results', () => {

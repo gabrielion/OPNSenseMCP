@@ -7,9 +7,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
-import { Client } from '@modelcontextprotocol/client';
-import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
-import { validateInstalledInvocation } from '../testing/installed-invocation.mjs';
+import { runHardenedStdioLifecycle } from '../testing/hardened-stdio-lifecycle.mjs';
 import { bootstrapProduct1b } from './product1b-bootstrap.mjs';
 import { createConnectionArtifacts } from './product1b-connection.mjs';
 import { startDisposableVm, statusDisposableVm, stopDisposableVm } from './product1b-lifecycle.mjs';
@@ -279,211 +277,32 @@ function installedReadEnvironment(configPath) {
   });
 }
 
-const DEFAULT_SDK_FACTORIES = Object.freeze({
-  createTransport: (options) => new StdioClientTransport(options),
-  createClient: (clientInfo, options) => new Client(clientInfo, options)
-});
-
-/*
- * Pinned SDK boundary: StdioClientTransport exposes only `pid` publicly, while this runner must
- * retain the exact ChildProcess to verify its exit code and signal. Keep the private access here,
- * validate the runtime shape fail-closed, and revisit it whenever the pinned SDK is upgraded.
- */
-function pinnedStdioChildProcess(transport) {
-  const child = isRecord(transport) ? transport._process : undefined;
-  if (
-    !isRecord(child) ||
-    !Number.isSafeInteger(child.pid) ||
-    child.pid <= 0 ||
-    typeof child.once !== 'function' ||
-    typeof child.off !== 'function' ||
-    !(child.exitCode === null || Number.isSafeInteger(child.exitCode)) ||
-    !(child.signalCode === null || typeof child.signalCode === 'string')
-  ) {
-    throw new Error('Installed read failed');
-  }
-  return child;
-}
-
-function observeProcessClose(child) {
-  return new Promise((resolveClose) => {
-    child.once('close', (code, signal) => {
-      resolveClose(Object.freeze({ code, signal }));
-    });
-  });
-}
-
-async function waitForProcessClose(closeSettlement) {
-  if (closeSettlement === undefined) throw new Error('Installed read failed');
-  let timeout;
-  try {
-    return await Promise.race([
-      closeSettlement,
-      new Promise((_, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error('Installed read failed')),
-          PROCESS_CLOSE_TIMEOUT_MS
-        );
-      })
-    ]);
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function openSdkClient({
-  invocation,
-  environment,
-  signal,
-  sdkFactories = DEFAULT_SDK_FACTORIES
-}) {
-  const validatedInvocation = validateInstalledInvocation(invocation);
-  const transport = sdkFactories.createTransport({
-    command: validatedInvocation.command,
-    args: [...validatedInvocation.arguments],
-    cwd: validatedInvocation.cwd,
-    env: environment,
-    stderr: 'pipe',
-    maxBufferSize: COMMAND_OUTPUT_LIMIT_BYTES
-  });
-  const client = sdkFactories.createClient(
-    { name: 'product1b-live', version: MCP_CLIENT_VERSION },
-    {
-      capabilities: {},
-      enforceStrictCapabilities: true,
-      versionNegotiation: { mode: 'legacy' }
-    }
-  );
-  let stderrBytes = 0;
-  let stderrOverflow = false;
-  let stderrFailed = transport.stderr === null;
-  let processCloseSettlement;
-  const removeStderrListeners = () => {
-    transport.stderr?.off('data', observeStderr);
-    transport.stderr?.off('error', observeStderrFailure);
-  };
-  const originalStart = transport.start.bind(transport);
-  transport.start = async () => {
-    await originalStart();
-    const child = pinnedStdioChildProcess(transport);
-    processCloseSettlement = observeProcessClose(child);
-    void processCloseSettlement.then(removeStderrListeners);
-  };
-  const originalTransportClose = transport.close.bind(transport);
-  let transportCloseSettlement;
-  transport.close = () => {
-    transportCloseSettlement ??= Promise.resolve().then(originalTransportClose);
-    return transportCloseSettlement;
-  };
-  let closeSettlement;
-  const closeClient = () => {
-    closeSettlement ??= Promise.resolve().then(() => client.close());
-    return closeSettlement;
-  };
-  const observeStderr = (chunk) => {
-    if (stderrOverflow) return;
-    try {
-      stderrBytes = Math.min(
-        COMMAND_OUTPUT_LIMIT_BYTES + 1,
-        stderrBytes + Buffer.byteLength(chunk)
-      );
-    } catch {
-      stderrFailed = true;
-    }
-    if (stderrBytes > COMMAND_OUTPUT_LIMIT_BYTES || stderrFailed) {
-      stderrOverflow = true;
-      void closeClient().catch(() => undefined);
-    }
-  };
-  const observeStderrFailure = () => {
-    stderrFailed = true;
-    void closeClient().catch(() => undefined);
-  };
-  transport.stderr?.on('data', observeStderr);
-  transport.stderr?.once('error', observeStderrFailure);
-  const abort = () => {
-    void closeClient().catch(() => undefined);
-  };
-  const closeAndInspectProcess = async () => {
-    let closeFailed = false;
-    try {
-      await closeClient();
-    } catch {
-      closeFailed = true;
-    }
-    let processOutcome;
-    try {
-      processOutcome = await waitForProcessClose(processCloseSettlement);
-    } catch {
-      closeFailed = true;
-    }
-    return (
-      !closeFailed &&
-      processOutcome !== undefined &&
-      processOutcome.code === 0 &&
-      processOutcome.signal === null
-    );
-  };
-  signal.addEventListener('abort', abort, { once: true });
-  try {
-    await client.connect(transport, {
-      signal,
-      timeout: READ_TIMEOUT_MS,
-      maxTotalTimeout: READ_TIMEOUT_MS
-    });
-    if (signal.aborted) throw new Error('Installed read failed');
-  } catch {
-    signal.removeEventListener('abort', abort);
-    await closeAndInspectProcess();
-    throw new Error('Installed read failed');
-  }
-  const requestOptions = Object.freeze({
-    signal,
-    timeout: READ_TIMEOUT_MS,
-    maxTotalTimeout: READ_TIMEOUT_MS
-  });
-  return Object.freeze({
-    listTools: () => client.listTools(undefined, requestOptions),
-    callTool: (request) => client.callTool(request, requestOptions),
-    diagnosticsClean: () => stderrBytes === 0 && !stderrOverflow && !stderrFailed,
-    close: async () => {
-      signal.removeEventListener('abort', abort);
-      if (!(await closeAndInspectProcess())) throw new Error('Installed read failed');
-    }
-  });
-}
-
 export async function runInstalledReads({
   invocation,
   configPath,
   signal = new AbortController().signal,
-  openClient = openSdkClient,
-  sdkFactories
+  sdkFactories,
+  operationTimeoutMs = READ_TIMEOUT_MS,
+  closeTimeoutMs = PROCESS_CLOSE_TIMEOUT_MS
 }) {
-  const operationSignal = AbortSignal.any([signal, AbortSignal.timeout(READ_TIMEOUT_MS)]);
-  if (operationSignal.aborted) throw new Error('Installed read failed');
-  let validatedInvocation;
-  try {
-    validatedInvocation = validateInstalledInvocation(invocation);
-  } catch {
-    throw new Error('Installed read failed');
-  }
-  let client;
-  try {
-    client = await openClient({
-      invocation: validatedInvocation,
+  return runHardenedStdioLifecycle(
+    {
+      invocation,
       environment: installedReadEnvironment(configPath),
-      signal: operationSignal,
-      ...(sdkFactories === undefined ? {} : { sdkFactories })
-    });
-  } catch {
-    throw new Error('Installed read failed');
-  }
-
-  let result;
-  let failed = false;
-  try {
-    result = {
+      signal,
+      clientInfo: { name: 'product1b-live', version: MCP_CLIENT_VERSION },
+      clientOptions: {
+        capabilities: {},
+        enforceStrictCapabilities: true,
+        versionNegotiation: { mode: 'legacy' }
+      },
+      ...(sdkFactories === undefined ? {} : { sdkFactories }),
+      operationTimeoutMs,
+      closeTimeoutMs,
+      stderrLimitBytes: COMMAND_OUTPUT_LIMIT_BYTES,
+      failureMessage: 'Installed read failed'
+    },
+    async (client) => ({
       tools: await client.listTools(),
       serverStatus: await client.callTool({ name: 'server_status', arguments: {} }),
       resourceDescription: await client.callTool({
@@ -498,23 +317,8 @@ export async function runInstalledReads({
         name: 'opn_list',
         arguments: { resource: 'core.services', page: 1, pageSize: 10, query: '' }
       })
-    };
-  } catch {
-    failed = true;
-  }
-  try {
-    await client.close();
-  } catch {
-    failed = true;
-  }
-  if (operationSignal.aborted) failed = true;
-  try {
-    if (client.diagnosticsClean() !== true) failed = true;
-  } catch {
-    failed = true;
-  }
-  if (failed || result === undefined) throw new Error('Installed read failed');
-  return Object.freeze(result);
+    })
+  );
 }
 
 function isRecord(value) {
