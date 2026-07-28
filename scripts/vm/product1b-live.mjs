@@ -302,22 +302,23 @@ export async function runInstalledReads({
       stderrLimitBytes: COMMAND_OUTPUT_LIMIT_BYTES,
       failureMessage: 'Installed read failed'
     },
-    async (client) => ({
-      tools: await client.listTools(),
-      serverStatus: await client.callTool({ name: 'server_status', arguments: {} }),
-      resourceDescription: await client.callTool({
-        name: 'opn_describe',
-        arguments: { resource: 'system.status' }
-      }),
-      systemStatus: await client.callTool({
-        name: 'opn_get',
-        arguments: { resource: 'system.status' }
-      }),
-      servicesPage: await client.callTool({
-        name: 'opn_list',
-        arguments: { resource: 'core.services', page: 1, pageSize: 10, query: '' }
+    async (client) =>
+      Object.freeze({
+        tools: await client.listTools(),
+        serverStatus: await client.callTool({ name: 'server_status', arguments: {} }),
+        resourceDescription: await client.callTool({
+          name: 'opn_describe',
+          arguments: { resource: 'system.status' }
+        }),
+        systemStatus: await client.callTool({
+          name: 'opn_get',
+          arguments: { resource: 'system.status' }
+        }),
+        servicesPage: await client.callTool({
+          name: 'opn_list',
+          arguments: { resource: 'core.services', page: 1, pageSize: 10, query: '' }
+        })
       })
-    })
   );
 }
 

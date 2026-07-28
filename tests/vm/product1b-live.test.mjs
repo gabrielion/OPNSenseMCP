@@ -263,17 +263,18 @@ describe('Product 1B one-command live runner', () => {
     const responses = successfulReadResult();
     const harness = sdkProcessHarness({ events });
 
-    await expect(
-      runInstalledReads({
-        invocation: {
-          command: '/private/SENTINEL_INSTALLED_COMMAND',
-          arguments: [],
-          cwd: '/private/SENTINEL_CONSUMER'
-        },
-        configPath: '/private/SENTINEL_CONNECTION.json',
-        sdkFactories: harness.sdkFactories
-      })
-    ).resolves.toEqual(responses);
+    const result = await runInstalledReads({
+      invocation: {
+        command: '/private/SENTINEL_INSTALLED_COMMAND',
+        arguments: [],
+        cwd: '/private/SENTINEL_CONSUMER'
+      },
+      configPath: '/private/SENTINEL_CONNECTION.json',
+      sdkFactories: harness.sdkFactories
+    });
+
+    expect(result).toEqual(responses);
+    expect(Object.isFrozen(result)).toBe(true);
 
     expect(events).toEqual([
       'listTools',
