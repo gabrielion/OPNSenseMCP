@@ -37,6 +37,12 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          # `evidence:verify` accepts the attested commit itself OR one later commit whose sole
+          # change is the attestation. Proving the second case reads the attested commit object,
+          # its tree, and the diff to HEAD, none of which exist in the default depth-1 checkout —
+          # so every push landing on an evidence commit failed here with a stale exit 2. Two
+          # commits is exactly what that contract can require.
+          fetch-depth: 2
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.23.1 # current patched Node 22
