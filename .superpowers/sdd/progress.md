@@ -532,3 +532,26 @@ DeepEval + real OPNsense agent-evaluation design and handoff: documentation cand
   - Next design gate: the owner reviews the complete written specification. Only after approval should
     `superpowers:writing-plans` produce the TDD implementation plan. There is no canonical agentic score to
     publish at this point.
+
+Serial-bootstrap progress deadline fix (2026-07-29).
+  - Defect: `bootstrapProduct1b` armed one deadline from connection (`timeoutMs`, default 30 s) and matched
+    only console output arriving after connect. `startDisposableVm` returns as soon as the guest answers on
+    its API port, which happens long before getty prints `login:`. Measured on the reference workstation:
+    API ready 69 s after qemu launch, `login:` at 112 s. Feeding the password immediately made the runner
+    watch [69 s, 99 s] and miss the prompt, failing at stage `login` every time; the historical interactive
+    runs passed only because an operator's typing latency shifted that window onto the prompt.
+  - The console itself was never at fault. A raw capture through `net.createConnection` showed the full boot
+    transcript and the prompt `FreeBSD/amd64 (OPNsense.internal) (ttyu0)\r\n\r\nlogin: ` with no trailing
+    newline, followed by silence. The existing connect-time newline already covers a prompt printed before
+    connect, so only the deadline needed changing.
+  - TDD: three tests failed first in tests/vm/product1b-bootstrap.test.mjs — a slow boot that keeps writing
+    must still reach the prompt (rejected at 310 ms with stage `login`), a console that chatters forever
+    without a prompt must fail closed on the absolute cap (took 5 003 ms instead of 400 ms), and an unusable
+    `overallTimeoutMs` must be refused at stage `validation`. A fourth test pins the preserved fail-closed
+    behaviour for a console that never writes at all.
+  - Fix: `timeoutMs` now bounds absence of console progress and is re-armed on every data chunk; a new
+    `overallTimeoutMs` (default 600 s, max 1 800 s) keeps an endlessly chattering console from hanging the
+    runner. No change to the login/menu/shell/upload state machine, the credential handling, or the fixed
+    failure shape.
+  - Product 3 VM attestation is renewed in the following evidence-only commit, produced with the password
+    delivered immediately at the hidden prompt: that run is itself the live proof of the fix.

@@ -145,7 +145,13 @@ export const PRODUCT1B_BOOTSTRAP_HELPER = buildProduct1bBootstrapHelper(
 );
 
 const FAILURE_CODE = 'PRODUCT1B_BOOTSTRAP_FAILED';
+// `timeoutMs` bounds absence of console progress, not the length of a healthy boot: the VM
+// answers on its API port well before getty prints `login:`, so a deadline measured from
+// connection expires mid-boot even though the guest is still writing. `overallTimeoutMs`
+// keeps a console that chatters forever from hanging the runner.
 const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_OVERALL_TIMEOUT_MS = 600_000;
+const MAXIMUM_OVERALL_TIMEOUT_MS = 1_800_000;
 const DEFAULT_MAX_TRANSCRIPT_BYTES = 64 * 1024;
 const SHELL_PROMPT = /root@OPNsense:[^\r\n]*#\s*/u;
 const SHELL_CONTINUATION_PROMPT = /\?\s*/u;
@@ -183,7 +189,13 @@ function fail() {
   throw new Product1bBootstrapError();
 }
 
-function validateOptions({ consolePath, factoryPassword, timeoutMs, maxTranscriptBytes }) {
+function validateOptions({
+  consolePath,
+  factoryPassword,
+  timeoutMs,
+  overallTimeoutMs,
+  maxTranscriptBytes
+}) {
   if (
     typeof consolePath !== 'string' ||
     consolePath.length === 0 ||
@@ -194,6 +206,9 @@ function validateOptions({ consolePath, factoryPassword, timeoutMs, maxTranscrip
     !Number.isSafeInteger(timeoutMs) ||
     timeoutMs < 1 ||
     timeoutMs > 300_000 ||
+    !Number.isSafeInteger(overallTimeoutMs) ||
+    overallTimeoutMs < 1 ||
+    overallTimeoutMs > MAXIMUM_OVERALL_TIMEOUT_MS ||
     !Number.isSafeInteger(maxTranscriptBytes) ||
     maxTranscriptBytes < 1024 ||
     maxTranscriptBytes > 1024 * 1024
@@ -276,9 +291,16 @@ export async function bootstrapProduct1b({
   factoryPassword,
   privileges = READONLY_BOOTSTRAP_PRIVILEGES,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  overallTimeoutMs = DEFAULT_OVERALL_TIMEOUT_MS,
   maxTranscriptBytes = DEFAULT_MAX_TRANSCRIPT_BYTES
 }) {
-  validateOptions({ consolePath, factoryPassword, timeoutMs, maxTranscriptBytes });
+  validateOptions({
+    consolePath,
+    factoryPassword,
+    timeoutMs,
+    overallTimeoutMs,
+    maxTranscriptBytes
+  });
   const helper =
     privileges === READONLY_BOOTSTRAP_PRIVILEGES
       ? PRODUCT1B_BOOTSTRAP_HELPER
@@ -295,7 +317,8 @@ export async function bootstrapProduct1b({
     let uploadLine = 0;
 
     const cleanup = () => {
-      clearTimeout(timer);
+      clearTimeout(overallTimer);
+      clearTimeout(progressTimer);
       socket.removeAllListeners();
       socket.destroy();
     };
@@ -394,13 +417,21 @@ export async function bootstrapProduct1b({
         rejectSafely();
       }
     };
-    const timer = setTimeout(rejectSafely, timeoutMs);
-    timer.unref?.();
+    const overallTimer = setTimeout(rejectSafely, overallTimeoutMs);
+    overallTimer.unref?.();
+    let progressTimer;
+    const awaitProgress = () => {
+      clearTimeout(progressTimer);
+      progressTimer = setTimeout(rejectSafely, timeoutMs);
+      progressTimer.unref?.();
+    };
+    awaitProgress();
     socket.once('connect', () => {
       state = 'login';
       send('\n');
     });
     socket.on('data', (chunk) => {
+      awaitProgress();
       transcriptBytes += chunk.byteLength;
       if (transcriptBytes > maxTranscriptBytes) {
         rejectSafely();

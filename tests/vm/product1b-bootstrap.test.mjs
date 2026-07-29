@@ -218,6 +218,164 @@ describe('Product 1B serial bootstrap', () => {
   });
 });
 
+describe('Product 1B serial bootstrap deadlines', () => {
+  // The disposable VM opens its HTTPS port well before getty prints a login prompt: on the
+  // reference workstation the API answered 69s after launch and the console only reached
+  // `login:` at 112s. A single deadline measured from connection therefore expires mid-boot
+  // and the runner only succeeded when an operator happened to type late enough. The deadline
+  // must bound absence of progress, not the length of a healthy boot.
+  function bootPhase(socket, { chunks, intervalMs }) {
+    return new Promise((resolve) => {
+      let remaining = chunks;
+      const chatter = setInterval(() => {
+        socket.write(">>> Invoking start script 'freebsd'\r\n");
+        remaining -= 1;
+        if (remaining > 0) return;
+        clearInterval(chatter);
+        resolve();
+      }, intervalMs);
+      socket.once('close', () => clearInterval(chatter));
+      socket.once('error', () => clearInterval(chatter));
+    });
+  }
+
+  // A fixture that never closes its accepted socket would keep server.close() pending, so
+  // every connection is tracked and destroyed before the server is shut down.
+  function trackConnections(server) {
+    const sockets = new Set();
+    server.on('connection', (socket) => {
+      sockets.add(socket);
+      socket.once('close', () => sockets.delete(socket));
+    });
+    return async () => {
+      for (const socket of sockets) socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+    };
+  }
+
+  async function listen(server, socketPath) {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socketPath, resolve);
+    });
+  }
+
+  it('keeps waiting for a login prompt while a slow boot is still writing to the console', async () => {
+    const socketPath = await temporarySocketPath();
+    const factoryPassword = 'SENTINEL_FACTORY_PASSWORD';
+    const result = {
+      key: 'K'.repeat(80),
+      secret: 'S'.repeat(80),
+      serverName: 'OPNsense.internal'
+    };
+    const server = createServer(async (socket) => {
+      try {
+        await readUntil(socket, (input) => input.endsWith('\n'));
+        // Boot chatter for far longer than the no-progress deadline, then the prompt.
+        await bootPhase(socket, { chunks: 14, intervalMs: 50 });
+        socket.write('\r\nFreeBSD/amd64 (OPNsense.internal) (ttyu0)\r\n\r\nlogin: ');
+        await readUntil(socket, (input) => input.endsWith('\n'));
+        socket.write('Password:');
+        await readUntil(socket, (input) => input.endsWith('\n'));
+        socket.write('\r\n*** OPNsense.localdomain: OPNsense 26.1.6 ***\r\nEnter an option:');
+        await readUntil(socket, (input) => input.endsWith('\n'));
+        socket.write('\r\nroot@OPNsense:~ # ');
+        await receiveUploadedHelper(socket);
+        socket.end(framedResult(result));
+      } catch {
+        socket.destroy();
+      }
+    });
+    const shutdown = trackConnections(server);
+    await listen(server, socketPath);
+
+    await expect(
+      bootstrapProduct1b({
+        consolePath: socketPath,
+        factoryPassword,
+        timeoutMs: 300,
+        overallTimeoutMs: 10_000
+      })
+    ).resolves.toEqual(result);
+
+    await shutdown();
+  });
+
+  it('fails closed when the console keeps writing but never presents a login prompt', async () => {
+    const socketPath = await temporarySocketPath();
+    const server = createServer(async (socket) => {
+      try {
+        await readUntil(socket, (input) => input.endsWith('\n'));
+        await bootPhase(socket, { chunks: 1_000, intervalMs: 20 });
+      } catch {
+        socket.destroy();
+      }
+    });
+    const shutdown = trackConnections(server);
+    await listen(server, socketPath);
+
+    const started = Date.now();
+    let failure;
+    try {
+      await bootstrapProduct1b({
+        consolePath: socketPath,
+        factoryPassword: 'SENTINEL_FACTORY_PASSWORD',
+        timeoutMs: 5_000,
+        overallTimeoutMs: 400
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      code: 'PRODUCT1B_BOOTSTRAP_FAILED',
+      stage: 'login'
+    });
+    expect(Date.now() - started).toBeLessThan(2_500);
+
+    await shutdown();
+  });
+
+  it('fails closed when the console never writes anything', async () => {
+    const socketPath = await temporarySocketPath();
+    const server = createServer();
+    const shutdown = trackConnections(server);
+    await listen(server, socketPath);
+
+    const started = Date.now();
+    let failure;
+    try {
+      await bootstrapProduct1b({
+        consolePath: socketPath,
+        factoryPassword: 'SENTINEL_FACTORY_PASSWORD',
+        timeoutMs: 300,
+        overallTimeoutMs: 10_000
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      code: 'PRODUCT1B_BOOTSTRAP_FAILED',
+      stage: 'login'
+    });
+    expect(Date.now() - started).toBeLessThan(2_500);
+
+    await shutdown();
+  });
+
+  it('rejects an unusable overall deadline', async () => {
+    const socketPath = await temporarySocketPath();
+    await expect(
+      bootstrapProduct1b({
+        consolePath: socketPath,
+        factoryPassword: 'SENTINEL_FACTORY_PASSWORD',
+        overallTimeoutMs: 0
+      })
+    ).rejects.toMatchObject({ code: 'PRODUCT1B_BOOTSTRAP_FAILED', stage: 'validation' });
+  });
+});
+
 describe('bootstrap privilege scoping', () => {
   it('keeps the read-only privilege set as the default helper', () => {
     expect(READONLY_BOOTSTRAP_PRIVILEGES).toEqual([

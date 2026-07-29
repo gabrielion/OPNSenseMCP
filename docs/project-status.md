@@ -355,6 +355,11 @@ Those facts guide the clean-room design; they do not authorize copying implement
   when intentionally updating it.
 - Some historical plans contain useful context but are explicitly superseded.
 - A test name containing “VM” does not prove the VM ran; require the real producer and lifecycle evidence.
+- The disposable VM answers on its API port well before the serial console prints `login:`; on the reference
+  workstation readiness was 69 s after launch and the login prompt 112 s. The serial bootstrap deadline
+  therefore bounds absence of console progress, not the length of a healthy boot. Before that fix
+  `npm run vm:product3` only succeeded when an operator typed slowly enough at the hidden prompt, and it
+  failed at bootstrap stage `login` for any unattended or fast input.
 - The current alias readback is bounded to a page of 100. Do not claim complete-state absence beyond that
   bound before P0-C.
 - The current DeepEval documentation still carries a “DeepEval 4.0” banner and contains a few naming
