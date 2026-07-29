@@ -2,8 +2,25 @@
   "name": "@gabrielion/opnsense-mcp",
   "version": "0.1.0",
   "description": "A safety-first MCP server for OPNsense",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "opnsense",
+    "firewall",
+    "read-only"
+  ],
+  "homepage": "https://github.com/gabrielion/OPNSenseMCP#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gabrielion/OPNSenseMCP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gabrielion/OPNSenseMCP/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "AGPL-3.0-or-later",
-  "private": true,
   "type": "module",
   "engines": {
     "node": ">=22.19 <23"
@@ -29,6 +46,7 @@
     "start": "node dist/main.js",
     "start:http": "node dist/entrypoints/http.js",
     "build": "npm run clean && tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint . --max-warnings 0",

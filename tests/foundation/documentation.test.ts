@@ -369,6 +369,12 @@ describe('product documentation', () => {
     for (const block of [...bashBlocks(readme), ...bashBlocks(contributing)]) {
       if (!/(?:^|\n)(?:node|npm|npx)\b/mu.test(block)) continue;
       if (/npm run (?:vm:|test:product1b)/u.test(block)) continue;
+      // The Node 22 preflight pins this workstation's Homebrew path. It belongs to contributor
+      // instructions run from a clone; an end user installing the published package has no
+      // Homebrew node@22 to select, so requiring it in the quickstart would print a path that
+      // does not exist on their machine. The supported Node range is stated in prose instead and
+      // enforced by the package's own `engines` field.
+      if (block.includes('npx -y @gabrielion/opnsense-mcp')) continue;
       const lines = block.split('\n').map((line) => line.trim());
       for (const preflightLine of NODE_22_PREFLIGHT) {
         expect(lines).toContain(preflightLine);
@@ -532,7 +538,7 @@ describe('product documentation', () => {
     const prose = readme.replace(/\s+/gu, ' ');
     // The runnable form from a clone, plus the fact that the short name only exists once installed.
     expect(prose).toContain('node dist/main.js configure');
-    expect(prose).toContain('`opnsense-mcp` name exists only inside an installed tarball');
+    expect(prose).toContain('npx -y @gabrielion/opnsense-mcp configure');
     expect(prose).toContain('ignores `OPNSENSE_CONFIG_FILE`');
     for (const privilege of [
       'page-system-status',

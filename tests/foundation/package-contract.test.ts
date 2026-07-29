@@ -5,7 +5,9 @@ import { describe, expect, it } from 'vitest';
 interface PackageDocument {
   name: string;
   license: string;
-  private: boolean;
+  private?: boolean;
+  publishConfig: { access: string };
+  repository: { type: string; url: string };
   engines: { node: string };
   scripts: Record<string, string>;
   dependencies: Record<string, string>;
@@ -58,7 +60,14 @@ describe('package contract', () => {
 
     expect(document.name).toBe('@gabrielion/opnsense-mcp');
     expect(document.license).toBe('AGPL-3.0-or-later');
-    expect(document.private).toBe(true);
+    // The package is publishable: a quickstart that cannot be installed is the friction the
+    // setup tutorial exists to remove. A scoped package defaults to restricted, so the public
+    // access declaration is what actually makes `npx @gabrielion/opnsense-mcp` reachable, and
+    // `prepare` is what makes a git-URL install build its own dist/.
+    expect(document.private).toBeUndefined();
+    expect(document.publishConfig).toEqual({ access: 'public' });
+    expect(document.scripts.prepare).toBe('npm run build');
+    expect(document.repository.url).toBe('git+https://github.com/gabrielion/OPNSenseMCP.git');
     expect(document.engines.node).toBe('>=22.19 <23');
     expect(document.scripts['license:check']).toBe('node scripts/check-license-headers.mjs');
     expect(document.dependencies).toMatchObject({
