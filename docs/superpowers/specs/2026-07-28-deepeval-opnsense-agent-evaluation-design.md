@@ -2,7 +2,10 @@
 
 **Date:** 2026-07-28
 
-**Status:** Architecture approved by the owner; written specification awaiting owner review
+**Last verified:** 2026-07-29
+
+**Status:** Architecture approved by the owner; implementation has not started; this written specification
+awaits final owner review
 
 ## Outcome
 
@@ -14,6 +17,77 @@ the target state back and fail if the requested change did not occur.
 The first implementation is a clean-room vertical based on the current public DeepEval documentation. It
 does not copy the provenance-controlled legacy `tests/agentic/**` assets. Once the vertical is trustworthy,
 the historical corpus can be admitted through the repository's separate provenance workflow.
+
+## Current project position
+
+### P0-B is complete and supplies the test foundation
+
+P0-B is published on `origin/codex/p0b-resume-wip` through `12bc618`. The Product 3 evidence in that
+evidence-only commit attests the tested candidate `3fcb8a3`, its exact tree, OPNsense 26.1.6, Node 22.23.1,
+the writable policy inputs and all twelve fixed lifecycle checks. That evidence already proves the
+installed server can perform this bounded disposable-VM sequence:
+
+```text
+alias absent
+  -> opn_create
+  -> same UUID and content present through opn_list
+  -> opn_delete of that UUID
+  -> UUID absent through opn_list
+  -> VM stopped
+  -> owned residue absent
+```
+
+This is deterministic product evidence, not agentic evidence. It establishes that the server and VM harness
+are ready to be placed behind an evaluated host; it does not show that Claude selects the right tools,
+handles errors correctly or produces a truthful final answer.
+
+The DeepEval vertical should reuse, rather than reimplement:
+
+| Existing foundation | Reuse |
+| --- | --- |
+| `scripts/testing/prepare-installed-package.mjs` | Pack and install the exact current package in an isolated consumer |
+| `scripts/testing/hardened-stdio-lifecycle.mjs` | Bound MCP connection, requests, output, close and child-process exit |
+| `scripts/testing/private-fixture-root.mjs` | Own private temporary files and modes |
+| `scripts/vm/product1b.mjs` and `scripts/vm/product1b-live.mjs` | Own the disposable read-only VM lifecycle |
+| `scripts/vm/product3-alias.mjs` | Reuse the fixed writable policy and alias transition contract |
+| `scripts/verify-vm-attestation.mjs` | Preserve commit-bound, evidence-only publication semantics |
+
+### DeepEval exists only as a design today
+
+The repository audit on 2026-07-29 found:
+
+| Area | Current state |
+| --- | --- |
+| Framework choice | DeepEval selected |
+| Version | `deepeval==4.1.4` selected, not installed by the repository |
+| Evaluated host | Claude Code selected, using `claude -p --output-format stream-json` |
+| Architecture | Defined in this document |
+| `tests/evals/**` | Absent |
+| `scripts/evals/**` | Absent |
+| Python manifest or lock | Absent |
+| Scenario catalogue | Absent |
+| Trace parser and Node orchestrator | Absent |
+| DeepEval adapter and custom metrics | Absent |
+| npm evaluation commands | Absent |
+| CI evaluation job | Absent |
+| Live agentic run | Not run |
+| Human calibration set | Absent |
+| Canonical score or agentic attestation | Absent |
+
+Therefore no public statement may yet claim an agentic benchmark, DeepEval pass rate, Claude model result or
+MCP-agent quality score.
+
+### Relationship to P0-C
+
+The evaluation vertical and P0-C are separate:
+
+- this vertical measures the current installed MCP product, including its existing bounded alias mutation;
+- P0-C changes durability, locking, reconciliation, pagination and mutation correctness;
+- completing this first evaluation vertical does not complete P0-C;
+- a P0-C change that affects the reachable surface or mutation lifecycle invalidates the relevant agentic
+  baseline and requires those scenarios to be rerun;
+- they should not be implemented concurrently in the same worktree because both touch VM lifecycle,
+  mutation expectations and evidence publication.
 
 ## Why this exists
 
@@ -73,6 +147,10 @@ DeepEval's documented MCP flow is:
 
 For this project, Claude Code is the MCP host, the installed OPNSenseMCP package is the MCP server, and the
 disposable OPNsense VM is the server's external target.
+
+DeepEval 4.1.4 remains the latest PyPI release checked on 2026-07-29. The adapter must nevertheless prove the
+effective installed API in focused tests because the documentation is versionless and contains some naming
+differences between overview and quickstart examples.
 
 ## Terms used in this design
 
@@ -219,6 +297,24 @@ without the corresponding readback, or if cleanup cannot be proven.
 The initial fixture is deliberately bounded to the already proven Product 3 empty-alias lifecycle. Broader
 no-collateral-change claims require a canonical complete-page snapshot and are not inferred from the
 current single-page API behavior.
+
+The state verifier deliberately reads through the installed MCP server. It does not call an internal
+handler and does not substitute a parallel raw REST implementation as an “oracle”. This directly evaluates
+the product boundary requested by the owner:
+
+```text
+tools/call reports success
+        |
+        v
+opn_list reads the same resource through the installed server
+        |
+        +-- expected state observed -> state gate may pass
+        |
+        +-- unchanged or different state -> scenario fails
+```
+
+The readback remains deterministic even when DeepEval's semantic metrics assign a high score. The disposable
+VM and fixed fixture make that postcondition real without claiming production or packet-flow behavior.
 
 ### 5. Report and attestation boundary
 
@@ -429,6 +525,25 @@ npm run test:agentic:vm
 The commands are not implemented by this specification and must not be documented as working until their
 tests pass.
 
+## Planned deliverables
+
+All paths in this section are proposed clean-room destinations. They do not exist yet.
+
+| Deliverable | Proposed location | Responsibility |
+| --- | --- | --- |
+| Versioned scenario schema and catalogue | `tests/evals/scenarios/**` | Static inputs, expected tools, argument predicates, state transitions and response criteria |
+| Adversarial trace fixtures | `tests/evals/fixtures/**` | Malformed JSONL, unresolved calls, secret-shaped data and success-shaped no-op cases |
+| Node orchestrator | `scripts/evals/run-agentic.mjs` | Package install, VM/Claude lifecycle, trace normalization, deterministic gates, cleanup and exit classes |
+| Data boundary schema | `scripts/evals/schema/**` | Strict versioned JSON exchanged between Node and Python |
+| DeepEval worker | `scripts/evals/deepeval/**` | Construct DeepEval test cases, run selected metrics and return bounded results |
+| Reproducible Python bootstrap | implementation-plan decision | Pin Python and DeepEval without placing credentials or an uncontrolled virtualenv in the repository |
+| Local private reports | ignored private results root | Store sanitized detailed results with directory `0700` and files `0600` |
+| Public agentic evidence | implementation-plan decision | Store only commit-bound allow-listed metadata, digests, fixed checks and calibrated scores |
+| npm commands | `package.json` after tests exist | Expose setup, offline validation and explicit live VM evaluation |
+| CI integration | `.github/workflows/ci.yml` after offline stabilization | Run only deterministic hermetic evaluation checks; never start a VM or paid model implicitly |
+
+The implementation plan must validate every proposed path against the provenance manifest before creation.
+
 ## Local results and public evidence
 
 DeepEval can persist local JSON results and provides `deepeval inspect` for trace-oriented runs. For the
@@ -484,16 +599,23 @@ and the production/runtime boundary.
 
 After the owner approves this written specification:
 
-1. write a TDD implementation plan;
-2. implement the offline trace schema and adversarial parser tests;
-3. implement the Python DeepEval adapter and deterministic no-op regression;
-4. run one installed synthetic-target test;
-5. run S1 and S2 against a fresh disposable VM;
-6. run S3 against a fresh disposable VM and prove all state transitions;
-7. calibrate qualitative metrics against human labels;
-8. repeat the live sentinel set at least three times from fresh state;
-9. review, attest and publish only the bounded evidence;
-10. plan the separately authorized historical-corpus migration.
+| Phase | Work | Exit gate |
+| --- | --- | --- |
+| 0. Plan | Write a TDD implementation plan and resolve the initial Python bootstrap and judge interface | Owner approves the plan; no production code yet |
+| 1. Offline contract | Implement the data schema, strict stream-json parser, redaction and S4 no-op fixture | Malformed, unresolved, duplicate and secret-bearing traces fail closed without model or VM |
+| 2. DeepEval adapter | Install 4.1.4 reproducibly and construct single/multi-turn MCP test cases from validated data | Focused tests prove the effective API and deterministic metrics need no fake provider key |
+| 3. Installed synthetic path | Pack/install the server and exercise it through MCP against the synthetic target | No internal handler shortcut; catalogue, calls, results and cleanup are captured |
+| 4. Live reads | Execute S1 and S2 through Claude Code against fresh disposable VM state | Required tool/resource used, real schema-valid result observed, truthful response, cleanup proved |
+| 5. Live reversible mutation | Execute S3 with the exact preauthorized elicitation hook | Absent → create → present → delete → absent; any no-op or extra mutation fails |
+| 6. Calibration | Human-label representative outputs and compare qualitative judge decisions | Judge/model/template/threshold fixed with acceptable documented disagreement |
+| 7. Reliability | Run each sentinel at least three times from fresh state | First-attempt and all-trials success reported; no cached rerating presented as a rerun |
+| 8. Publication | Independent review, sanitized report and commit-bound evidence | No Critical/Important finding, no secret, complete cleanup, bounded claims only |
+| 9. Historical corpus | Run the separate private provenance workflow if still desired | Only authorized, reviewed and digest-sealed assets are admitted |
+
+The fastest value-producing slice is phases 0–3 plus S1. It proves the complete
+Claude → installed MCP → OPNsense read path before adding judge calibration or mutation complexity. S4 must
+still be implemented early so the framework can never confuse a successful-looking tool response with a
+real state change.
 
 ## Definition of done for the first vertical
 
@@ -514,10 +636,33 @@ After the owner approves this written specification:
 
 ## Explicitly unresolved
 
-The initial judge provider is not yet selected. DeepEval supports OpenAI, Anthropic, Azure OpenAI, Bedrock,
-Ollama and custom models. Before implementation, the runner will detect only the presence—not the value—of
-approved provider configuration and fail with a fixed preflight code when no judge is available. It will
-not invent an API key or silently substitute a provider.
+The following decisions remain. None permits implementation to invent a default silently.
+
+| Decision | Needed by | Constraint |
+| --- | --- | --- |
+| Python environment and lock mechanism | Phase 0 | Reproducible, outside tracked source where practical, no lifecycle-script surprise |
+| Exact catalogue serialization | Phase 0 | Versioned, declarative and incapable of carrying executable callbacks |
+| Initial judge provider and model | Before phase 2 semantic runs | Explicit private configuration; record resolved identity; never infer from an unrelated key |
+| Evaluated Claude model and effort | Before phase 4 | Record selector and resolved identity where available; keep host and judge identities separate |
+| Initial qualitative rubric and calibration threshold | Phase 6 | Human-labeled baseline before any semantic metric becomes blocking |
+| Public agentic evidence schema and location | Phase 8 | Allow-listed, commit-bound, sanitized and independently reviewed |
+
+DeepEval supports OpenAI, Anthropic, Azure OpenAI, Bedrock, Ollama and custom models. Before a semantic run,
+the runner will detect only the presence—not the value—of approved provider configuration and fail with a
+fixed preflight code when no judge is available. It will not invent an API key or silently substitute a
+provider. The offline parser and deterministic state metric must remain runnable without any judge.
 
 Confident AI remains disabled for the initial vertical. Enabling cloud result storage later requires a
 separate privacy and data-retention decision.
+
+## Exact next action
+
+The next action is not a benchmark run. It is:
+
+1. owner review of this complete written specification;
+2. a TDD implementation plan for phases 0–3 and S1/S4;
+3. implementation in an isolated worktree after the current VM/P0-C work is no longer sharing its files;
+4. focused offline proof before any paid model or disposable VM run.
+
+Until those steps happen, the truthful status is: **P0-B complete; DeepEval architecture documented;
+DeepEval implementation and agentic evidence absent.**
