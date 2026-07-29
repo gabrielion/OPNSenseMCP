@@ -6,6 +6,7 @@
 
 Four read-only tools for OPNsense — read-only by default, and specific about what it has verified.
 
+[![npm](https://img.shields.io/npm/v/@gabrielion/opnsense-mcp?logo=npm&logoColor=white)](https://www.npmjs.com/package/@gabrielion/opnsense-mcp)
 [![CI](https://img.shields.io/github/actions/workflow/status/gabrielion/OPNSenseMCP/ci.yml?branch=main&label=CI&logo=githubactions&logoColor=white)](https://github.com/gabrielion/OPNSenseMCP/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D22.19%20%3C23-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org)
