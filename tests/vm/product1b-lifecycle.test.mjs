@@ -324,6 +324,78 @@ describe('Product 1B disposable VM lifecycle', () => {
     await expect(readdir(instanceRoot)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  // The pinned image only offers an unauthenticated shell inside its loader window a few
+  // seconds after launch, so the console consumer has to run before the API can answer.
+  it('runs the console consumer after launch and before the readiness probe', async () => {
+    const { instanceRoot, rawPath } = await fixturePaths();
+    const dependencies = happyDependencies();
+    const order = [];
+    dependencies.spawnVm = vi.fn((command, arguments_) => {
+      order.push('spawn');
+      dependencies.calls.vm.push([command, arguments_]);
+      return dependencies.child;
+    });
+    dependencies.probePort = vi.fn(async () => {
+      order.push('probe');
+      return true;
+    });
+    const observed = {};
+    const bootstrapConsole = vi.fn(async (options) => {
+      order.push('console');
+      observed.options = options;
+    });
+
+    await expect(
+      startDisposableVm({
+        instanceRoot,
+        rawPath,
+        accelerator: 'tcg',
+        ...dependencies,
+        bootstrapConsole,
+        readinessAttempts: 1,
+        readinessDelayMs: 0
+      })
+    ).resolves.toEqual({ state: 'running', api: { host: '127.0.0.1', port: 18443 } });
+
+    expect(order).toEqual(['spawn', 'console', 'probe']);
+    expect(bootstrapConsole).toHaveBeenCalledOnce();
+    expect(observed.options).toEqual({ consolePath: join(instanceRoot, 'console.sock') });
+  });
+
+  it('stops the owned VM and removes its state when the console consumer fails', async () => {
+    const { instanceRoot, rawPath } = await fixturePaths();
+    let alive = true;
+    const dependencies = happyDependencies();
+    dependencies.inspectProcess = vi.fn(
+      async (pid, nonce) => alive && pid === 4242 && nonce === NONCE
+    );
+    dependencies.killProcess = vi.fn((pid, signal) => {
+      dependencies.calls.kills.push([pid, signal]);
+      alive = false;
+    });
+    const failure = new Error('CONSOLE_FAILED');
+
+    await expect(
+      startDisposableVm({
+        instanceRoot,
+        rawPath,
+        accelerator: 'tcg',
+        ...dependencies,
+        bootstrapConsole: async () => {
+          throw failure;
+        },
+        readinessAttempts: 1,
+        readinessDelayMs: 0,
+        stopAttempts: 1,
+        stopDelayMs: 0
+      })
+    ).rejects.toBe(failure);
+
+    expect(dependencies.probePort).not.toHaveBeenCalled();
+    expect(dependencies.calls.kills).toEqual([[4242, 'SIGTERM']]);
+    await expect(readdir(instanceRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('serializes two starts recovering one dead owner without deleting the new instance', async () => {
     const { instanceRoot, rawPath } = await fixturePaths();
     await writeRunningInstance(instanceRoot, { pid: 31337, nonce: 'fedcba9876543210' });

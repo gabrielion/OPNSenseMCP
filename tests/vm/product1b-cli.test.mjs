@@ -2,7 +2,9 @@
 import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 
-import { readSecretLine, runVmBootstrapCli } from '../../scripts/vm/product1b.mjs';
+import * as product1b from '../../scripts/vm/product1b.mjs';
+
+const { runVmBootstrapCli } = product1b;
 
 function captureStream() {
   const stream = new PassThrough();
@@ -14,41 +16,21 @@ function captureStream() {
 }
 
 describe('Product 1B bootstrap CLI', () => {
-  it('reads one bounded password from non-interactive stdin without reflecting it', async () => {
-    const input = new PassThrough();
-    const output = captureStream();
-    input.end('SENTINEL_FACTORY_PASSWORD\n');
-
-    await expect(readSecretLine({ input, output: output.stream })).resolves.toBe(
-      'SENTINEL_FACTORY_PASSWORD'
-    );
-    expect(output.output()).toBe('OPNsense factory password: ');
-    expect(output.output()).not.toContain('SENTINEL');
+  it('offers no operator secret prompt at all', () => {
+    expect(product1b).not.toHaveProperty('readSecretLine');
   });
 
-  it('cancels a pending password read and removes every input listener', async () => {
-    const input = new PassThrough();
-    const output = captureStream();
-    const controller = new AbortController();
-    const password = readSecretLine({ input, output: output.stream, signal: controller.signal });
+  // Mirrors the owned start: the console consumer runs between launch and readiness.
+  function fakeStartVm(order = []) {
+    return vi.fn(async ({ instanceRoot, bootstrapConsole }) => {
+      order.push('start');
+      await bootstrapConsole?.({ consolePath: `${instanceRoot}/console.sock` });
+      return { state: 'running', api: { host: '127.0.0.1', port: 18443 } };
+    });
+  }
 
-    expect(input.listenerCount('data')).toBe(1);
-    controller.abort();
-    const listenersAfterAbort = {
-      data: input.listenerCount('data'),
-      end: input.listenerCount('end'),
-      error: input.listenerCount('error')
-    };
-    input.end('SENTINEL_FACTORY_PASSWORD\n');
-
-    await expect(password).rejects.toThrow('Invalid secret input');
-    expect(listenersAfterAbort).toEqual({ data: 0, end: 0, error: 0 });
-    expect(output.output()).not.toContain('SENTINEL');
-  });
-
-  it('bootstraps the running disposable VM and exposes no credential or private path', async () => {
+  it('starts its own VM, attaches the console during the start, and exposes nothing private', async () => {
     const instanceRoot = '/private/product1b-fixture';
-    const password = 'SENTINEL_FACTORY_PASSWORD';
     const credentials = {
       key: 'K'.repeat(80),
       secret: 'S'.repeat(80),
@@ -56,12 +38,13 @@ describe('Product 1B bootstrap CLI', () => {
     };
     const stdout = captureStream();
     const stderr = captureStream();
-    const statusVm = vi.fn(async () => ({
-      state: 'running',
-      api: { host: '127.0.0.1', port: 18443 }
-    }));
-    const readPassword = vi.fn(async () => password);
-    const bootstrap = vi.fn(async () => credentials);
+    const order = [];
+    const statusVm = vi.fn(async () => ({ state: 'stopped', cleaned: false }));
+    const startVm = fakeStartVm(order);
+    const bootstrap = vi.fn(async () => {
+      order.push('bootstrap');
+      return credentials;
+    });
     const createArtifacts = vi.fn(async () => ({
       configPath: `${instanceRoot}/connection.json`,
       caPath: `${instanceRoot}/ca.pem`
@@ -73,16 +56,20 @@ describe('Product 1B bootstrap CLI', () => {
         stdout: stdout.stream,
         stderr: stderr.stream,
         statusVm,
-        readPassword,
+        startVm,
         bootstrap,
         createArtifacts
       })
     ).resolves.toBe(0);
 
     expect(statusVm).toHaveBeenCalledWith({ instanceRoot });
+    expect(startVm).toHaveBeenCalledWith({
+      instanceRoot,
+      bootstrapConsole: expect.any(Function)
+    });
+    expect(order).toEqual(['start', 'bootstrap']);
     expect(bootstrap).toHaveBeenCalledWith({
-      consolePath: `${instanceRoot}/console.sock`,
-      factoryPassword: password
+      consolePath: `${instanceRoot}/console.sock`
     });
     expect(createArtifacts).toHaveBeenCalledWith({ instanceRoot, credentials });
     expect(stdout.output()).toBe('Product 1B bootstrap: READY; private connection created\n');
@@ -93,10 +80,10 @@ describe('Product 1B bootstrap CLI', () => {
     expect(`${stdout.output()}${stderr.output()}`).not.toContain(credentials.secret);
   });
 
-  it('fails safely before serial access when the disposable VM is not running', async () => {
+  it('refuses to touch a managed VM that is already running', async () => {
     const stdout = captureStream();
     const stderr = captureStream();
-    const readPassword = vi.fn();
+    const startVm = vi.fn();
     const bootstrap = vi.fn();
 
     await expect(
@@ -104,18 +91,18 @@ describe('Product 1B bootstrap CLI', () => {
         instanceRoot: '/private/SENTINEL-path',
         stdout: stdout.stream,
         stderr: stderr.stream,
-        statusVm: async () => ({ state: 'stopped', cleaned: false }),
-        readPassword,
+        statusVm: async () => ({ state: 'running', api: { host: '127.0.0.1', port: 18443 } }),
+        startVm,
         bootstrap,
         createArtifacts: vi.fn()
       })
     ).resolves.toBe(2);
 
-    expect(readPassword).not.toHaveBeenCalled();
+    expect(startVm).not.toHaveBeenCalled();
     expect(bootstrap).not.toHaveBeenCalled();
     expect(stdout.output()).toBe('');
     expect(stderr.output()).toBe(
-      'Product 1B bootstrap: FAILED; start a fresh disposable VM and retry\n'
+      'Product 1B bootstrap: FAILED; stop the managed disposable VM and retry\n'
     );
     expect(stderr.output()).not.toContain('SENTINEL');
   });
@@ -132,12 +119,9 @@ describe('Product 1B bootstrap CLI', () => {
         instanceRoot: '/private/SENTINEL-path',
         stdout: stdout.stream,
         stderr: stderr.stream,
-        statusVm: async () => ({
-          state: 'running',
-          api: { host: '127.0.0.1', port: 18443 }
-        }),
+        statusVm: async () => ({ state: 'stopped', cleaned: false }),
+        startVm: fakeStartVm(),
         stopVm,
-        readPassword: async () => 'SENTINEL_PASSWORD',
         bootstrap: async () => {
           throw failure;
         },
@@ -165,12 +149,9 @@ describe('Product 1B bootstrap CLI', () => {
         instanceRoot: '/private/SENTINEL-path',
         stdout: stdout.stream,
         stderr: stderr.stream,
-        statusVm: async () => ({
-          state: 'running',
-          api: { host: '127.0.0.1', port: 18443 }
-        }),
+        statusVm: async () => ({ state: 'stopped', cleaned: false }),
+        startVm: fakeStartVm(),
         stopVm,
-        readPassword: async () => 'SENTINEL_PASSWORD',
         bootstrap: async () => {
           throw new Error('SENTINEL_BOOTSTRAP_FAILURE');
         },

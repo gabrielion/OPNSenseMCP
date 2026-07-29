@@ -23,7 +23,7 @@ import {
   removePrivateTemporaryRoot,
   verifyProduct1bResidue
 } from './product1b-live.mjs';
-import { IMAGE_SPEC, doctorHost, prepareImage, readSecretLine } from './product1b.mjs';
+import { IMAGE_SPEC, doctorHost, prepareImage } from './product1b.mjs';
 
 const EXPECTED_TOOLS = Object.freeze([
   'server_status',
@@ -416,7 +416,6 @@ export async function runProduct3Alias(options = {}) {
   const repositoryRoot = options.repositoryRoot ?? resolve('.');
   const attestationPath = options.attestationPath;
   const stdout = options.stdout ?? process.stdout;
-  const stderr = options.stderr ?? process.stderr;
   const signalSource = options.signalSource ?? process;
   const interruption = new AbortController();
   const doctor = options.doctor ?? doctorHost;
@@ -424,14 +423,6 @@ export async function runProduct3Alias(options = {}) {
   const prepareBase = options.prepareBase ?? (() => prepareImage({ cacheRoot }));
   const startVm = options.startVm ?? startDisposableVm;
   const stopVm = options.stopVm ?? stopDisposableVm;
-  const readPassword =
-    options.readPassword ??
-    (() =>
-      readSecretLine({
-        input: options.input ?? process.stdin,
-        output: stderr,
-        signal: interruption.signal
-      }));
   const bootstrap = options.bootstrap ?? bootstrapProduct1b;
   const createArtifacts = options.createArtifacts ?? createConnectionArtifacts;
   const createTemporaryRoot = options.createTemporaryRoot ?? createPrivateTemporaryRoot;
@@ -447,6 +438,7 @@ export async function runProduct3Alias(options = {}) {
   let doctorReport;
   let ownedVm = false;
   let temporaryRoot;
+  let releasePackage;
   let cleanupFailed = false;
   let interrupted = false;
   let failureStage = 'doctor';
@@ -477,26 +469,30 @@ export async function runProduct3Alias(options = {}) {
       if (initialState?.state !== 'stopped') throw new Error('VM is not fresh');
       throwIfInterrupted();
       failureStage = 'vm-start';
+      let credentials;
       const started = await startVm({
         instanceRoot,
         rawPath: join(cacheRoot, IMAGE_SPEC.rawName),
         accelerator: doctorReport.accelerator,
-        prepareBase
+        prepareBase,
+        // QEMU discards console output while no client is attached and the image only offers
+        // its unauthenticated shell inside the loader window, so the bootstrap has to run
+        // between launch and readiness. A failure there is cleaned up by the owned start.
+        bootstrapConsole: async ({ consolePath }) => {
+          // QEMU is launched: from here the runner owns it and must prove it was stopped.
+          ownedVm = true;
+          failureStage = 'bootstrap';
+          credentials = await bootstrap({
+            consolePath,
+            privileges: FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES
+          });
+          checks.bootstrap = true;
+          failureStage = 'vm-start';
+        }
       });
       checks.vmStarted = started?.state === 'running';
       if (!checks.vmStarted) throw new Error('VM start failed');
       ownedVm = true;
-      throwIfInterrupted();
-      failureStage = 'password';
-      const factoryPassword = await readPassword();
-      throwIfInterrupted();
-      failureStage = 'bootstrap';
-      const credentials = await bootstrap({
-        consolePath: join(instanceRoot, 'console.sock'),
-        factoryPassword,
-        privileges: FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES
-      });
-      checks.bootstrap = true;
       throwIfInterrupted();
       failureStage = 'connection';
       const artifacts = await createArtifacts({ instanceRoot, credentials });
@@ -504,7 +500,9 @@ export async function runProduct3Alias(options = {}) {
       failureStage = 'package';
       temporaryRoot = await createTemporaryRoot();
       throwIfInterrupted();
-      const invocation = await installPackage({ repositoryRoot, temporaryRoot });
+      const prepared = await installPackage({ repositoryRoot, temporaryRoot });
+      releasePackage = prepared.cleanup;
+      const invocation = prepared.invocation;
       checks.packageInstalled = true;
       throwIfInterrupted();
       failureStage = 'lifecycle';
@@ -534,6 +532,14 @@ export async function runProduct3Alias(options = {}) {
           checks.vmStopped = false;
           failureStage = 'cleanup';
         }
+      }
+      // Closes the fixture registry socket first: an open listener would keep the event loop
+      // alive past the attestation and leave the producer hanging instead of exiting.
+      try {
+        if (releasePackage !== undefined) await releasePackage();
+      } catch {
+        cleanupFailed = true;
+        failureStage = 'cleanup';
       }
       try {
         if (temporaryRoot !== undefined) await removeTemporaryRoot(temporaryRoot);

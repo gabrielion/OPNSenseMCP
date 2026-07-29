@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -229,11 +229,12 @@ function dependencies(overrides = {}) {
     doctor: vi.fn(() => ({ ready: true, accelerator: 'tcg' })),
     statusVm: vi.fn(async () => ({ state: 'stopped', cleaned: false })),
     prepareBase: vi.fn(async () => undefined),
-    startVm: vi.fn(async () => {
+    // Mirrors the owned start: the console consumer runs between launch and readiness.
+    startVm: vi.fn(async ({ bootstrapConsole }) => {
       calls.push('start');
+      await bootstrapConsole?.({ consolePath: `${instanceRoot}/console.sock` });
       return { state: 'running', api: { host: '127.0.0.1', port: 18443 } };
     }),
-    readPassword: vi.fn(async () => 'SENTINEL_FACTORY_PASSWORD'),
     bootstrap: vi.fn(async () => ({
       key: 'SENTINEL_API_KEY',
       secret: 'SENTINEL_API_SECRET',
@@ -245,9 +246,12 @@ function dependencies(overrides = {}) {
     })),
     createTemporaryRoot: vi.fn(async () => temporaryRoot),
     installPackage: vi.fn(async () => ({
-      command: `${temporaryRoot}/consumer/node_modules/.bin/opnsense-mcp`,
-      arguments: [],
-      cwd: `${temporaryRoot}/consumer`
+      invocation: {
+        command: `${temporaryRoot}/consumer/node_modules/.bin/opnsense-mcp`,
+        arguments: [],
+        cwd: `${temporaryRoot}/consumer`
+      },
+      cleanup: async () => undefined
     })),
     runInstalled: vi.fn(async () => successfulReadResult()),
     stopVm: vi.fn(async () => {
@@ -639,11 +643,11 @@ describe('Product 1B one-command live runner', () => {
       instanceRoot: deps.instanceRoot,
       rawPath: `${deps.cacheRoot}/OPNsense-26.1.6-nano-amd64.img`,
       accelerator: 'tcg',
-      prepareBase: deps.prepareBase
+      prepareBase: deps.prepareBase,
+      bootstrapConsole: expect.any(Function)
     });
     expect(deps.bootstrap).toHaveBeenCalledWith({
-      consolePath: `${deps.instanceRoot}/console.sock`,
-      factoryPassword: 'SENTINEL_FACTORY_PASSWORD'
+      consolePath: `${deps.instanceRoot}/console.sock`
     });
     expect(deps.createArtifacts).toHaveBeenCalledWith({
       instanceRoot: deps.instanceRoot,
@@ -765,41 +769,6 @@ describe('Product 1B one-command live runner', () => {
     expect(stdout.output()).not.toMatch(/SIGTERM|SENTINEL|\/private/iu);
   });
 
-  it('cancels the default password prompt before cleaning an interrupted VM', async () => {
-    const input = new PassThrough();
-    const stdout = captureStream();
-    const stderr = captureStream();
-    const signalSource = new EventEmitter();
-    const deps = dependencies({ readPassword: undefined, signalSource });
-    const run = runProduct1bLive({
-      ...deps,
-      input,
-      stdout: stdout.stream,
-      stderr: stderr.stream
-    });
-
-    await vi.waitFor(() => expect(stderr.output()).toBe('OPNsense factory password: '));
-    expect(input.listenerCount('data')).toBe(1);
-    signalSource.emit('SIGTERM');
-    const listenersAfterSignal = {
-      data: input.listenerCount('data'),
-      end: input.listenerCount('end'),
-      error: input.listenerCount('error')
-    };
-    input.end('SENTINEL_FACTORY_PASSWORD\n');
-
-    await expect(run).resolves.toBe(3);
-    expect(listenersAfterSignal).toEqual({ data: 0, end: 0, error: 0 });
-    expect(deps.bootstrap).not.toHaveBeenCalled();
-    expect(deps.calls).toEqual(['start', 'stop']);
-    expect(JSON.parse(stdout.output())).toMatchObject({
-      status: 'failed',
-      failureStage: 'interrupted',
-      checks: { vmStarted: true, bootstrap: false, vmStopped: true, residueFree: true }
-    });
-    expect(`${stdout.output()}${stderr.output()}`).not.toMatch(/SENTINEL|\/private/iu);
-  });
-
   it('does not start another live stage after the interrupted stage settles', async () => {
     const stdout = captureStream();
     const signalSource = new EventEmitter();
@@ -826,7 +795,6 @@ describe('Product 1B one-command live runner', () => {
     releaseStart({ state: 'running' });
 
     await expect(run).resolves.toBe(3);
-    expect(deps.readPassword).not.toHaveBeenCalled();
     expect(deps.bootstrap).not.toHaveBeenCalled();
     expect(deps.calls).toEqual(['start', 'stop']);
     expect(deps.verifyResidue).toHaveBeenCalledOnce();
@@ -836,23 +804,21 @@ describe('Product 1B one-command live runner', () => {
     expect(stdout.output()).not.toMatch(/SIGINT|SENTINEL|\/private/iu);
   });
 
-  it('prompts on stderr while reading the factory password without reflecting it', async () => {
+  it('never opens an operator prompt and never writes to stderr', async () => {
     const input = new PassThrough();
     const stdout = captureStream();
     const stderr = captureStream();
-    const deps = dependencies({ readPassword: undefined });
-    input.end('SENTINEL_FACTORY_PASSWORD\n');
+    const deps = dependencies();
 
     await expect(
       runProduct1bLive({ ...deps, input, stdout: stdout.stream, stderr: stderr.stream })
     ).resolves.toBe(0);
 
-    expect(stderr.output()).toBe('OPNsense factory password: ');
-    expect(stderr.output()).not.toContain('SENTINEL');
+    expect(stderr.output()).toBe('');
+    expect(input.listenerCount('data')).toBe(0);
     expect(stdout.output().split('\n').filter(Boolean)).toHaveLength(1);
     expect(deps.bootstrap).toHaveBeenCalledWith({
-      consolePath: `${deps.instanceRoot}/console.sock`,
-      factoryPassword: 'SENTINEL_FACTORY_PASSWORD'
+      consolePath: `${deps.instanceRoot}/console.sock`
     });
   });
 
@@ -861,59 +827,48 @@ describe('Product 1B one-command live runner', () => {
     expect(manifest.scripts['test:product1b']).toBe('node scripts/vm/product1b-live.mjs');
   });
 
-  it('packs the current project and installs its tarball offline without lifecycle scripts', async () => {
+  it('installs through the hermetic lock-pinned preparation instead of the user npm cache', async () => {
     const temporaryRoot = await mkdtemp(join(tmpdir(), 'product1b-package-wiring-'));
     await chmod(temporaryRoot, 0o700);
-    const calls = [];
-    const runCommand = vi.fn(async (invocation, options) => {
-      calls.push({ invocation, options });
-      if (calls.length === 1) {
-        await writeFile(join(temporaryRoot, 'gabrielion-opnsense-mcp-0.1.0.tgz'), 'fixture');
-      }
-      return { code: 0, signal: null, stdout: '', stderr: 'npm notice: synthetic output\n' };
+    const installedCommand = Object.freeze({
+      command: join(temporaryRoot, 'consumer', 'node_modules', '.bin', 'opnsense-mcp'),
+      arguments: Object.freeze([]),
+      cwd: join(temporaryRoot, 'consumer')
     });
+    const cleanup = vi.fn(async () => undefined);
+    const prepare = vi.fn(async () => ({ installedCommand, cleanup }));
 
     try {
-      await expect(
-        installCurrentPackage({
-          repositoryRoot: '/private/fixture-repository',
-          temporaryRoot,
-          nodeExecutable: '/private/node-22',
-          npmCli: '/private/npm-cli.js',
-          runCommand
-        })
-      ).resolves.toEqual({
-        command: join(temporaryRoot, 'consumer', 'node_modules', '.bin', 'opnsense-mcp'),
-        arguments: [],
-        cwd: join(temporaryRoot, 'consumer')
+      const prepared = await installCurrentPackage({
+        repositoryRoot: '/private/fixture-repository',
+        temporaryRoot,
+        prepare
       });
 
-      expect(calls[0]).toMatchObject({
-        invocation: {
-          command: '/private/node-22',
-          arguments: ['/private/npm-cli.js', 'pack', '--json', '--pack-destination', temporaryRoot]
-        },
-        options: { cwd: '/private/fixture-repository', input: '' }
-      });
-      expect(calls[1]).toMatchObject({
-        invocation: {
-          command: '/private/node-22',
-          arguments: [
-            '/private/npm-cli.js',
-            'install',
-            '--ignore-scripts',
-            '--offline',
-            '--no-audit',
-            '--no-fund',
-            '--no-package-lock',
-            '--no-save',
-            join(temporaryRoot, 'gabrielion-opnsense-mcp-0.1.0.tgz')
-          ]
-        },
-        options: { cwd: join(temporaryRoot, 'consumer'), input: '' }
-      });
+      expect(prepared.invocation).toEqual(installedCommand);
+      expect(prepared.cleanup).toBe(cleanup);
+      // The consumer install must be served by the loopback fixture registry built from the
+      // committed lock, so a newly published transitive version can never reach it.
+      expect(prepare).toHaveBeenCalledWith(
+        expect.objectContaining({
+          repositoryRoot: '/private/fixture-repository',
+          workRoot: temporaryRoot
+        })
+      );
     } finally {
       await rm(temporaryRoot, { recursive: true, force: true });
     }
+  });
+
+  it('refuses a package root that is not a private directory', async () => {
+    const prepare = vi.fn(async () => ({ installedCommand: {}, cleanup: async () => undefined }));
+    await expect(
+      installCurrentPackage({
+        repositoryRoot: '/private/fixture-repository',
+        temporaryRoot: '/nonexistent/product1b-package-root',
+        prepare
+      })
+    ).rejects.toThrow();
+    expect(prepare).not.toHaveBeenCalled();
   });
 });

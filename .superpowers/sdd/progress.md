@@ -572,3 +572,65 @@ Handoff to a larger workstation (2026-07-29).
     incomplete and must be reopened rather than worked around.
   - The last successful producer run used a deliberately delayed password delivery to land inside the old
     30 s window. That workaround is no longer needed and should not be reintroduced.
+
+Credential-free serial bootstrap (2026-07-29, larger workstation).
+  - The password path is removed rather than fixed. The pinned nano image never marks its console
+    `insecure`, so its loader offers an unauthenticated single-user root shell. The bootstrap now selects
+    loader option `2`, remounts `/` read-write, stages the existing
+    `buildProduct1bBootstrapHelper(FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES)` helper as base64, decodes it with
+    the guest's own `openssl`, registers a stock `rc.syshook.d/start` hook, and exits to multi-user. The
+    helper then runs under configd and prints the existing `PRODUCT1B_BOOTSTRAP_FRAME_*` framing on the
+    serial console. `readSecretLine` and every credential prompt are gone from all runner paths.
+  - Sequencing: `startDisposableVm` does not return until the guest answers TLS on 127.0.0.1:18443 (~65 s),
+    but the loader menu appears at ~3.3 s and QEMU's `wait=off` chardev DISCARDS console output while no
+    client is attached. The bootstrap therefore runs from a `bootstrapConsole` callback invoked between
+    process launch and the readiness probe; it cannot be applied to an already running VM.
+  - Two guest-side traps, both fixed by matching the repository's existing heredoc uploader: base64 written
+    as one ~5 000-character line decodes to an EMPTY file because the guest decoder is line-oriented (use
+    standard 76-character lines), and ~500-character commands sent every 150 ms overrun the emulated tty
+    input buffer and strand the shell in quote-continuation (drive every command from the shell prompt).
+  - Rejected with a definitive negative result: seeding a random root password with `pw usermod` in
+    single-user. OPNsense regenerates `/etc/master.passwd` from `config.xml` at multi-user boot, so the
+    seeded credential is discarded and login fails.
+  - Live proof of the `7ad2684` progress-deadline fix was obtained by DIRECT MEASUREMENT rather than by the
+    originally planned renewal run, because the new bootstrap removes the `login:` path entirely and makes
+    that proof impossible by construction. Over three boots: maximum console silence 11 754 ms against the
+    30 000 ms progress deadline (~18 s margin), `login:` at 95–126 s against the 600 000 ms absolute cap,
+    and the old single 30 s window armed at connect missed the prompt by 10.7 s and 3.5 s.
+
+Event-loop liveness defect in the bootstrap retry gap (2026-07-29).
+  - Symptom: the runner exited code 0 with NO summary and left an orphaned qemu reparented to PID 1.
+  - Root cause: in `onConsoleLost` the failed socket is destroyed and set to `undefined`, and every other
+    loop anchor was already unref'd — the qemu child (`child.unref()`), `overallTimer`, `progressTimer` and
+    `retryTimer`. During the reconnect gap nothing kept the loop alive, so node exited mid-`await`,
+    abandoning the caller. The tests missed it because the fake `net` server already exists when
+    `createConnection` runs (so attempt 1 succeeds) and vitest's own loop masks the emptiness.
+  - Fix: `retryTimer` is no longer unref'd; it is the only pending work in that window. The two deadline
+    timers stay unref'd — they are safety bounds covered by the live socket during normal streaming.
+  - Regression: a bare child process (not vitest) drives `bootstrapProduct1b` at a nonexistent socket path
+    with bounded retries and asserts the promise SETTLED before exit. Before the fix it recorded
+    `{settled:false, outcome:'none'}`; after, `{settled:true, outcome:'rejected:connecting'}`.
+
+Live installs migrated to the hermetic lock-pinned preparation (2026-07-29).
+  - Defect: both live runners installed with `npm install --offline --no-package-lock --no-save`. The fresh
+    consumer resolves the archive's ranges without a lock, so it selects the newest published matching
+    version instead of the locked one. `@modelcontextprotocol/server` declares `hono: ^4.11.4`; the lock
+    pins and caches `4.12.30`; upstream published `4.12.32`, which was never cached, so the install failed
+    `ENOTCACHED` and both runners stopped at `failureStage: package`. The proof depended on upstream release
+    timing, not on this repository. This is exactly the non-hermetic boundary the P0-A design already
+    identified and replaced for the installed-package suite in `834e41d`; only the VM path was left behind.
+  - Fix: `installCurrentPackage` now delegates to `scripts/testing/prepare-installed-package.mjs`, whose
+    loopback registry serves only lock-derived versions and additionally verifies the installed production
+    graph against the lock projection, the shebang/licence prefix, and zero unknown registry requests.
+    `packageInstalled: true` is therefore a strictly stronger claim than before.
+  - It returns `{invocation, cleanup}` because the caller must close the fixture registry: an open listening
+    socket would keep the event loop alive past the summary. Both runners release it before removing the
+    temporary root, in a separate `try` so a release failure still runs the removal.
+  - Gate: tests/vm 144 passed; standalone hermetic preparation 5.3 s with `registryUnknownRequests: []`.
+
+Product 1B live proof fully green (2026-07-29).
+  - `npm run test:product1b` returned `status: passed` with all eleven checks true — doctor, vmStarted,
+    bootstrap, packageInstalled, readOnlySurface, serverStatus, resourceDescription, systemStatus,
+    servicesPage, vmStopped, residueFree — and exited within 40 s of the VM stopping, leaving no qemu
+    process and no instance directory. This is the first run to prove the credential-free bootstrap and the
+    hermetic install together against a real disposable VM.

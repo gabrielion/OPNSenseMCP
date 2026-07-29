@@ -2,22 +2,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmod, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { runHardenedStdioLifecycle } from '../testing/hardened-stdio-lifecycle.mjs';
+import { prepareInstalledPackage } from '../testing/prepare-installed-package.mjs';
 import { bootstrapProduct1b } from './product1b-bootstrap.mjs';
 import { createConnectionArtifacts } from './product1b-connection.mjs';
 import { startDisposableVm, statusDisposableVm, stopDisposableVm } from './product1b-lifecycle.mjs';
-import { IMAGE_SPEC, doctorHost, prepareImage, readSecretLine } from './product1b.mjs';
+import { IMAGE_SPEC, doctorHost, prepareImage } from './product1b.mjs';
 
 const EXPECTED_TOOLS = Object.freeze(['server_status', 'opn_describe', 'opn_get', 'opn_list']);
 const COMMAND_OUTPUT_LIMIT_BYTES = 1024 * 1024;
 const COMMAND_CLEANUP_TIMEOUT_MS = 2000;
-const PACK_TIMEOUT_MS = 120_000;
-const INSTALL_TIMEOUT_MS = 120_000;
 const READ_TIMEOUT_MS = 30_000;
 const PROCESS_CLOSE_TIMEOUT_MS = 10_000;
 const TEMPORARY_PREFIX = 'opnsense-mcp-product1b-';
@@ -181,10 +180,6 @@ export function runBoundedSubprocess(
   });
 }
 
-function processSucceeded(result) {
-  return result.code === 0 && result.signal === null && result.boundedFailure !== true;
-}
-
 async function assertPrivateDirectory(path) {
   if (!isAbsolute(path)) throw new Error('Invalid private directory');
   const stat = await lstat(path);
@@ -200,72 +195,40 @@ export async function createPrivateTemporaryRoot() {
   return root;
 }
 
+/**
+ * Prepares the installed package for a live proof.
+ *
+ * The consumer install is served exclusively by the loopback fixture registry built from the
+ * committed lock. A plain `npm install --offline` cannot be used here: the consumer resolves the
+ * archive's ranges afresh, so any newly published transitive version is selected and then fails
+ * `ENOTCACHED` against the developer cache, which made this proof depend on upstream release
+ * timing rather than on the repository.
+ *
+ * The caller owns the returned `cleanup`: it closes the fixture registry, which would otherwise
+ * keep a listening socket and the event loop alive after the proof has finished.
+ */
 export async function installCurrentPackage({
   repositoryRoot,
   temporaryRoot,
-  nodeExecutable = process.execPath,
-  npmCli = process.env.npm_execpath,
-  runCommand = runBoundedSubprocess
+  runCommand = runBoundedSubprocess,
+  prepare = prepareInstalledPackage
 }) {
-  if (typeof npmCli !== 'string' || npmCli.length === 0) throw new Error('npm unavailable');
   await assertPrivateDirectory(temporaryRoot);
-  const consumer = join(temporaryRoot, 'consumer');
-  await mkdir(consumer, { mode: 0o700 });
-  const environment = process.env;
-  const packed = await runCommand(
-    {
-      command: nodeExecutable,
-      arguments: [npmCli, 'pack', '--json', '--pack-destination', temporaryRoot]
-    },
-    {
-      cwd: repositoryRoot,
-      environment,
-      input: '',
-      timeoutMs: PACK_TIMEOUT_MS
-    }
-  );
-  if (!processSucceeded(packed)) throw new Error('Package failed');
-
-  const archives = (await readdir(temporaryRoot, { withFileTypes: true })).filter(
-    (entry) => entry.isFile() && !entry.isSymbolicLink() && entry.name.endsWith('.tgz')
-  );
-  if (archives.length !== 1 || basename(archives[0].name) !== archives[0].name) {
-    throw new Error('Package failed');
-  }
-  const archive = join(temporaryRoot, archives[0].name);
-  await writeFile(join(consumer, 'package.json'), '{"private":true}\n', {
-    encoding: 'utf8',
-    flag: 'wx',
-    mode: 0o600
+  const prepared = await prepare({
+    repositoryRoot,
+    workRoot: temporaryRoot,
+    run: (command, argumentsList, options) =>
+      runCommand(
+        { command, arguments: [...argumentsList] },
+        {
+          cwd: options.cwd,
+          environment: options.environment,
+          input: '',
+          timeoutMs: options.timeoutMs
+        }
+      )
   });
-  const installed = await runCommand(
-    {
-      command: nodeExecutable,
-      arguments: [
-        npmCli,
-        'install',
-        '--ignore-scripts',
-        '--offline',
-        '--no-audit',
-        '--no-fund',
-        '--no-package-lock',
-        '--no-save',
-        archive
-      ]
-    },
-    {
-      cwd: consumer,
-      environment,
-      input: '',
-      timeoutMs: INSTALL_TIMEOUT_MS
-    }
-  );
-  if (!processSucceeded(installed)) throw new Error('Install failed');
-  return Object.freeze({
-    command: join(consumer, 'node_modules', '.bin', 'opnsense-mcp'),
-    arguments: Object.freeze([]),
-    cwd: consumer
-  });
+  return Object.freeze({ invocation: prepared.installedCommand, cleanup: prepared.cleanup });
 }
 
 function installedReadEnvironment(configPath) {
@@ -460,7 +423,6 @@ export async function runProduct1bLive(options = {}) {
   const instanceRoot = options.instanceRoot ?? join(cacheRoot, 'instance');
   const repositoryRoot = options.repositoryRoot ?? resolve('.');
   const stdout = options.stdout ?? process.stdout;
-  const stderr = options.stderr ?? process.stderr;
   const signalSource = options.signalSource ?? process;
   const interruption = new AbortController();
   const doctor = options.doctor ?? doctorHost;
@@ -468,14 +430,6 @@ export async function runProduct1bLive(options = {}) {
   const prepareBase = options.prepareBase ?? (() => prepareImage({ cacheRoot }));
   const startVm = options.startVm ?? startDisposableVm;
   const stopVm = options.stopVm ?? stopDisposableVm;
-  const readPassword =
-    options.readPassword ??
-    (() =>
-      readSecretLine({
-        input: options.input ?? process.stdin,
-        output: stderr,
-        signal: interruption.signal
-      }));
   const bootstrap = options.bootstrap ?? bootstrapProduct1b;
   const createArtifacts = options.createArtifacts ?? createConnectionArtifacts;
   const createTemporaryRoot = options.createTemporaryRoot ?? createPrivateTemporaryRoot;
@@ -486,6 +440,7 @@ export async function runProduct1bLive(options = {}) {
   const checks = emptyChecks();
   let ownedVm = false;
   let temporaryRoot;
+  let releasePackage;
   let cleanupFailed = false;
   let interrupted = false;
   let failureStage = 'doctor';
@@ -511,25 +466,26 @@ export async function runProduct1bLive(options = {}) {
       if (initialState?.state !== 'stopped') throw new Error('VM is not fresh');
       throwIfInterrupted();
       failureStage = 'vm-start';
+      let credentials;
       const started = await startVm({
         instanceRoot,
         rawPath: join(cacheRoot, IMAGE_SPEC.rawName),
         accelerator: report.accelerator,
-        prepareBase
+        prepareBase,
+        // QEMU discards console output while no client is attached and the image only offers
+        // its unauthenticated shell inside the loader window, so the bootstrap has to run
+        // between launch and readiness. A failure there is cleaned up by the owned start.
+        bootstrapConsole: async ({ consolePath }) => {
+          // QEMU is launched: from here the runner owns it and must prove it was stopped.
+          ownedVm = true;
+          failureStage = 'bootstrap';
+          credentials = await bootstrap({ consolePath });
+          failureStage = 'vm-start';
+        }
       });
       checks.vmStarted = started?.state === 'running';
       if (!checks.vmStarted) throw new Error('VM start failed');
       ownedVm = true;
-      throwIfInterrupted();
-
-      failureStage = 'password';
-      const factoryPassword = await readPassword();
-      throwIfInterrupted();
-      failureStage = 'bootstrap';
-      const credentials = await bootstrap({
-        consolePath: join(instanceRoot, 'console.sock'),
-        factoryPassword
-      });
       throwIfInterrupted();
       failureStage = 'connection';
       const artifacts = await createArtifacts({ instanceRoot, credentials });
@@ -539,7 +495,9 @@ export async function runProduct1bLive(options = {}) {
       failureStage = 'package';
       temporaryRoot = await createTemporaryRoot();
       throwIfInterrupted();
-      const invocation = await installPackage({ repositoryRoot, temporaryRoot });
+      const prepared = await installPackage({ repositoryRoot, temporaryRoot });
+      releasePackage = prepared.cleanup;
+      const invocation = prepared.invocation;
       checks.packageInstalled = true;
       throwIfInterrupted();
       failureStage = 'reads';
@@ -564,6 +522,14 @@ export async function runProduct1bLive(options = {}) {
           checks.vmStopped = false;
           failureStage = 'cleanup';
         }
+      }
+      // Closes the fixture registry socket first: an open listener would keep the event loop
+      // alive past the summary and leave the proof hanging instead of exiting.
+      try {
+        if (releasePackage !== undefined) await releasePackage();
+      } catch {
+        cleanupFailed = true;
+        failureStage = 'cleanup';
       }
       try {
         if (temporaryRoot !== undefined) await removeTemporaryRoot(temporaryRoot);

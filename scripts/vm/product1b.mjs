@@ -778,102 +778,36 @@ function userInstanceRoot() {
   return join(userCacheRoot(), 'instance');
 }
 
-export function readSecretLine({ input = process.stdin, output = process.stderr, signal } = {}) {
-  output.write('OPNsense factory password: ');
-  return new Promise((resolve, reject) => {
-    const interactive = input.isTTY === true && typeof input.setRawMode === 'function';
-    const previousRawMode = interactive ? input.isRaw === true : false;
-    let value = '';
-    let settled = false;
-
-    const cleanup = () => {
-      input.off('data', onData);
-      input.off('end', onEnd);
-      input.off('error', onError);
-      signal?.removeEventListener('abort', onAbort);
-      if (interactive) {
-        input.setRawMode(previousRawMode);
-        input.pause();
-        output.write('\n');
-      }
-    };
-    const finish = (callback) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      callback();
-    };
-    const fail = () => finish(() => reject(new Error('Invalid secret input')));
-    const accept = () => {
-      if (!/^[\x20-\x7e]{1,256}$/u.test(value)) {
-        fail();
-        return;
-      }
-      finish(() => resolve(value));
-    };
-    const onData = (chunk) => {
-      const bytes = Buffer.from(chunk);
-      for (const byte of bytes) {
-        if (byte === 0x03) {
-          fail();
-          return;
-        }
-        if (byte === 0x0a || byte === 0x0d) {
-          accept();
-          return;
-        }
-        if (interactive && (byte === 0x08 || byte === 0x7f)) {
-          value = value.slice(0, -1);
-          continue;
-        }
-        if (byte < 0x20 || byte > 0x7e || value.length >= 256) {
-          fail();
-          return;
-        }
-        value += String.fromCharCode(byte);
-      }
-    };
-    const onEnd = () => accept();
-    const onError = () => fail();
-    const onAbort = () => fail();
-
-    if (interactive) {
-      input.setRawMode(true);
-      input.resume();
-    }
-    input.on('data', onData);
-    input.once('end', onEnd);
-    input.once('error', onError);
-    signal?.addEventListener('abort', onAbort, { once: true });
-    if (signal?.aborted === true) onAbort();
-  });
-}
-
+// The console must be attached before the guest reaches its loader, so this command now owns
+// the whole start: bootstrapping a VM that is already running is impossible on this image.
 export async function runVmBootstrapCli({
   instanceRoot = userInstanceRoot(),
-  input = process.stdin,
   stdout = process.stdout,
   stderr = process.stderr,
   statusVm = statusDisposableVm,
+  startVm = startOwnedVm,
   stopVm = stopDisposableVm,
-  readPassword = () => readSecretLine({ input, output: stderr }),
   bootstrap = bootstrapProduct1b,
   createArtifacts = createConnectionArtifacts
 } = {}) {
   let running = false;
-  let failureStage = 'input';
+  let failureStage = 'preflight';
   try {
     const state = await statusVm({ instanceRoot });
-    if (state.state !== 'running') {
-      stderr.write('Product 1B bootstrap: FAILED; start a fresh disposable VM and retry\n');
+    if (state.state !== 'stopped') {
+      stderr.write('Product 1B bootstrap: FAILED; stop the managed disposable VM and retry\n');
       return 2;
     }
+    let credentials;
     running = true;
-    const factoryPassword = await readPassword();
-    failureStage = 'bootstrap';
-    const credentials = await bootstrap({
-      consolePath: join(instanceRoot, 'console.sock'),
-      factoryPassword
+    failureStage = 'vm-start';
+    await startVm({
+      instanceRoot,
+      bootstrapConsole: async ({ consolePath }) => {
+        failureStage = 'bootstrap';
+        credentials = await bootstrap({ consolePath });
+        failureStage = 'vm-start';
+      }
     });
     failureStage = 'artifacts';
     await createArtifacts({ instanceRoot, credentials });
@@ -933,15 +867,18 @@ export async function runPrepareImageCli({
   }
 }
 
-async function runVmStartCli() {
+// One owned start for both `vm:start` and `vm:bootstrap`. `bootstrapConsole` runs between the
+// QEMU launch and the unchanged API-readiness probe, inside the start's own cleanup path.
+async function startOwnedVm({ instanceRoot = userInstanceRoot(), bootstrapConsole } = {}) {
   const report = doctorHost();
   if (!report.ready) throw new Product1bVmError('VM_HOST_UNAVAILABLE');
   const cacheRoot = userCacheRoot();
   return startDisposableVm({
-    instanceRoot: userInstanceRoot(),
+    instanceRoot,
     rawPath: join(cacheRoot, IMAGE_SPEC.rawName),
     accelerator: report.accelerator,
-    prepareBase: () => prepareImage({ cacheRoot })
+    prepareBase: () => prepareImage({ cacheRoot }),
+    bootstrapConsole
   });
 }
 
@@ -965,7 +902,7 @@ async function main() {
     try {
       const result =
         command === 'start'
-          ? await runVmStartCli()
+          ? await startOwnedVm()
           : command === 'status'
             ? await statusDisposableVm({ instanceRoot: userInstanceRoot() })
             : await stopDisposableVm({ instanceRoot: userInstanceRoot() });

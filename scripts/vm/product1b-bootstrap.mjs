@@ -146,28 +146,66 @@ export const PRODUCT1B_BOOTSTRAP_HELPER = buildProduct1bBootstrapHelper(
 
 const FAILURE_CODE = 'PRODUCT1B_BOOTSTRAP_FAILED';
 // `timeoutMs` bounds absence of console progress, not the length of a healthy boot: the VM
-// answers on its API port well before getty prints `login:`, so a deadline measured from
-// connection expires mid-boot even though the guest is still writing. `overallTimeoutMs`
+// answers on its API port well before the console finishes booting, so a deadline measured
+// from connection expires mid-boot even though the guest is still writing. `overallTimeoutMs`
 // keeps a console that chatters forever from hanging the runner.
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_OVERALL_TIMEOUT_MS = 600_000;
 const MAXIMUM_OVERALL_TIMEOUT_MS = 1_800_000;
-const DEFAULT_MAX_TRANSCRIPT_BYTES = 64 * 1024;
-const SHELL_PROMPT = /root@OPNsense:[^\r\n]*#\s*/u;
-const SHELL_CONTINUATION_PROMPT = /\?\s*/u;
+// The console has to be attached before the guest reaches its loader, so the bootstrap is
+// started while QEMU is still initialising and the chardev socket may not exist yet. The
+// retry is bounded by attempts as well as by both deadlines, and still fails closed.
+const DEFAULT_CONNECT_ATTEMPTS = 100;
+const MAXIMUM_CONNECT_ATTEMPTS = 1000;
+const DEFAULT_CONNECT_RETRY_DELAY_MS = 100;
+const MAXIMUM_CONNECT_RETRY_DELAY_MS = 5_000;
+// The transcript now spans the single-user boot, the staged upload and the whole multi-user
+// boot that runs the helper, so the bound is sized for two boots and still fails closed.
+const DEFAULT_MAX_TRANSCRIPT_BYTES = 512 * 1024;
+// Single user leaves the prompt without a hostname (`root@:/ # `), and the default `/bin/sh`
+// continues an unterminated here-document with `> ` at the start of a line. The echo of our
+// own redirections also contains `> `, so the continuation prompt must stay line-anchored.
+const SHELL_PROMPT = /root@[^\r\n]*#[ ]?/u;
+const SHELL_CONTINUATION_PROMPT = /^> /mu;
+// The lua loader highlights the mnemonic letter of each menu entry, so the single-user entry
+// reaches the console either as `Boot Single user` or as `Boot <esc>[1mS<esc>[0mingle user`.
+// Any one of the loader's three invariants means the menu is up and accepting a keystroke.
+const LOADER_MENU = /Autoboot in|Welcome to|Boot[^\r\n]{0,16}ingle\s+user/iu;
+const SINGLE_USER_SHELL_PROMPT = /Enter full pathname of shell[^\r\n]*:[ ]?/u;
 const HELPER_EOF = '__OPNSENSE_MCP_HELPER_EOF__';
+
+// The nano image mounts memory filesystems over /tmp and /var at multi-user boot, so the
+// staged helper has to live on the root filesystem beside the boot hook that executes it.
+const STAGED_HELPER_ENCODED = '/usr/local/etc/mcpb.b64';
+const STAGED_HELPER = '/usr/local/etc/mcpb.php';
+const BOOT_HOOK_DIRECTORY = '/usr/local/etc/rc.syshook.d/start';
+const BOOT_HOOK = `${BOOT_HOOK_DIRECTORY}/mcpb.sh`;
+
+// One fixed, credential-free guest program. Nothing in it varies with operator input.
+const REMOUNT_COMMAND = '/sbin/mount -u -o rw /\n';
+const UMASK_COMMAND = 'umask 077\n';
+const HEREDOC_OPEN_COMMAND = `/bin/cat > ${STAGED_HELPER_ENCODED} <<${HELPER_EOF}\n`;
+// The guest decoder is line oriented: a single long base64 line decodes to an empty file,
+// so the upload keeps standard 76-character lines and `openssl` reads them from disk.
+const DECODE_COMMAND = `/usr/bin/openssl base64 -d -in ${STAGED_HELPER_ENCODED} -out ${STAGED_HELPER} && /bin/rm -f ${STAGED_HELPER_ENCODED}\n`;
+// The helper needs configd, which only exists in multi-user, so OPNsense's stock start hook
+// runs it at the next boot, writes the framed result to the console and removes both files.
+const BOOT_HOOK_BODY = `#!/bin/sh\\n/usr/local/bin/php ${STAGED_HELPER} > /dev/console 2>/dev/null\\n/bin/rm -f ${STAGED_HELPER} ${BOOT_HOOK}\\n`;
+const REGISTER_HOOK_COMMAND = `/bin/mkdir -p ${BOOT_HOOK_DIRECTORY} && /usr/bin/printf '${BOOT_HOOK_BODY}' > ${BOOT_HOOK} && /bin/chmod 0700 ${BOOT_HOOK}\n`;
+const RESUME_COMMAND = 'exit\n';
 
 export const PRODUCT1B_BOOTSTRAP_SAFE_STAGES = Object.freeze([
   'connecting',
-  'login',
-  'password',
-  'menu',
+  'loader',
+  'single-user',
   'shell',
+  'remount',
   'umask',
   'heredoc-open',
   'heredoc-lines',
   'heredoc-close',
   'decode',
+  'hook',
   'result',
   'frame'
 ]);
@@ -191,18 +229,17 @@ function fail() {
 
 function validateOptions({
   consolePath,
-  factoryPassword,
   timeoutMs,
   overallTimeoutMs,
-  maxTranscriptBytes
+  maxTranscriptBytes,
+  connectAttempts,
+  connectRetryDelayMs
 }) {
   if (
     typeof consolePath !== 'string' ||
     consolePath.length === 0 ||
     consolePath.length > 1024 ||
     consolePath.includes('\0') ||
-    typeof factoryPassword !== 'string' ||
-    !/^[\x20-\x7e]{1,256}$/u.test(factoryPassword) ||
     !Number.isSafeInteger(timeoutMs) ||
     timeoutMs < 1 ||
     timeoutMs > 300_000 ||
@@ -211,7 +248,13 @@ function validateOptions({
     overallTimeoutMs > MAXIMUM_OVERALL_TIMEOUT_MS ||
     !Number.isSafeInteger(maxTranscriptBytes) ||
     maxTranscriptBytes < 1024 ||
-    maxTranscriptBytes > 1024 * 1024
+    maxTranscriptBytes > 1024 * 1024 ||
+    !Number.isSafeInteger(connectAttempts) ||
+    connectAttempts < 1 ||
+    connectAttempts > MAXIMUM_CONNECT_ATTEMPTS ||
+    !Number.isSafeInteger(connectRetryDelayMs) ||
+    connectRetryDelayMs < 1 ||
+    connectRetryDelayMs > MAXIMUM_CONNECT_RETRY_DELAY_MS
   ) {
     fail();
   }
@@ -288,18 +331,20 @@ function matchAfter(transcript, offset, expression) {
 
 export async function bootstrapProduct1b({
   consolePath,
-  factoryPassword,
   privileges = READONLY_BOOTSTRAP_PRIVILEGES,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   overallTimeoutMs = DEFAULT_OVERALL_TIMEOUT_MS,
-  maxTranscriptBytes = DEFAULT_MAX_TRANSCRIPT_BYTES
+  maxTranscriptBytes = DEFAULT_MAX_TRANSCRIPT_BYTES,
+  connectAttempts = DEFAULT_CONNECT_ATTEMPTS,
+  connectRetryDelayMs = DEFAULT_CONNECT_RETRY_DELAY_MS
 }) {
   validateOptions({
     consolePath,
-    factoryPassword,
     timeoutMs,
     overallTimeoutMs,
-    maxTranscriptBytes
+    maxTranscriptBytes,
+    connectAttempts,
+    connectRetryDelayMs
   });
   const helper =
     privileges === READONLY_BOOTSTRAP_PRIVILEGES
@@ -307,7 +352,9 @@ export async function bootstrapProduct1b({
       : buildProduct1bBootstrapHelper(privileges);
 
   return new Promise((resolve, reject) => {
-    const socket = createConnection({ path: consolePath });
+    let socket;
+    let connectAttempt = 0;
+    let retryTimer;
     let transcript = '';
     let transcriptBytes = 0;
     let offset = 0;
@@ -319,6 +366,8 @@ export async function bootstrapProduct1b({
     const cleanup = () => {
       clearTimeout(overallTimer);
       clearTimeout(progressTimer);
+      clearTimeout(retryTimer);
+      if (socket === undefined) return;
       socket.removeAllListeners();
       socket.destroy();
     };
@@ -344,30 +393,35 @@ export async function bootstrapProduct1b({
     const drive = () => {
       try {
         let next;
-        if (state === 'login' && (next = matchAfter(transcript, offset, /login:\s*/iu))) {
+        if (state === 'loader' && (next = matchAfter(transcript, offset, LOADER_MENU))) {
           offset = next;
-          state = 'password';
-          send('root\n');
+          state = 'single-user';
+          // The loader menu takes a single unterminated keystroke.
+          send('2');
         }
-        if (state === 'password' && (next = matchAfter(transcript, offset, /Password:\s*/u))) {
-          offset = next;
-          state = 'menu';
-          send(`${factoryPassword}\n`);
-        }
-        if (state === 'menu' && (next = matchAfter(transcript, offset, /Enter an option:\s*/iu))) {
+        if (
+          state === 'single-user' &&
+          (next = matchAfter(transcript, offset, SINGLE_USER_SHELL_PROMPT))
+        ) {
           offset = next;
           state = 'shell';
-          send('8\n');
+          // RETURN accepts the default /bin/sh; single user needs no authentication.
+          send('\n');
         }
         if (state === 'shell' && (next = matchAfter(transcript, offset, SHELL_PROMPT))) {
           offset = next;
+          state = 'remount';
+          send(REMOUNT_COMMAND);
+        }
+        if (state === 'remount' && (next = matchAfter(transcript, offset, SHELL_PROMPT))) {
+          offset = next;
           state = 'umask';
-          send('umask 077\n');
+          send(UMASK_COMMAND);
         }
         if (state === 'umask' && (next = matchAfter(transcript, offset, SHELL_PROMPT))) {
           offset = next;
           state = 'heredoc-open';
-          send(`/bin/cat > /tmp/opnsense-mcp-bootstrap.b64 <<${HELPER_EOF}\n`);
+          send(HEREDOC_OPEN_COMMAND);
         }
         if (
           state === 'heredoc-open' &&
@@ -394,14 +448,19 @@ export async function bootstrapProduct1b({
         if (state === 'heredoc-close' && (next = matchAfter(transcript, offset, SHELL_PROMPT))) {
           offset = next;
           state = 'decode';
-          send(
-            '/usr/bin/base64 -d /tmp/opnsense-mcp-bootstrap.b64 > /tmp/opnsense-mcp-bootstrap.php && /bin/rm -f /tmp/opnsense-mcp-bootstrap.b64\n'
-          );
+          send(DECODE_COMMAND);
         }
         if (state === 'decode' && (next = matchAfter(transcript, offset, SHELL_PROMPT))) {
           offset = next;
+          state = 'hook';
+          send(REGISTER_HOOK_COMMAND);
+        }
+        if (state === 'hook' && (next = matchAfter(transcript, offset, SHELL_PROMPT))) {
+          offset = next;
           state = 'result';
-          send('/usr/local/bin/php /tmp/opnsense-mcp-bootstrap.php\n');
+          // Leaving the single-user shell continues the boot into multi user, where the
+          // registered hook runs the helper and frames its result on the console.
+          send(RESUME_COMMAND);
         }
         if (state === 'result') {
           const begin = transcript.indexOf(PRODUCT1B_BOOTSTRAP_FRAME_BEGIN, offset);
@@ -426,21 +485,47 @@ export async function bootstrapProduct1b({
       progressTimer.unref?.();
     };
     awaitProgress();
-    socket.once('connect', () => {
-      state = 'login';
-      send('\n');
-    });
-    socket.on('data', (chunk) => {
-      awaitProgress();
-      transcriptBytes += chunk.byteLength;
-      if (transcriptBytes > maxTranscriptBytes) {
+
+    const onConsoleLost = () => {
+      if (settled) return;
+      // Only an attempt that never reached the console may be retried: once the guest has
+      // spoken, a closed or failing socket is a real failure and must fail closed.
+      if (state !== 'connecting' || connectAttempt >= connectAttempts) {
         rejectSafely();
         return;
       }
-      transcript += chunk.toString('latin1');
-      drive();
-    });
-    socket.once('error', rejectSafely);
-    socket.once('close', rejectSafely);
+      socket.removeAllListeners();
+      socket.destroy();
+      socket = undefined;
+      // The retry timer is the only pending work during the gap between destroying the failed
+      // socket and reconnecting: unlike the two deadline timers, which are safety bounds covered
+      // by the live socket during normal streaming, it must keep the event loop alive. Left
+      // unref'd, the loop empties in this window and the process exits mid-await, abandoning the
+      // caller and orphaning a running VM.
+      retryTimer = setTimeout(openConsole, connectRetryDelayMs);
+    };
+    function openConsole() {
+      if (settled) return;
+      connectAttempt += 1;
+      socket = createConnection({ path: consolePath });
+      socket.once('connect', () => {
+        // Nothing is written before the loader menu: a stray newline would select the
+        // default multi-user entry and lose the only unauthenticated shell on this image.
+        state = 'loader';
+      });
+      socket.on('data', (chunk) => {
+        awaitProgress();
+        transcriptBytes += chunk.byteLength;
+        if (transcriptBytes > maxTranscriptBytes) {
+          rejectSafely();
+          return;
+        }
+        transcript += chunk.toString('latin1');
+        drive();
+      });
+      socket.once('error', onConsoleLost);
+      socket.once('close', onConsoleLost);
+    }
+    openConsole();
   });
 }

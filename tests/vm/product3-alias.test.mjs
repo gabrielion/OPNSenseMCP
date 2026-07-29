@@ -105,11 +105,12 @@ function dependencies(overrides = {}) {
     doctor: vi.fn(() => ({ ready: true, host: 'macos', accelerator: 'tcg' })),
     statusVm: vi.fn(async () => ({ state: 'stopped', cleaned: false })),
     prepareBase: vi.fn(async () => undefined),
-    startVm: vi.fn(async () => {
+    // Mirrors the owned start: the console consumer runs between launch and readiness.
+    startVm: vi.fn(async ({ bootstrapConsole }) => {
       calls.push('start');
+      await bootstrapConsole?.({ consolePath: `${instanceRoot}/console.sock` });
       return { state: 'running' };
     }),
-    readPassword: vi.fn(async () => 'SENTINEL_FACTORY_PASSWORD'),
     bootstrap: vi.fn(async () => ({
       key: 'SENTINEL_API_KEY',
       secret: 'SENTINEL_API_SECRET',
@@ -121,9 +122,12 @@ function dependencies(overrides = {}) {
     })),
     createTemporaryRoot: vi.fn(async () => temporaryRoot),
     installPackage: vi.fn(async () => ({
-      command: `${temporaryRoot}/consumer/node_modules/.bin/opnsense-mcp`,
-      arguments: [],
-      cwd: `${temporaryRoot}/consumer`
+      invocation: {
+        command: `${temporaryRoot}/consumer/node_modules/.bin/opnsense-mcp`,
+        arguments: [],
+        cwd: `${temporaryRoot}/consumer`
+      },
+      cleanup: async () => undefined
     })),
     runInstalled: vi.fn(async () => lifecycleChecks()),
     stopVm: vi.fn(async () => {
@@ -455,11 +459,11 @@ describe('Product 3 disposable-VM alias runner', () => {
       instanceRoot: deps.instanceRoot,
       rawPath: `${deps.cacheRoot}/OPNsense-26.1.6-nano-amd64.img`,
       accelerator: 'tcg',
-      prepareBase: deps.prepareBase
+      prepareBase: deps.prepareBase,
+      bootstrapConsole: expect.any(Function)
     });
     expect(deps.bootstrap).toHaveBeenCalledWith({
       consolePath: `${deps.instanceRoot}/console.sock`,
-      factoryPassword: 'SENTINEL_FACTORY_PASSWORD',
       privileges: FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES
     });
     expect(deps.runInstalled).toHaveBeenCalledWith(
@@ -732,8 +736,8 @@ describe('Product 3 disposable-VM alias runner', () => {
   it.each([
     ['start', { startVm: vi.fn(async () => ({ state: 'failed' })) }, [], undefined],
     [
-      'password',
-      { readPassword: vi.fn(async () => Promise.reject(new Error('secret'))) },
+      'bootstrap',
+      { bootstrap: vi.fn(async () => Promise.reject(new Error('bootstrap'))) },
       ['start', 'stop'],
       undefined
     ],

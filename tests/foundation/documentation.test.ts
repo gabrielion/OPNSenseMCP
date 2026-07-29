@@ -285,7 +285,7 @@ describe('product documentation', () => {
     expect
       .soft(prose)
       .toContain(
-        '`test:product1b` owns the whole live test: it verifies and caches the pinned official OPNsense 26.1.6 nano image, starts one local VM, asks for the factory password without echoing or storing it, creates a disposable least-privilege API user, packs and installs this npm package, calls `server_status`, `opn_describe system.status`, `opn_get system.status` and `opn_list core.services` through one MCP session, then stops the VM and removes the overlay, API credentials, certificate, and temporary package.'
+        '`test:product1b` owns the whole live test: it verifies and caches the pinned official OPNsense 26.1.6 nano image, starts one local VM, creates a disposable least-privilege API user over the serial console without any operator credential, packs and installs this npm package, calls `server_status`, `opn_describe system.status`, `opn_get system.status` and `opn_list core.services` through one MCP session, then stops the VM and removes the overlay, API credentials, certificate, and temporary package.'
       );
     expect
       .soft(prose)

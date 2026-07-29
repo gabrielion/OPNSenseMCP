@@ -397,8 +397,9 @@ git status --porcelain=v1 --untracked-files=all   # MUST be empty, the producer 
 npm run vm:product3 -- --attestation-out "$PWD/docs/evidence/product3-vm.json"
 ```
 
-Type the OPNsense factory password at the hidden prompt. It is the stock vendor default for the pinned
-unconfigured nano image; the runner never accepts it as a process argument.
+The producer no longer prompts for anything. The serial bootstrap now takes the pinned image's own
+unauthenticated single-user shell, stages its helper on the root filesystem and lets a stock
+`rc.syshook.d/start` hook run it at the next multi-user boot; no operator credential exists on any path.
 
 Then commit **only** the evidence file, require `0`, and push:
 
@@ -412,13 +413,25 @@ git push origin codex/p0b-resume-wip
 If the producer fails, read `failureStage` in its JSON line. It stops the VM and verifies residue on every
 path; never hand-edit, synthesize or bypass the evidence.
 
-### Task 2 — confirm the serial-bootstrap fix against the real VM
+### Task 2 — RESOLVED: the serial-bootstrap fix is proved by direct measurement
 
 `7ad2684` changed the serial-bootstrap deadline so it bounds absence of console progress instead of the
-length of a healthy boot. **That fix is currently proved only by deterministic tests.** The Task 1 run is its
-live proof, so run it with the password typed immediately at the prompt rather than after a pause. A pass
-confirms the fix; a failure at stage `login` means the analysis in the ledger is incomplete and must be
-reopened before any further claim.
+length of a healthy boot. The originally planned proof — a renewal run with the password typed immediately
+at the prompt — is impossible by construction now that the credential-free bootstrap has removed the
+`login:` path entirely. The fix was instead proved by direct measurement over three boots: maximum console
+silence 11 754 ms against the 30 000 ms progress deadline, `login:` at 95–126 s against the 600 000 ms
+absolute cap, and the old single 30 s window armed at connect missing the prompt by 10.7 s and 3.5 s. See
+`.superpowers/sdd/progress.md`.
+
+The whole Product 1B lifecycle is green end to end: `npm run test:product1b` returns `status: passed` with
+all eleven checks true and leaves no qemu process and no instance directory.
+
+### Historical note — the superseded password path
+
+Earlier handoffs told the next session to type the OPNsense factory password at a hidden prompt and treated
+a failure at stage `login` as a sign that the root-cause analysis was incomplete. That instruction is
+obsolete: no runner path reads a credential any more, and stage `login` no longer exists. The note is kept
+only so an older transcript can be read; nothing in it should be executed.
 
 ### Task 3 — resume the DeepEval vertical
 

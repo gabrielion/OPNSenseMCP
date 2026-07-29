@@ -643,6 +643,12 @@ export async function startDisposableVm({
   rawPath,
   accelerator,
   prepareBase,
+  // Optional console consumer. The pinned image only offers an unauthenticated shell inside
+  // its loader window a few seconds after launch, and QEMU discards console output while no
+  // client is attached, so a consumer must run before the guest can answer on its API port.
+  // It runs inside the same owned failure path as readiness: if it throws, the owned QEMU is
+  // terminated and the instance state removed exactly as a readiness timeout would.
+  bootstrapConsole,
   runImageCommand = runQemuImg,
   spawnVm = spawnQemu,
   inspectProcess = inspectQemuProcess,
@@ -678,6 +684,7 @@ export async function startDisposableVm({
     });
     const paths = instancePaths(instanceRoot);
     let launched;
+    let consoleFailure;
     try {
       await prepareBase();
       await assertImmutableRaw(rawPath);
@@ -716,6 +723,20 @@ export async function startDisposableVm({
       };
       await replaceOwnedRecord(paths.owner, launching, running);
 
+      if (bootstrapConsole !== undefined) {
+        if (!(await inspectProcess(running.pid, running.nonce))) {
+          throw vmError('VM_START_FAILED');
+        }
+        try {
+          await bootstrapConsole({ consolePath: paths.console });
+        } catch (error) {
+          // Recorded so the owned cleanup below can rethrow the consumer's own error: its
+          // safe failure stage is the only diagnosis the runners are allowed to report.
+          consoleFailure = error;
+          throw error;
+        }
+      }
+
       for (let attempt = 0; attempt < readinessAttempts; attempt += 1) {
         if (!(await inspectProcess(running.pid, running.nonce))) {
           throw vmError('VM_START_FAILED');
@@ -738,7 +759,7 @@ export async function startDisposableVm({
         if (!stopped) throw vmError('VM_STOP_FAILED');
       }
       await cleanupOwnedState(instanceRoot);
-      if (error instanceof Product1bVmError) throw error;
+      if (error === consoleFailure || error instanceof Product1bVmError) throw error;
       throw vmError('VM_START_FAILED', error);
     }
   } finally {

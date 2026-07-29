@@ -38,15 +38,22 @@ npm run vm:product3 -- --attestation-out "$PWD/docs/evidence/product3-vm.json"
 ```
 
 The first live run downloads the SHA-256-pinned official OPNsense 26.1.6 nano archive into the user cache.
-The test prompts for the disposable image's factory password without echoing it. It then owns start,
+The test needs no operator credential: it drives the disposable image's own unauthenticated single-user
+console to install its bootstrap helper. It then owns start,
 least-privilege API bootstrap, TLS pinning, npm pack/install, all four MCP read-tool calls (`server_status`,
 `opn_describe system.status`, `opn_get system.status`, and `opn_list core.services`), the last two issuing
 the two remote OPNsense API calls, stop, credential deletion, overlay deletion, and residue verification. A
 setup or read failure still runs cleanup and exits nonzero.
 
+Both live runners install through the same hermetic preparation as the installed-package suite: the consumer
+is served only by a loopback registry built from the committed lock, so the proof depends on this repository
+rather than on the developer's npm cache or on upstream release timing. A plain `npm install --offline`
+cannot be used here — the consumer resolves the archive's ranges afresh, picks any newly published
+transitive version and then fails `ENOTCACHED`.
+
 `vm:product3` runs the bounded firewall-alias lifecycle — list, create, read back, delete, prove absence.
-It boots and owns **its own** VM: it refuses to start while another managed VM is running, prompts for the
-factory password again, bootstraps its own alias-write account, and stops and cleans up afterwards. It sets
+It boots and owns **its own** VM: it refuses to start while another managed VM is running, bootstraps its
+own alias-write account without any operator credential, and stops and cleans up afterwards. It sets
 `READ_ONLY=false`, `ENABLED_FEATURE_FLAGS=experimental-alias-write` and an explicit `ALLOWED_RESOURCES`
 naming `server.status,system.status,core.services,firewall.alias`, because a write is refused without the
 first three and `server_status` disappears without the fourth scope.
@@ -61,6 +68,11 @@ npm run vm:stop
 ```
 
 Run only one managed VM at a time. These commands are for the disposable lab, never a real firewall.
+
+`vm:bootstrap` starts and owns its own VM and refuses to run while a managed VM is already running. The
+unauthenticated single-user shell only exists inside the loader window a few seconds after launch, and QEMU
+discards console output while nothing is attached, so the bootstrap must be present from the launch. It is
+not a step you can apply to an already running VM.
 
 ## Protocol gates
 
