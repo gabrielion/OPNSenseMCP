@@ -555,3 +555,20 @@ Serial-bootstrap progress deadline fix (2026-07-29).
     failure shape.
   - Product 3 VM attestation is renewed in the following evidence-only commit, produced with the password
     delivered immediately at the hidden prompt: that run is itself the live proof of the fix.
+
+Handoff to a larger workstation (2026-07-29).
+  - Reason: the original Mac has too little RAM to keep running the disposable VM alongside the test
+    suites. The branch is pushed so the work resumes elsewhere.
+  - Published state: `codex/p0b-resume-wip` at `562004b`. Gates on that exact tree, Node 22.23.1:
+    license, verify (58 files / 1131 tests), conformance 2025 + 2026 (13/13 on the final profile),
+    provenance, sealed OpenCode evidence and `git diff --check` all passed.
+  - `npm run evidence:verify` returns 2 at handoff, by design. The Product 3 attestation in `12bc618`
+    was produced by a real VM run with all twelve checks true, but it binds `3fcb8a3`; `7ad2684` and
+    `562004b` are later non-evidence commits. Renewing it is the first task on the new machine and no
+    completion may be claimed until the verifier returns 0.
+  - NOT YET PROVED LIVE: the serial-bootstrap deadline fix in `7ad2684` is covered by deterministic tests
+    only. The renewal run is its live proof and should be performed with the password typed immediately
+    at the hidden prompt. A failure at stage `login` would mean the recorded root-cause analysis is
+    incomplete and must be reopened rather than worked around.
+  - The last successful producer run used a deliberately delayed password delivery to land inside the old
+    30 s window. That workaround is no longer needed and should not be reintroduced.

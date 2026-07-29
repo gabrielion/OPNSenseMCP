@@ -1,9 +1,12 @@
 # OPNSenseMCP Project Status and Session Handoff
 
-**Snapshot date:** 2026-07-28  
-**Working branch:** `codex/p0b-resume-wip`  
-**Documentation-slice base:** `24a0c2b` (`docs: record final P0-B exit review`)  
-**Remote:** `https://github.com/gabrielion/OPNSenseMCP.git`
+- **Snapshot date:** 2026-07-29
+- **Working branch:** `codex/p0b-resume-wip`
+- **Head at handoff:** `562004b` (`docs: record DeepEval current project position and phased sequence`)
+- **Remote:** `https://github.com/gabrielion/OPNSenseMCP.git`
+- **VM evidence state:** **stale — `npm run evidence:verify` returns 2.** The published attestation covers
+  `3fcb8a3`; two later non-evidence commits (`7ad2684`, `562004b`) invalidate it by design. Renewing it on
+  a machine that can run the disposable VM is the first task below.
 
 This document is the starting point for a new human or coding-agent session. It describes what is actually
 implemented, what has been proved, what remains incomplete, and the exact next design gate. When a statement
@@ -159,22 +162,23 @@ Completed work includes:
 - CI enforcement of VM evidence coherence;
 - final adversarial review with its Important findings corrected.
 
-The base before this documentation slice is eleven commits ahead of
-`origin/codex/p0b-resume-wip`:
+The 2026-07-29 session added, on top of the P0-B exit review at `24a0c2b`:
 
 ```text
-24a0c2b docs: record final P0-B exit review
-368c8c8 fix: close final P0-B review findings
-0c42e43 test: renew OpenCode Product 1A evidence
-a845953 docs: record P0-B corrective review slices
-472944e fix: preserve frozen Product 1B results
-5954ce7 fix: harden Product 3 installed lifecycle
-f8b9800 fix: reject dirty later VM attestations
-e815ebd fix: run installed binaries from consumer cwd
-83f0275 fix: hide unavailable capability metadata
-2ca0f83 fix: enforce policy order before target availability
-5d91d5f docs: clarify preview non-claims and live reads
+562004b docs: record DeepEval current project position and phased sequence
+7ad2684 fix: bound serial bootstrap by console progress
+12bc618 docs: renew Product 3 VM attestation          (evidence-only, attests 3fcb8a3)
+3fcb8a3 test: renew OpenCode Product 1A evidence
+73a8c28 docs: add DeepEval evaluation design and durable project status
 ```
+
+`README.md` ships inside the npm tarball, so the documentation slice changed the package digest and the
+sealed OpenCode evidence had to be renewed by the real `npm run smoke:opencode`, not by editing the fixture.
+Expect the same whenever `README.md`, `LICENSE` or `dist` content changes.
+
+The Product 3 attestation in `12bc618` was produced by a real disposable-VM run in which every one of the
+twelve lifecycle checks passed. It is nevertheless **stale as of `7ad2684`**, because the verifier is
+commit-bound and two later commits are not evidence commits.
 
 The final publication sequence must be:
 
@@ -372,10 +376,56 @@ Those facts guide the clean-room design; they do not authorize copying implement
 
 ## Immediate next-session objective
 
-Review the written DeepEval specification with the owner. If approved without changes:
+The branch was handed off from a workstation with too little RAM to keep running the disposable VM. Work
+resumes on a larger machine. Do these in order and do not reorder them: the attestation is commit-bound, so
+any non-evidence commit made before the producer runs invalidates the run again.
 
-1. invoke `superpowers:writing-plans`;
-2. plan only the first clean-room vertical;
+### Task 1 — renew the stale Product 3 VM attestation (blocking)
+
+`npm run evidence:verify` currently returns `2`. Nothing may be called published or complete until it
+returns `0`.
+
+```text
+git switch codex/p0b-resume-wip
+git pull --ff-only
+PATH=/opt/homebrew/opt/node@22/bin:$PATH      # or any Node >=22.19 <23
+npm ci --ignore-scripts
+npm run evidence:verify                       # expect 2 before the producer runs
+npm run license:check && npm run verify && npm run test:conformance && git diff --check
+npm run vm:doctor                             # expect READY
+git status --porcelain=v1 --untracked-files=all   # MUST be empty, the producer refuses otherwise
+npm run vm:product3 -- --attestation-out "$PWD/docs/evidence/product3-vm.json"
+```
+
+Type the OPNsense factory password at the hidden prompt. It is the stock vendor default for the pinned
+unconfigured nano image; the runner never accepts it as a process argument.
+
+Then commit **only** the evidence file, require `0`, and push:
+
+```text
+git add docs/evidence/product3-vm.json
+git commit -m "docs: renew Product 3 VM attestation"
+npm run evidence:verify                       # MUST return 0
+git push origin codex/p0b-resume-wip
+```
+
+If the producer fails, read `failureStage` in its JSON line. It stops the VM and verifies residue on every
+path; never hand-edit, synthesize or bypass the evidence.
+
+### Task 2 — confirm the serial-bootstrap fix against the real VM
+
+`7ad2684` changed the serial-bootstrap deadline so it bounds absence of console progress instead of the
+length of a healthy boot. **That fix is currently proved only by deterministic tests.** The Task 1 run is its
+live proof, so run it with the password typed immediately at the prompt rather than after a pause. A pass
+confirms the fix; a failure at stage `login` means the analysis in the ledger is incomplete and must be
+reopened before any further claim.
+
+### Task 3 — resume the DeepEval vertical
+
+Only after Task 1 returns `0`:
+
+1. review the written DeepEval specification with the owner;
+2. invoke `superpowers:writing-plans` and plan only the first clean-room vertical;
 3. begin with offline failing tests for trace parsing and the success-shaped no-op;
 4. add the Python DeepEval adapter;
 5. prove one installed synthetic-target run;
@@ -411,8 +461,15 @@ Before changing anything, report:
 - whether the written DeepEval specification has owner approval;
 - the exact provenance status of tests/agentic/**.
 
-The intended next work is the clean-room DeepEval 4.1.4 evaluation vertical described in the spec:
-Claude Code host -> installed OPNSenseMCP -> disposable OPNsense VM -> MCP readback -> deterministic
+The FIRST task is not DeepEval. evidence:verify returns 2: the published Product 3 attestation covers
+3fcb8a3 and two later non-evidence commits (7ad2684, 562004b) made it stale. Renew it exactly as
+"Immediate next-session objective / Task 1" describes: clean worktree, run npm run vm:product3 with the
+password typed at the hidden prompt, commit only docs/evidence/product3-vm.json, require evidence:verify 0,
+then push. That same run is the live proof of the serial-bootstrap fix in 7ad2684, which deterministic
+tests cover but no real VM run has yet confirmed.
+
+Only after that, the intended work is the clean-room DeepEval 4.1.4 evaluation vertical described in the
+spec: Claude Code host -> installed OPNSenseMCP -> disposable OPNsense VM -> MCP readback -> deterministic
 state-transition gate plus DeepEval metrics. A successful tool result without a changed VM must fail.
 
 Do not restore legacy tests/agentic files, execute superseded plans, start implementation before written-spec
