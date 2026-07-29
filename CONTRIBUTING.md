@@ -128,6 +128,31 @@ either the exact pre-evidence commit and tree or one later commit whose sole cha
 `docs/evidence/product3-vm.json`. Never hand-edit either evidence document; renew each one only with its
 real producer.
 
+## Publishing a release
+
+`.github/workflows/release.yml` publishes to npm with **no stored credential**: it authenticates
+through npm Trusted Publishing (OIDC) and provenance is attached automatically. Never add an
+`NPM_TOKEN` secret to this repository.
+
+Releases run only on a published GitHub Release, never on a push. `workflow_dispatch` rehearses
+every gate and a `npm publish --dry-run`, then stops before publishing.
+
+**One-time bootstrap, by hand.** Trusted publishing cannot create a package that does not exist, so
+the first version must be published by an authenticated human. Publish `0.1.0-bootstrap.0` locally
+with an interactive 2FA prompt, restore `package.json`, then attach the trusted publisher on
+npmjs.com — organisation `gabrielion`, repository `OPNSenseMCP`, workflow filename `release.yml`,
+environment `npm-publish` — and set publishing access to require 2FA and disallow tokens. Every
+field is case-sensitive and npm does not validate them on save, so a typo appears only at publish
+time.
+
+Then, per release: bump `package.json`, renew the VM attestation, tag `vX.Y.Z`, publish the GitHub
+Release, and approve the `npm-publish` environment when the run reaches it.
+
+Two consequences worth knowing. The release gates include `evidence:verify`, so a release fails
+while the VM attestation is stale — deliberate, since the package should not ship ahead of its own
+evidence. And the OIDC identity is bound to the workflow **filename**: renaming `release.yml`, or
+moving the publish step into a reusable workflow, breaks authentication silently.
+
 ## Change discipline
 
 1. Add a focused failing test and observe the expected failure.

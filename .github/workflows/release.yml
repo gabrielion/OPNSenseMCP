@@ -1,0 +1,178 @@
+# Publishes @gabrielion/opnsense-mcp to npmjs.com with no stored credential.
+#
+# Authentication is npm Trusted Publishing (OIDC): the runner mints a short-lived OIDC token, npm
+# exchanges it for a publish credential, and provenance is attached automatically. Nothing in this
+# file reads a secret, and no NPM_TOKEN should ever be added to this repository.
+#
+# The OIDC identity is bound on npmjs.com to organisation `gabrielion`, repository `OPNSenseMCP`,
+# workflow filename `release.yml`, environment `npm-publish`. RENAMING THIS FILE, or moving the
+# publish step into a reusable workflow, breaks authentication until the trusted-publisher
+# configuration is updated to match. npm does not validate those fields when they are saved, so a
+# typo surfaces only here, at publish time.
+#
+# Trusted publishing cannot create a package that does not exist, so the very first publish must
+# be done by hand by the maintainer. See docs/project-status.md for that one-time bootstrap.
+#
+# There is deliberately no `push:` trigger: an ordinary push to main can never reach this file.
+
+name: Release
+
+on:
+  release:
+    types: [published]
+  # Rehearsal only. Runs every gate and a publish dry run; the publish job is skipped.
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # `needs:` cannot reference jobs in another workflow file, so a green CI run on main would gate
+  # nothing here. The same three gates are re-run against the exact tagged commit, because that
+  # commit — not main — is what gets shipped.
+  compatibility-floor:
+    if: github.repository == 'gabrielion/OPNSenseMCP'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.19.0 # compatibility floor
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+      - run: npm run typecheck
+      - run: npm test -- tests/mcp/stdio.test.ts
+
+  verify:
+    if: github.repository == 'gabrielion/OPNSenseMCP'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 2 # the attested commit may sit one commit behind HEAD
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1 # current patched Node 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run verify
+      # A release therefore requires a fresh VM attestation. That is deliberate: the package
+      # should not ship while its own evidence is stale.
+      - run: npm run evidence:verify
+
+  protocol:
+    if: github.repository == 'gabrielion/OPNSenseMCP'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1 # current patched Node 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run test:conformance
+
+  # Everything that can make a publish WRONG rather than broken: a tag that disagrees with
+  # package.json, a version already on the registry, or a tarball whose contents changed.
+  preflight:
+    if: github.repository == 'gabrielion/OPNSenseMCP'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+      npm-tag: ${{ steps.package.outputs.npm-tag }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1 # current patched Node 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+
+      - id: package
+        name: Read the version and choose the dist-tag
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # A prerelease (any version containing a hyphen) must never become `latest`.
+          case "$version" in
+            *-*) echo "npm-tag=next" >> "$GITHUB_OUTPUT" ;;
+            *) echo "npm-tag=latest" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Refuse a tag that disagrees with package.json
+        if: github.event_name == 'release'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="${{ steps.package.outputs.version }}"
+          if test "$tag" != "$version"; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $version" >&2
+            exit 1
+          fi
+
+      - name: Refuse a version that is already on the registry
+        run: |
+          version="${{ steps.package.outputs.version }}"
+          if npm view "@gabrielion/opnsense-mcp@$version" version >/dev/null 2>&1; then
+            echo "Version $version is already published; bump package.json first" >&2
+            exit 1
+          fi
+
+      # Read this file list before approving the environment: `--ignore-scripts` on publish means
+      # prepack does not run, so the tarball is exactly what the explicit build produced.
+      - run: npm run build
+      - run: npm publish --dry-run --ignore-scripts
+
+  publish:
+    needs: [compatibility-floor, verify, protocol, preflight]
+    # A dry run rehearses every gate above and stops here.
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write # mints the OIDC token npm exchanges for a publish credential
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1 # current patched Node 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      # Node 22.23.1 bundles npm 10.9.8, below the 11.5.1 floor for trusted publishing. The pin is
+      # deliberate rather than `@latest`: this step is itself a supply-chain input, so bump it on
+      # purpose, not opportunistically.
+      - run: npm install --global npm@11.18.0
+      - run: npm ci --ignore-scripts
+      - run: npm run build
+
+      # No --access flag: publishConfig already declares public access.
+      # No --provenance flag: trusted publishing attaches provenance automatically for a public
+      # package built from a public repository on a GitHub-hosted runner.
+      - run: npm publish --ignore-scripts --tag "${{ needs.preflight.outputs.npm-tag }}"
