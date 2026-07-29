@@ -35,7 +35,7 @@ interface OperationContract {
 type MutableSchema = Record<string, unknown>;
 
 const PRODUCT_1B_TRANSPORT_NOTE =
-  'Observed on the disposable OPNsense 26.1.6 nano VM: POST /api/core/service/search with current, rowCount, sort, and searchPhrase returned the Bootgrid service page used by Product 1B.';
+  'Observed on the disposable OPNsense 26.1.6 nano VM: POST /api/core/service/search with current, rowCount, sort, and searchPhrase returned the Bootgrid service page used by Product 1B. Observed again on the disposable OPNsense 26.7 nano VM, which serves 12 services: the response clamps the echoed rowCount down to the rows it actually returned, so rowCount 13, 25 or 100 all come back as 12, the last partial page (current 3, rowCount 5) comes back as 2, and a page past the end comes back as 0. A reader must therefore treat the echoed rowCount as at most the requested pageSize rather than equal to it, even though pageSize accepts up to 100 here.';
 
 function schema(contract: OperationContract, name: string): MutableSchema {
   const value = contract.$defs[name];

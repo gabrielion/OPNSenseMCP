@@ -63,7 +63,7 @@ const EXPECTED_SYSTEM_STATUS_DESCRIPTION = {
         outputSchemaDigest: '11e1bc49417ca3079e04578cc82bb0a52b44dda433c678e444817591b8e7651f'
       }
     ],
-    contractDigest: '23946c5283a23e8952ee39049285b255d0ab5ad06d1c7cd41f28baccb32e85da'
+    contractDigest: '76a260de18a5f3c5104fa59e4c9d83b2bbfbc8e3880d47cf2c687092b145a922'
   }
 };
 

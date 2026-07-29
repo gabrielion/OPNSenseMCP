@@ -42,7 +42,8 @@ const ServiceRow = z.object({
 });
 const ServicesResponse = z.object({
   total: z.number().int().min(0).max(1_000_000),
-  rowCount: z.number().int().min(1).max(100),
+  // Clamped down to the number of rows actually returned, so a page past the end reports 0.
+  rowCount: z.number().int().min(0).max(100),
   current: z.number().int().min(1).max(1000),
   rows: z.array(ServiceRow).max(100)
 });
@@ -108,16 +109,19 @@ export function createOPNsenseReadAdapter(client: OPNsenseHttpsClient): OPNsense
           signal
         })
       );
+      // OPNsense clamps the echoed rowCount to the rows it returned, so accept either the
+      // requested size or that clamp. A rowCount above the requested size is still a protocol
+      // violation and must fail.
       if (
         response.current !== input.page ||
-        response.rowCount !== input.pageSize ||
+        (response.rowCount !== response.rows.length && response.rowCount !== input.pageSize) ||
         response.rows.length > input.pageSize
       ) {
         throw new Error('Invalid OPNsense response');
       }
       return Object.freeze({
         page: response.current,
-        pageSize: response.rowCount,
+        pageSize: input.pageSize,
         total: response.total,
         items: Object.freeze(
           response.rows.map(({ id, name, description, running }) =>
