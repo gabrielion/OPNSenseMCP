@@ -1,0 +1,29 @@
+{
+  "why": "The goldens pin values the firewall actually returns, so they are only meaningful against the lab this fingerprint describes. The runner checks it first and refuses to score a mismatched environment: a drifted lab must surface as a precondition failure, never as a low score blamed on the server.",
+  "producer": "npm run vm:bootstrap",
+  "image": { "release": "26.7" },
+  "observed": "2026-07-29",
+  "system_status": "OK",
+  "exposed_tools": ["opn_describe", "opn_get", "opn_list", "server_status"],
+  "services": {
+    "total": 12,
+    "names": [
+      "configd",
+      "cron",
+      "dnsmasq",
+      "hostwatch",
+      "login",
+      "ntpd",
+      "pf",
+      "routing",
+      "sysctl",
+      "syslog-ng",
+      "unbound",
+      "webgui"
+    ],
+    "names_are_checked_by": "The `services-full-listing` golden, which pins all twelve as expected facts. They are deliberately NOT part of the precondition: reading all twelve needs a page larger than the collection, which is the exact shape a defective server fails, and a precondition that a defective server fails would report a product bug as lab drift and stop the goldens from ever running."
+  },
+  "out_of_scope": {
+    "firewall.alias": "The credential-free bootstrap mints a least-privilege account, and OPNsense answers HTTP 403 Forbidden on /api/firewall/alias/search_item for it. That is the intended privilege boundary, not a defect, so no golden reads aliases — an eval that scored a 403 would be measuring the lab account."
+  }
+}

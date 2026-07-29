@@ -8,3 +8,7 @@ results/
 .migration-private/
 *.provenance-baseline.json
 .DS_Store
+evals/.venv/
+.deepeval/
+evals/__pycache__/
+__pycache__/

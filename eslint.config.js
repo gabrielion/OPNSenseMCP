@@ -4,7 +4,7 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['coverage/**', 'dist/**', 'node_modules/**', 'results/**'] },
+  { ignores: ['coverage/**', 'dist/**', 'evals/.venv/**', 'node_modules/**', 'results/**'] },
   { languageOptions: { globals: globals.node } },
   eslint.configs.recommended,
   ...tseslint.configs.strictTypeChecked,

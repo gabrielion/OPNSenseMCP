@@ -75,7 +75,9 @@
     "test:conformance": "npm run test:conformance:2025 && npm run test:conformance:2026",
     "verify": "npm run operations:check && npm run format:check && npm run lint && npm run typecheck && npm run license:check && npm test",
     "evidence:check": "npm run build && vitest run --project evidence",
-    "evidence:verify": "node scripts/verify-vm-attestation.mjs"
+    "evidence:verify": "node scripts/verify-vm-attestation.mjs",
+    "eval:setup": "uv venv --python 3.13 evals/.venv && VIRTUAL_ENV=evals/.venv uv pip install -r evals/requirements.txt",
+    "eval:read-surface": "evals/.venv/bin/python evals/run_eval.py"
   },
   "dependencies": {
     "@modelcontextprotocol/node": "2.0.0-beta.4",
