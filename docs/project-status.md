@@ -451,8 +451,13 @@ Start by reading, in full:
 7. docs/superpowers/plans/2026-07-19-private-provenance-contract-preflight.md
 8. .superpowers/sdd/progress.md
 
-Use Node >=22.19 and <23; on the original Mac prepend /opt/homebrew/opt/node@22/bin.
+This is a NEW machine: the previous workstation lacked the RAM to run the disposable VM.
+Use Node >=22.19 and <23. On macOS with Homebrew that is PATH=/opt/homebrew/opt/node@22/bin:$PATH;
+elsewhere select an equivalent Node 22 and never validate with the default Node 26.
 Install with npm ci --ignore-scripts. Never use a production firewall and never expose credentials.
+npm run vm:doctor must report READY: it needs qemu-system-x86_64, qemu-img, curl and bzip2. If the image
+cache is empty this machine will download the pinned OPNsense 26.1.6 nano image (556 MB compressed,
+3 GB raw) on the first VM run; npm run vm:prepare-image does that step alone.
 
 Before changing anything, report:
 - current branch, HEAD, upstream and worktree status;
