@@ -102,7 +102,7 @@ const HIGHLIGHTED_LOADER_MENU =
 // The three invariants the loader match is allowed to key on, each on its own.
 const PLAIN_LOADER_MENU = '\r\n1. Boot Multi user [Enter]\r\n2. Boot Single User\r\n';
 const COUNTDOWN_LOADER_MENU = '\r\nAutoboot in 3 seconds. [Space] to pause\r\n';
-const BANNER_LOADER_MENU = '\r\nWelcome to OPNsense 26.1.6\r\n';
+const BANNER_LOADER_MENU = '\r\nWelcome to OPNsense 26.7\r\n';
 
 // Drives the fixed single-user dialogue and returns every byte the bootstrap wrote.
 async function runSingleUserGuest(

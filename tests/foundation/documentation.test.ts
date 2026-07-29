@@ -79,7 +79,7 @@ async function git(root: string, arguments_: readonly string[]): Promise<string>
 function vmAttestation(
   commit: string,
   tree: string,
-  imageSha256 = '3c16267c791abfc3e41d5249fcb0c245c03cb91e2f1aa4d53017f0f3454d03a1'
+  imageSha256 = '28d5e2f37e40d87468a924e3006ef10e2ddc6de485b85333d9e3958c84d0cb9d'
 ): string {
   return `${JSON.stringify({
     checks: {
@@ -100,7 +100,7 @@ function vmAttestation(
     commit,
     host: 'linux',
     image: {
-      release: '26.1.6',
+      release: '26.7',
       sha256: imageSha256
     },
     node: '22.19.0',
@@ -285,7 +285,7 @@ describe('product documentation', () => {
     expect
       .soft(prose)
       .toContain(
-        '`test:product1b` owns the whole live test: it verifies and caches the pinned official OPNsense 26.1.6 nano image, starts one local VM, creates a disposable least-privilege API user over the serial console without any operator credential, packs and installs this npm package, calls `server_status`, `opn_describe system.status`, `opn_get system.status` and `opn_list core.services` through one MCP session, then stops the VM and removes the overlay, API credentials, certificate, and temporary package.'
+        '`test:product1b` owns the whole live test: it verifies and caches the pinned official OPNsense 26.7 nano image, starts one local VM, creates a disposable least-privilege API user over the serial console without any operator credential, packs and installs this npm package, calls `server_status`, `opn_describe system.status`, `opn_get system.status` and `opn_list core.services` through one MCP session, then stops the VM and removes the overlay, API credentials, certificate, and temporary package.'
       );
     expect
       .soft(prose)

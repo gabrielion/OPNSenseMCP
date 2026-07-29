@@ -37,7 +37,7 @@ npm run test:product1b
 npm run vm:product3 -- --attestation-out "$PWD/docs/evidence/product3-vm.json"
 ```
 
-The first live run downloads the SHA-256-pinned official OPNsense 26.1.6 nano archive into the user cache.
+The first live run downloads the SHA-256-pinned official OPNsense 26.7 nano archive into the user cache.
 The test needs no operator credential: it drives the disposable image's own unauthenticated single-user
 console to install its bootstrap helper. It then owns start,
 least-privilege API bootstrap, TLS pinning, npm pack/install, all four MCP read-tool calls (`server_status`,

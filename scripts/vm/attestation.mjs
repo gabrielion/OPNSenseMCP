@@ -37,7 +37,7 @@ const SCENARIO_SCOPES = Object.freeze([
 ]);
 const GIT_OBJECT_PATTERN = /^[0-9a-f]{40}$/u;
 const NODE_VERSION_PATTERN = /^22\.(?:19|[2-9]\d)\.\d+$/u;
-const IMAGE_SHA256 = '3c16267c791abfc3e41d5249fcb0c245c03cb91e2f1aa4d53017f0f3454d03a1';
+const IMAGE_SHA256 = '28d5e2f37e40d87468a924e3006ef10e2ddc6de485b85333d9e3958c84d0cb9d';
 
 export class VmAttestationError extends Error {
   constructor() {
@@ -130,7 +130,7 @@ export function buildVmAttestation(input) {
 
   const imageSource = recordWithExactKeys(valueAt(source, 'image'), IMAGE_KEYS);
   const image = Object.freeze({
-    release: exactString(valueAt(imageSource, 'release'), '26.1.6'),
+    release: exactString(valueAt(imageSource, 'release'), '26.7'),
     sha256: exactString(valueAt(imageSource, 'sha256'), IMAGE_SHA256)
   });
 

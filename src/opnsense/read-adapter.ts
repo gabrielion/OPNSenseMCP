@@ -2,11 +2,38 @@
 import * as z from 'zod/v4';
 import type { OPNsenseHttpsClient } from './https-client.js';
 
+/**
+ * `metadata.system.status` is polymorphic on OPNsense 26.7. The core controller seeds the field
+ * with the raw `SystemStatusCode` enum value (an integer) and only overwrites it with the enum
+ * name once a subsystem has posted a status, so a client polling a freshly booted firewall sees
+ * the integer and a client reading a settled one sees the name. Both are accepted and normalized
+ * to the documented name.
+ *
+ * https://github.com/opnsense/core/blob/26.7/src/opnsense/mvc/app/library/OPNsense/System/SystemStatusCode.php
+ */
+const SYSTEM_STATUS_NAMES: Readonly<Record<number, string>> = Object.freeze({
+  [-1]: 'ERROR',
+  [0]: 'WARNING',
+  [1]: 'NOTICE',
+  [2]: 'OK'
+});
+
 const SystemStatusResponse = z.object({
   metadata: z.object({
-    system: z.object({ status: z.string().min(1).max(64) })
+    system: z.object({
+      status: z.union([z.string().min(1).max(64), z.number().int().min(-1).max(2)])
+    })
   })
 });
+
+function systemStatusName(status: string | number): string {
+  if (typeof status === 'string') return status;
+  const name = SYSTEM_STATUS_NAMES[status];
+  // Unreachable while the schema bounds the enum, but a widened upstream range must fail closed
+  // rather than surface a bare integer as a health status.
+  if (name === undefined) throw new Error('Invalid OPNsense response');
+  return name;
+}
 const ServiceRow = z.object({
   id: z.string().min(1).max(128),
   name: z.string().min(1).max(128),
@@ -65,7 +92,7 @@ export function createOPNsenseReadAdapter(client: OPNsenseHttpsClient): OPNsense
         })
       );
       return Object.freeze({
-        item: Object.freeze({ status: response.metadata.system.status })
+        item: Object.freeze({ status: systemStatusName(response.metadata.system.status) })
       });
     },
     async listServices(input: ServiceListInput, signal: AbortSignal): Promise<ServiceListOutput> {

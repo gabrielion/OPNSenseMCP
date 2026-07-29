@@ -628,6 +628,44 @@ Live installs migrated to the hermetic lock-pinned preparation (2026-07-29).
     temporary root, in a separate `try` so a release failure still runs the removal.
   - Gate: tests/vm 144 passed; standalone hermetic preparation 5.3 s with `registryUnknownRequests: []`.
 
+Pinned image moved to OPNsense 26.7 (2026-07-29).
+  - Owner decision: the getting-started documentation must target the latest OPNsense, so the pin moves
+    from 26.1.6 to 26.7 (official SHA-256 `28d5e2f3...cb9d`, 490 849 116 bytes, published 2026-07-13).
+  - `scripts/vm/attestation.mjs` hard-constrained BOTH the release string and the image digest, so the
+    producer would have refused every 26.7 attestation. Seven verifier tests failed with `code 1` and
+    located it. Anyone bumping the pin again must change that file too.
+  - Two references to 26.1.6 must NOT follow the pin: the sealed `tests/fixtures/product1b.live.json`
+    records a real past run on 26.1.6, and the README line describing it. Those are historical facts, not
+    configuration. The pin advances; already-produced evidence keeps the version it actually observed.
+  - The credential-free serial bootstrap works unchanged on 26.7: the loader regex, the single-user prompt
+    and the syshook staging all hold. That was the main risk of the bump.
+  - `transportStatus: vm-observed-26.1.6` is deliberately NOT promoted to 26.7 in this increment. Those
+    claims stay historically true, the alias operations have not yet been re-observed on 26.7, and the
+    change would cascade into `contractDigest` (pinned at scripts/vm/product1b-live.mjs:66). Separate
+    increment, and it must be sequenced before an attestation run rather than after.
+
+OPNsense 26.7 makes the system status field polymorphic (2026-07-29).
+  - Defect: `npm run test:product1b` on 26.7 returned `failureStage: reads` with ONLY `systemStatus` false;
+    `core.services` passed over the same credentials, TLS session and client, so the failure was specific
+    to that one operation.
+  - Root cause: `metadata.system.status` is an INTEGER for a least-privilege API client on a freshly booted
+    firewall and a STRING once a subsystem has posted a status. The core controller seeds the field with
+    `SystemStatusCode::OK->value` and only overwrites it with the enum name later. Enum: ERROR = -1,
+    WARNING = 0, NOTICE = 1, OK = 2. The adapter's `z.string()` rejected the integer, so the tool returned
+    `EXECUTION_FAILED`.
+  - Investigation trap worth remembering: three hypotheses (response shape, Zod schema, missing ACL) were
+    all wrong because they were tested with a GUI session cookie, which returns the STRING. The MCP server
+    authenticates with an API key, which returned the INTEGER. Reproduce through the product's own path
+    before reasoning about causes; the runner's deliberate error redaction means a dedicated diagnostic is
+    required rather than inference.
+  - Fix: the schema accepts `string | int(-1..2)` and normalizes to the documented name, failing closed if
+    upstream ever widens the range rather than surfacing a bare integer as a health status.
+  - Also observed, and important for the setup tutorial: `/api/core/firmware/status` returns 403 to the
+    least-privilege account. That is the endpoint the community's OPNsense MCP docs recommend as a
+    connection test, so our documentation must use `/api/core/system/status` instead.
+  - Gate: read-adapter 11/11 (4 numeric cases, string passthrough, out-of-enum rejection); `test:product1b`
+    on 26.7 `status: passed` with all eleven checks true and no residue.
+
 Product 1B live proof fully green (2026-07-29).
   - `npm run test:product1b` returned `status: passed` with all eleven checks true — doctor, vmStarted,
     bootstrap, packageInstalled, readOnlySurface, serverStatus, resourceDescription, systemStatus,

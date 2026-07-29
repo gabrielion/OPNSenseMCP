@@ -19,12 +19,12 @@ import {
 } from './product1b-lifecycle.mjs';
 
 export const IMAGE_SPEC = Object.freeze({
-  release: '26.1.6',
-  archiveName: 'OPNsense-26.1.6-nano-amd64.img.bz2',
-  rawName: 'OPNsense-26.1.6-nano-amd64.img',
-  url: 'https://mirror.wdc1.us.leaseweb.net/opnsense/releases/26.1/OPNsense-26.1.6-nano-amd64.img.bz2',
-  archiveBytes: 556_631_322,
-  archiveSha256: '3c16267c791abfc3e41d5249fcb0c245c03cb91e2f1aa4d53017f0f3454d03a1',
+  release: '26.7',
+  archiveName: 'OPNsense-26.7-nano-amd64.img.bz2',
+  rawName: 'OPNsense-26.7-nano-amd64.img',
+  url: 'https://mirror.wdc1.us.leaseweb.net/opnsense/releases/26.7/OPNsense-26.7-nano-amd64.img.bz2',
+  archiveBytes: 490_849_116,
+  archiveSha256: '28d5e2f37e40d87468a924e3006ef10e2ddc6de485b85333d9e3958c84d0cb9d',
   rawMaxBytes: 8 * 1024 * 1024 * 1024
 });
 
@@ -42,7 +42,7 @@ const CACHE_LOCK_NAME = '.prepare-image.lock';
 const IMAGE_FAILURES = Object.freeze({
   ARCHIVE_TOO_LARGE: 'download exceeded the pinned archive size; retry image preparation',
   ARCHIVE_SIZE_MISMATCH: 'download size did not match the pinned archive; retry image preparation',
-  ARCHIVE_DIGEST_MISMATCH: 'download digest did not match OPNsense 26.1.6; retry image preparation',
+  ARCHIVE_DIGEST_MISMATCH: 'download digest did not match OPNsense 26.7; retry image preparation',
   DECOMPRESSION_FAILED: 'decompression failed, retry image preparation',
   DOWNLOAD_FAILED: 'download failed, check HTTPS access and retry image preparation',
   CACHE_BUSY: 'image preparation is already running, retry later',
@@ -856,7 +856,7 @@ export async function runPrepareImageCli({
   process.on('SIGTERM', interrupt);
   try {
     await prepareImage({ cacheRoot, spec, download, decompress, signal: controller.signal });
-    stdout.write('Product 1B image: READY; verified immutable OPNsense 26.1.6 base cached\n');
+    stdout.write('Product 1B image: READY; verified immutable OPNsense 26.7 base cached\n');
     return 0;
   } catch (error) {
     stderr.write(formatImageFailure(interrupted ? imageError('CANCELLED') : error));

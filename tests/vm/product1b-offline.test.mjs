@@ -273,14 +273,14 @@ describe('Product 1B host doctor', () => {
 });
 
 describe('Product 1B immutable image cache', () => {
-  it('pins the official OPNsense 26.1.6 nano archive', () => {
+  it('pins the official OPNsense 26.7 nano archive', () => {
     expect(IMAGE_SPEC).toMatchObject({
-      release: '26.1.6',
-      archiveName: 'OPNsense-26.1.6-nano-amd64.img.bz2',
-      rawName: 'OPNsense-26.1.6-nano-amd64.img',
-      url: 'https://mirror.wdc1.us.leaseweb.net/opnsense/releases/26.1/OPNsense-26.1.6-nano-amd64.img.bz2',
-      archiveBytes: 556_631_322,
-      archiveSha256: '3c16267c791abfc3e41d5249fcb0c245c03cb91e2f1aa4d53017f0f3454d03a1'
+      release: '26.7',
+      archiveName: 'OPNsense-26.7-nano-amd64.img.bz2',
+      rawName: 'OPNsense-26.7-nano-amd64.img',
+      url: 'https://mirror.wdc1.us.leaseweb.net/opnsense/releases/26.7/OPNsense-26.7-nano-amd64.img.bz2',
+      archiveBytes: 490_849_116,
+      archiveSha256: '28d5e2f37e40d87468a924e3006ef10e2ddc6de485b85333d9e3958c84d0cb9d'
     });
     expect(Object.isFrozen(IMAGE_SPEC)).toBe(true);
   });

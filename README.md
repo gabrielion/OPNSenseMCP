@@ -156,7 +156,7 @@ npm run test:product1b
 ```
 
 `vm:doctor` reports each missing host dependency without changing the machine. `test:product1b` owns the
-whole live test: it verifies and caches the pinned official OPNsense 26.1.6 nano image, starts one local VM,
+whole live test: it verifies and caches the pinned official OPNsense 26.7 nano image, starts one local VM,
 creates a disposable least-privilege API user over the serial console without any operator credential,
 packs and installs this npm package, calls `server_status`, `opn_describe system.status`,
 `opn_get system.status` and `opn_list core.services` through one MCP session, then stops the VM and removes
@@ -227,7 +227,7 @@ own versioned smoke passes.
 - Historical clean npm pack/install against a disposable OPNsense 26.1.6 VM for the two Product 1B remote
   calls, including VM ownership, pinned image integrity, isolated credentials, TLS pinning and reverse
   cleanup.
-- A commit-bound Product 3 run against a disposable OPNsense 26.1.6 VM for the writable surface and exact
+- A commit-bound Product 3 run against a disposable OPNsense 26.7 VM for the writable surface and exact
   host-alias lifecycle: absent, create, present, delete, absent, followed by VM cleanup and a residue-free
   check.
 - A hermetic package install **for the synthetic-target proof**: the consumer resolves every dependency

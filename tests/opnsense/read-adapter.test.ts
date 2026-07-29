@@ -85,4 +85,55 @@ describe('reviewed OPNsense read adapter', () => {
       )
     ).rejects.toThrow();
   });
+
+  // OPNsense 26.7 makes metadata.system.status polymorphic: the controller seeds it with the
+  // raw SystemStatusCode enum VALUE (an integer) and only replaces it with the enum NAME once a
+  // subsystem has posted a status. A least-privilege API client on a freshly booted firewall
+  // therefore receives the integer, which a string-only schema rejects.
+  // Enum: ERROR = -1, WARNING = 0, NOTICE = 1, OK = 2.
+  it.each([
+    [2, 'OK'],
+    [1, 'NOTICE'],
+    [0, 'WARNING'],
+    [-1, 'ERROR']
+  ])('maps the numeric system status %i to %s', async (code, expected) => {
+    const adapter = createOPNsenseReadAdapter({
+      request: vi.fn().mockResolvedValue({
+        metadata: {
+          system: { status: code, title: 'System', message: 'No pending messages' },
+          translations: { dialogTitle: 'System Status', dialogCloseButton: 'Close' },
+          subsystems: []
+        }
+      }),
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
+    });
+    await expect(adapter.getSystemStatus(new AbortController().signal)).resolves.toEqual({
+      item: { status: expected }
+    });
+  });
+
+  it('still passes a string system status through unchanged', async () => {
+    const adapter = createOPNsenseReadAdapter({
+      request: vi.fn().mockResolvedValue({
+        metadata: { system: { status: 'WARNING' }, translations: {}, subsystems: [] }
+      }),
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
+    });
+    await expect(adapter.getSystemStatus(new AbortController().signal)).resolves.toEqual({
+      item: { status: 'WARNING' }
+    });
+  });
+
+  it('rejects a numeric system status outside the documented enum', async () => {
+    const adapter = createOPNsenseReadAdapter({
+      request: vi.fn().mockResolvedValue({
+        metadata: { system: { status: 7 }, translations: {}, subsystems: [] }
+      }),
+      close: vi.fn(),
+      downloadConfigBackup: vi.fn()
+    });
+    await expect(adapter.getSystemStatus(new AbortController().signal)).rejects.toThrow();
+  });
 });

@@ -77,8 +77,8 @@ function attestationInput(overrides = {}) {
     protocolVersion: '2026-07-28',
     clientVersion: '0.1.0',
     image: {
-      release: '26.1.6',
-      sha256: '3c16267c791abfc3e41d5249fcb0c245c03cb91e2f1aa4d53017f0f3454d03a1'
+      release: '26.7',
+      sha256: '28d5e2f37e40d87468a924e3006ef10e2ddc6de485b85333d9e3958c84d0cb9d'
     },
     scenario: {
       readOnly: false,
@@ -457,7 +457,7 @@ describe('Product 3 disposable-VM alias runner', () => {
     expect(deps.statusVm).toHaveBeenCalledWith({ instanceRoot: deps.instanceRoot });
     expect(deps.startVm).toHaveBeenCalledWith({
       instanceRoot: deps.instanceRoot,
-      rawPath: `${deps.cacheRoot}/OPNsense-26.1.6-nano-amd64.img`,
+      rawPath: `${deps.cacheRoot}/OPNsense-26.7-nano-amd64.img`,
       accelerator: 'tcg',
       prepareBase: deps.prepareBase,
       bootstrapConsole: expect.any(Function)
@@ -826,7 +826,7 @@ describe('Product 3 VM attestation', () => {
 
     expect(canonical).toBe(serializeVmAttestation(attestationInput()));
     expect(canonical).toBe(
-      `{"checks":{"aliasAbsentAfter":true,"aliasAbsentBefore":true,"aliasCreated":true,"aliasDeleted":true,"aliasPresent":true,"bootstrap":true,"doctor":true,"packageInstalled":true,"residueFree":true,"vmStarted":true,"vmStopped":true,"writableSurface":true},"clientVersion":"0.1.0","commit":"${COMMIT}","host":"macos","image":{"release":"26.1.6","sha256":"3c16267c791abfc3e41d5249fcb0c245c03cb91e2f1aa4d53017f0f3454d03a1"},"node":"22.19.0","protocolVersion":"2026-07-28","scenario":{"flags":["experimental-alias-write"],"readOnly":false,"scopes":["server.status","system.status","core.services","firewall.alias"]},"schemaVersion":2,"tree":"${TREE}"}\n`
+      `{"checks":{"aliasAbsentAfter":true,"aliasAbsentBefore":true,"aliasCreated":true,"aliasDeleted":true,"aliasPresent":true,"bootstrap":true,"doctor":true,"packageInstalled":true,"residueFree":true,"vmStarted":true,"vmStopped":true,"writableSurface":true},"clientVersion":"0.1.0","commit":"${COMMIT}","host":"macos","image":{"release":"26.7","sha256":"28d5e2f37e40d87468a924e3006ef10e2ddc6de485b85333d9e3958c84d0cb9d"},"node":"22.19.0","protocolVersion":"2026-07-28","scenario":{"flags":["experimental-alias-write"],"readOnly":false,"scopes":["server.status","system.status","core.services","firewall.alias"]},"schemaVersion":2,"tree":"${TREE}"}\n`
     );
     expect(buildVmAttestation(reordered)).toEqual(JSON.parse(canonical));
   });

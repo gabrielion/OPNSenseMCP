@@ -641,7 +641,7 @@ describe('Product 1B one-command live runner', () => {
     expect(deps.statusVm).toHaveBeenCalledWith({ instanceRoot: deps.instanceRoot });
     expect(deps.startVm).toHaveBeenCalledWith({
       instanceRoot: deps.instanceRoot,
-      rawPath: `${deps.cacheRoot}/OPNsense-26.1.6-nano-amd64.img`,
+      rawPath: `${deps.cacheRoot}/OPNsense-26.7-nano-amd64.img`,
       accelerator: 'tcg',
       prepareBase: deps.prepareBase,
       bootstrapConsole: expect.any(Function)
