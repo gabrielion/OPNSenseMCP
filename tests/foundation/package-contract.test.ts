@@ -55,6 +55,27 @@ describe('package contract', () => {
     }
   });
 
+  // The README header states the verified firmware and protocol revision as hand-written badge
+  // strings. Nothing regenerates them, so without this check they quietly outlive the evidence
+  // they summarise at the next attestation renewal or protocol bump — and a stale evidence badge
+  // on the front page is a worse overclaim than no badge at all.
+  it('keeps the README evidence badges in step with the attestation they cite', async () => {
+    const [readme, evidence] = await Promise.all([
+      readFile('README.md', 'utf8'),
+      readFile('docs/evidence/product3-vm.json', 'utf8')
+    ]);
+    const attestation = JSON.parse(evidence) as {
+      image: { release: string };
+      protocolVersion: string;
+    };
+
+    const firmwareBadge = /verified%20on-OPNsense%20(?<release>[\d.]+)-/u.exec(readme);
+    expect(firmwareBadge?.groups?.release).toBe(attestation.image.release);
+
+    const escaped = attestation.protocolVersion.replaceAll('-', '--');
+    expect(readme).toContain(`badge/MCP-${escaped}-`);
+  });
+
   it('pins the MCP v2 beta and AGPL foundation exactly', async () => {
     const document = JSON.parse(await readFile('package.json', 'utf8')) as PackageDocument;
 

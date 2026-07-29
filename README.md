@@ -2,18 +2,19 @@
 
 # OPNsense MCP
 
-**Ask your firewall questions in plain language.**<br>
-An MCP server for OPNsense — read-only by default, and honest about what it proves.
+**Ask your firewall questions in plain language.**
 
-[![CI](https://github.com/gabrielion/OPNSenseMCP/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/gabrielion/OPNSenseMCP/actions/workflows/ci.yml)
-[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D22.19%20%3C23-339933?logo=node.js&logoColor=white)](https://nodejs.org)
-[![MCP](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io)
-[![Proven on OPNsense 26.7](https://img.shields.io/badge/proven%20on-OPNsense%2026.7-d94f00)](docs/evidence/product3-vm.json)
+Four read-only tools for OPNsense — read-only by default, and specific about what it has verified.
 
-[Quickstart](#quickstart) · [Setup guide](docs/setup-your-opnsense.md) ·
-[What it does](#what-works-now) · [What it proves](#how-this-preview-is-tested) ·
-[Status](docs/project-status.md)
+[![CI](https://img.shields.io/github/actions/workflow/status/gabrielion/OPNSenseMCP/ci.yml?branch=main&label=CI&logo=githubactions&logoColor=white)](https://github.com/gabrielion/OPNSenseMCP/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D22.19%20%3C23-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org)
+[![MCP protocol](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io)
+[![Verified firmware](https://img.shields.io/badge/verified%20on-OPNsense%2026.7-d94f00)](docs/evidence/product3-vm.json)
+
+[**Quickstart**](#quickstart) · [**Tools**](#what-works-now) ·
+[**Setup guide**](docs/setup-your-opnsense.md) · [**Evidence**](#how-this-preview-is-tested) ·
+[**Status**](docs/project-status.md)
 
 </div>
 
