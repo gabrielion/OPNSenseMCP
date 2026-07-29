@@ -49,6 +49,7 @@
     "vm:stop": "node scripts/vm/product1b.mjs stop",
     "vm:product3": "node scripts/vm/product3-alias.mjs",
     "test:product1b": "node scripts/vm/product1b-live.mjs",
+    "docs:capture": "node scripts/docs/capture-gui.mjs",
     "test:watch": "vitest",
     "smoke:opencode": "node scripts/run-opencode-smoke.mjs",
     "test:conformance:2025": "npm run build && node scripts/run-conformance.mjs 2025-11-25",

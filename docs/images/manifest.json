@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "firmware": {
+    "name": "OPNsense",
+    "release": "26.7"
+  },
+  "capturedAt": "2026-07-29",
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "images": [
+    {
+      "file": "01-login.png",
+      "path": "/",
+      "alt": "The OPNsense sign-in page, with the Username and Password fields and the Login button.",
+      "caption": "Sign in to your firewall."
+    },
+    {
+      "file": "02-users.png",
+      "path": "/ui/auth/user",
+      "alt": "System: Access: Users, listing existing accounts, with the Users and ApiKeys tabs above the table and the orange + button below it.",
+      "caption": "System > Access > Users. The + button below the table adds an account."
+    },
+    {
+      "file": "03-privileges.png",
+      "path": "/ui/auth/priv",
+      "alt": "System: Access: Privileges, showing the searchable list of privilege names that can be granted to an account.",
+      "caption": "System > Access > Privileges. Grant only the three read-only privileges."
+    },
+    {
+      "file": "04-apikeys.png",
+      "path": "/ui/auth/user",
+      "alt": "The ApiKeys tab of System: Access: Users, showing an empty table with Username, Api key and Commands columns. The tab lists issued keys only; it has no button that creates one.",
+      "caption": "The ApiKeys tab lists existing keys. It does not create them — keys are issued from the user’s own edit form."
+    },
+    {
+      "file": "05-certificates.png",
+      "path": "/ui/trust/cert",
+      "alt": "System: Trust: Certificates, listing the certificates held by the firewall, including the self-signed web GUI certificate, with per-row export controls.",
+      "caption": "System > Trust > Certificates. Export the web GUI certificate as PEM."
+    }
+  ]
+}
