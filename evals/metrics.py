@@ -107,7 +107,7 @@ class NoForbiddenToolMetric(_DeterministicMetric):
     label = "No Forbidden Tool"
 
     def measure(self, test_case: LLMTestCase, *args: object, **kwargs: object) -> float:
-        forbidden = set((test_case.additional_metadata or {}).get("forbidden_tools") or [])
+        forbidden = set((test_case.metadata or {}).get("forbidden_tools") or [])
         if not forbidden:
             return self._settle(1.0, "no tool was forbidden for this question")
         breached = sorted(forbidden.intersection(_called_names(test_case)))
@@ -129,7 +129,7 @@ class NoToolErrorMetric(_DeterministicMetric):
     label = "No Tool Error"
 
     def measure(self, test_case: LLMTestCase, *args: object, **kwargs: object) -> float:
-        tolerated = set((test_case.additional_metadata or {}).get("tolerated_error_tools") or [])
+        tolerated = set((test_case.metadata or {}).get("tolerated_error_tools") or [])
         calls = test_case.mcp_tools_called or []
         if not calls:
             # Silence is only a failure when the question actually needed the firewall. A golden
@@ -162,7 +162,7 @@ class FactContainmentMetric(_DeterministicMetric):
     label = "Fact Containment"
 
     def measure(self, test_case: LLMTestCase, *args: object, **kwargs: object) -> float:
-        facts = (test_case.additional_metadata or {}).get("expected_facts") or []
+        facts = (test_case.metadata or {}).get("expected_facts") or []
         if not facts:
             return self._settle(1.0, "no fact was pinned for this question")
         haystack = (test_case.actual_output or "").lower()
@@ -263,7 +263,7 @@ class AnswerSupportedByVmMetric(_DeterministicMetric):
     label = "Answer Supported By VM"
 
     def measure(self, test_case: LLMTestCase, *args: object, **kwargs: object) -> float:
-        facts = (test_case.additional_metadata or {}).get("resolved_facts") or []
+        facts = (test_case.metadata or {}).get("resolved_facts") or []
         if not facts:
             return self._settle(1.0, "no fact was required for this question")
         haystack = (test_case.actual_output or "").lower()
@@ -288,7 +288,7 @@ class NoContradictionWithVmMetric(_DeterministicMetric):
     label = "No Contradiction With VM"
 
     def measure(self, test_case: LLMTestCase, *args: object, **kwargs: object) -> float:
-        metadata = test_case.additional_metadata or {}
+        metadata = test_case.metadata or {}
         truth = metadata.get("vm_truth")
         answer = test_case.actual_output or ""
         if not truth or not answer:
@@ -362,7 +362,7 @@ class ServerFaithfulToVmMetric(_DeterministicMetric):
     label = "Server Faithful To VM"
 
     def measure(self, test_case: LLMTestCase, *args: object, **kwargs: object) -> float:
-        found = (test_case.additional_metadata or {}).get("oracle_disagreements")
+        found = (test_case.metadata or {}).get("oracle_disagreements")
         if found is None:
             # An absent check is not a passed check. The first version returned 1.0 here, which
             # meant a run where the second reading silently failed to happen looked identical to

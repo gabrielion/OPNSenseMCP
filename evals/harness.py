@@ -15,6 +15,9 @@ Two traps are encoded here rather than left for the next reader to rediscover:
    found`. Every subprocess here runs from a scratch directory.
 2. Only MCP tool calls are recorded. The client may also call its own harness tools (tool search,
    for instance) and counting those would score the client, not the server.
+3. The child must not inherit a Claude Code session's `ANTHROPIC_BASE_URL` / `CLAUDE_CODE_*`
+   variables — see `agent_env()`. Running the eval from inside a Claude Code session otherwise
+   fails with a 401 that reads like an agent failure.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +39,12 @@ TRANSIENT_MARKERS = ("Overloaded", "API Error: 529", "API Error: 500", "API Erro
 # runaway agent cannot decide how much memory this process holds.
 MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 AGENT_TIMEOUT_SECONDS = 600
+# The agent under test is pinned, because "whatever `claude` resolves today" is not a comparable
+# instrument: a run scored against one model and a run scored against another are two experiments,
+# and the difference would show up as a change in the server's score.
+DEFAULT_AGENT_MODEL = "sonnet"
+MAX_AGENT_TURNS = "30"
+MAX_AGENT_BUDGET_USD = "2.00"
 DENIED_TOOLS = (
     "Bash",
     "Read",
@@ -45,6 +55,35 @@ DENIED_TOOLS = (
     "WebSearch",
     "Task",
 )
+
+
+def agent_model() -> str:
+    return os.environ.get("EVAL_AGENT_MODEL") or DEFAULT_AGENT_MODEL
+
+
+def agent_env() -> dict[str, str]:
+    """Child environment for the `claude` CLI.
+
+    A Claude Code session exports `ANTHROPIC_BASE_URL` and a family of `CLAUDE_CODE_*` variables
+    pointing at a gateway the spawned CLI holds no credential for; inheriting them makes every run
+    fail with a 401 that looks like an agent problem. In a plain shell they are absent, so stripping
+    them changes nothing there. This repository's earlier ground-truth harness learned it the hard
+    way and the lesson is worth keeping.
+    """
+    dropped = {
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_EXECPATH",
+    }
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key not in dropped and not key.startswith("CLAUDE_CODE_OAUTH")
+    }
 
 
 @dataclass(frozen=True)
@@ -63,6 +102,7 @@ class AgentRun:
     exposed_tools: list[str] = field(default_factory=list)
     turns: int = 0
     model: str = ""
+    cost_usd: float = 0.0
     transport_error: str | None = None
 
     @property
@@ -172,8 +212,22 @@ def _parse_events(stream: str) -> AgentRun:
         elif kind == "result":
             run.answer = event.get("result") or ""
             run.turns = event.get("num_turns") or 0
+            run.cost_usd = float(event.get("total_cost_usd") or 0.0)
             if event.get("is_error"):
                 run.transport_error = run.answer or "the client reported an error"
+
+    # A tool call whose result never arrived is not a successful call. Leaving it out entirely
+    # would let a run that died mid-tool score as if it had made fewer, cleaner calls; recording it
+    # as an error keeps the trace honest about what the agent actually got back.
+    for call_id, (name, arguments) in pending.items():
+        run.tools.append(
+            ToolOutcome(
+                name=name,
+                args=arguments,
+                result=f"no tool_result was ever recorded for {call_id}",
+                is_error=True,
+            )
+        )
     return run
 
 
@@ -189,50 +243,79 @@ def _run_bounded(
     argv: list[str],
     *,
     cwd: Path,
+    env: dict[str, str] | None = None,
     max_bytes: int = MAX_OUTPUT_BYTES,
     timeout: int = AGENT_TIMEOUT_SECONDS,
 ) -> _Completed:
-    """Run a child with a hard cap on how much it can make us hold.
+    """Run a child under a hard cap on memory and a hard cap on wall time.
 
-    `subprocess.run(capture_output=True)` reads until EOF, so a runaway agent decides this
-    process's memory. The evaluation design spec requires stdout, stderr and wall time to be
-    bounded; this is that bound. Output beyond the cap is dropped and flagged rather than silently
-    kept, because a truncated trace must not be scored as if it were complete.
+    Two traps, both of which an earlier version of this function walked into.
+
+    **stderr must not be a pipe nobody reads.** Reading stdout line by line while stderr stays an
+    undrained pipe deadlocks the moment the child writes more than the pipe buffer — roughly 64 KiB
+    on macOS. The child blocks writing stderr, so it emits no more stdout, so the reader blocks
+    forever. It survived testing only because the CLI is normally quiet on stderr. A file has no
+    such limit.
+
+    **A deadline checked inside the read loop is not a deadline.** The check only ran when a new
+    line arrived, so precisely the hang it existed to break would never trigger it. The wall clock
+    is now enforced by a timer thread that kills the child, which works whether or not the child
+    ever speaks again.
     """
+    stderr_file = tempfile.NamedTemporaryFile("w+", suffix=".stderr", delete=False)
     process = subprocess.Popen(  # noqa: S603 - argv is built here, never shell-interpolated
         argv,
         cwd=cwd,
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=stderr_file,
         text=True,
     )
+    expired = threading.Event()
+
+    def _expire() -> None:
+        expired.set()
+        process.kill()
+
+    killer = threading.Timer(timeout, _expire)
+    killer.start()
+
     chunks: list[str] = []
     size = 0
-    truncated = False
+    over_cap = False
     assert process.stdout is not None
-    deadline = time.monotonic() + timeout
-    for line in process.stdout:
-        if time.monotonic() > deadline:
-            truncated = True
-            break
-        size += len(line)
-        if size > max_bytes:
-            truncated = True
-            break
-        chunks.append(line)
-    if truncated:
-        process.kill()
     try:
-        stderr = process.communicate(timeout=30)[1] or ""
-    except subprocess.TimeoutExpired:
-        process.kill()
-        stderr = ""
+        for line in process.stdout:
+            size += len(line)
+            if size > max_bytes:
+                over_cap = True
+                process.kill()
+                break
+            chunks.append(line)
+    finally:
+        killer.cancel()
+        try:
+            process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
+        try:
+            stderr_file.seek(0)
+            stderr = stderr_file.read() or ""
+        except OSError:
+            stderr = ""
+        stderr_file.close()
+        try:
+            os.unlink(stderr_file.name)
+        except OSError:
+            pass
+
     return _Completed(
         stdout="".join(chunks),
-        stderr=stderr[:MAX_OUTPUT_BYTES],
+        stderr=stderr[-MAX_OUTPUT_BYTES:],
         returncode=process.returncode if process.returncode is not None else -1,
-        truncated=truncated,
+        truncated=over_cap or expired.is_set(),
     )
 
 
@@ -255,6 +338,8 @@ def ask(question: str, *, config: Path, workdir: Path, attempts: int = 6) -> Age
                 "--mcp-config",
                 str(config),
                 "--strict-mcp-config",
+                "--model",
+                agent_model(),
                 "--allowedTools",
                 f"mcp__{SERVER_KEY}",
                 # The allow-list governs prompting, not existence, so the agent could still reach
@@ -262,11 +347,22 @@ def ask(question: str, *, config: Path, workdir: Path, attempts: int = 6) -> Age
                 # firewall. Denying them keeps the MCP server the only possible source of an answer.
                 "--disallowedTools",
                 *DENIED_TOOLS,
+                # Bounds that belong to the experiment rather than to the agent's discretion: a
+                # question that needs thirty turns or two dollars has already told us what we
+                # wanted to know, and an unbounded run can spend the operator's quota on a loop.
+                "--max-turns",
+                MAX_AGENT_TURNS,
+                "--max-budget-usd",
+                MAX_AGENT_BUDGET_USD,
+                # No transcript on disk: these traces carry firewall readings, and the private
+                # report under `results/` is the one place they are meant to live.
+                "--no-session-persistence",
                 "--output-format",
                 "stream-json",
                 "--verbose",
             ],
             cwd=workdir,
+            env=agent_env(),
         )
         run = _parse_events(completed.stdout)
         run.question = question

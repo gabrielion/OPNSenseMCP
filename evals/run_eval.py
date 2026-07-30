@@ -31,6 +31,13 @@ os.environ.pop("CONFIDENT_API_KEY", None)
 _CACHE = Path.cwd() / ".deepeval"
 _CACHE.mkdir(mode=0o700, exist_ok=True)
 _CACHE.chmod(0o700)
+# `.deepeval/.latest_run_full.json` is a rolling snapshot, overwritten every run. This adds a
+# timestamped, complete `TestRun` document per run — the artefact an attestation can digest,
+# because it does not change under it. There is no `--json` flag; this variable is the mechanism.
+_RUNS = Path(__file__).resolve().parent / "results" / "deepeval"
+_RUNS.mkdir(parents=True, mode=0o700, exist_ok=True)
+_RUNS.chmod(0o700)
+os.environ.setdefault("DEEPEVAL_RESULTS_FOLDER", str(_RUNS))
 
 from deepeval import evaluate  # noqa: E402
 from deepeval.evaluate.configs import AsyncConfig, CacheConfig, DisplayConfig, ErrorConfig
@@ -38,9 +45,20 @@ from deepeval.dataset import EvaluationDataset, Golden
 from deepeval.test_case import LLMTestCase, MCPServer, MCPToolCall, ToolCall
 from mcp.types import CallToolResult, TextContent
 
-from harness import HarnessError, ask, scratch_directory, server_command, write_client_config
+from importlib.metadata import version  # noqa: E402
+
+from advisory import advisory_metrics, judge_enabled, measure_advisory
+from claude_judge import ClaudeCodeJudge
+from harness import (
+    HarnessError,
+    agent_model,
+    ask,
+    scratch_directory,
+    server_command,
+    write_client_config,
+)
 from metrics import read_surface_metrics
-from oracle import OracleError, VmTruth, disagreements, read_via_mcp, read_via_rest
+from oracle import PAGE_SIZE, OracleError, VmTruth, disagreements, read_via_mcp, read_via_rest
 
 HERE = Path(__file__).resolve().parent
 GROUNDTRUTH = HERE / "groundtruth"
@@ -73,6 +91,10 @@ def load_goldens() -> list[Golden]:
                 name=row["name"],
                 input=row["input"],
                 expected_tools=[ToolCall(name=name) for name in row.get("expected_tools", [])],
+                # `Golden` still spells this `additional_metadata` while `LLMTestCase` has
+                # renamed it to `metadata`. Worse, `Golden` is a pydantic model that ignores
+                # unknown keyword arguments, so passing `metadata=` here would be accepted
+                # silently and every golden would arrive with no requirements at all.
                 additional_metadata={
                     "require": row.get("require", []),
                     "forbidden_tools": row.get("forbidden_tools", []),
@@ -176,6 +198,7 @@ def main() -> int:
         test_cases: list[LLMTestCase] = []
         transport_failures: list[str] = []
         answers: dict[str, str] = {}
+        agent_cost = 0.0
         for index, golden in enumerate(goldens, start=1):
             metadata = dict(golden.additional_metadata or {})
             required = resolve_facts(metadata.get("require") or [], through_server)
@@ -192,6 +215,7 @@ def main() -> int:
             print(f"  calls: {called or '(none)'}")
 
             answers[golden.name] = run.answer
+            agent_cost += run.cost_usd
             metadata["resolved_facts"] = required
             metadata["vm_truth"] = truth_payload
             metadata["oracle_disagreements"] = divergence
@@ -202,6 +226,10 @@ def main() -> int:
                     input=golden.input,
                     actual_output=run.answer,
                     expected_tools=golden.expected_tools,
+                    # What the agent actually got back, so a judged metric can check the answer
+                    # against its own evidence rather than against its plausibility. Bounded per
+                    # call: a full listing would drown the judge in rows it does not need.
+                    context=[f"{tool.name} -> {tool.result[:1500]}" for tool in run.tools],
                     tools_called=[ToolCall(name=tool.name) for tool in run.tools],
                     mcp_servers=[server],
                     mcp_tools_called=[
@@ -215,7 +243,7 @@ def main() -> int:
                         )
                         for tool in run.tools
                     ],
-                    additional_metadata=metadata,
+                    metadata=metadata,
                 )
             )
 
@@ -228,16 +256,33 @@ def main() -> int:
             if not test_cases:
                 return 3
 
+        judge = ClaudeCodeJudge() if judge_enabled() else None
+        judged = advisory_metrics(judge) if judge else []
+
         dataset = EvaluationDataset(goldens=goldens)
         print(f"\nscoring {len(test_cases)} of {len(dataset.goldens)} goldens\n")
         result = evaluate(
             test_cases=test_cases,
             metrics=read_surface_metrics(),
+            # Pass them here, not through `@deepeval.log_hyperparameters`. The decorator writes
+            # onto whatever test run exists at import time and `evaluate()` then replaces it — the
+            # run prints "No hyperparameters logged" and the saved document has none. Measured.
+            hyperparameters={
+                "server_under_test": " ".join(command),
+                "agent_model": agent_model(),
+                "judge": judge.get_model_name() if judge else "none (deterministic metrics only)",
+                "oracle_page_size": PAGE_SIZE,
+                "deepeval": version("deepeval"),
+                "goldens": len(dataset.goldens),
+                "scored": len(test_cases),
+                "agent_cost_usd": round(agent_cost, 4),
+            },
             async_config=AsyncConfig(run_async=False),
             cache_config=CacheConfig(write_cache=False),
             display_config=DisplayConfig(show_indicator=False, print_results=False),
             error_config=ErrorConfig(ignore_errors=False),
         )
+        by_name = {case.name: case for case in test_cases}
 
         # The report carries bounded tool results read off a firewall. Even a disposable one, and
         # even under an ignored directory, that is private material: owner-only directory and file.
@@ -254,6 +299,9 @@ def main() -> int:
             "second_reading_disagreements": divergence,
             "goldens": len(dataset.goldens),
             "scored": len(test_cases),
+            "agent_model": agent_model(),
+            "agent_cost_usd": round(agent_cost, 4),
+            "judge": judge.get_model_name() if judge else None,
             "transport_failures": transport_failures,
             "cases": [],
         }
@@ -267,10 +315,16 @@ def main() -> int:
                         "score": metric.score,
                         "passed": metric.success,
                         "reason": metric.reason,
+                        "advisory": False,
                     }
                 )
                 if not metric.success:
                     failed += 1
+            # Judged rows are measured here rather than handed to `evaluate()`, so there is no
+            # path by which a judge's opinion can reach `failed`. They are reported, and that is
+            # all they are: no seed, no temperature, no logprobs, so they flicker by construction.
+            if judged and case.name in by_name:
+                entries.extend(measure_advisory(judged, by_name[case.name]))
             # The answer goes into the private report, bounded. Without it a failing metric cannot
             # be told apart from a metric that misread a perfectly good answer, and that
             # distinction is the difference between a finding and a false alarm.
@@ -281,11 +335,16 @@ def main() -> int:
                     "answer_excerpt": (answers.get(case.name) or "")[:4000],
                 }
             )
-            flag = "PASS" if all(entry["passed"] for entry in entries) else "FAIL"
+            blocking = [entry for entry in entries if not entry["advisory"]]
+            flag = "PASS" if all(entry["passed"] for entry in blocking) else "FAIL"
             print(f"{flag}  {case.name}")
             for entry in entries:
-                mark = "ok  " if entry["passed"] else "FAIL"
-                print(f"      {mark} {entry['metric']:26s} {entry['score']:.2f}  {entry['reason']}")
+                if entry["advisory"]:
+                    mark = "~   "
+                else:
+                    mark = "ok  " if entry["passed"] else "FAIL"
+                score = "  n/a" if entry["score"] is None else f"{entry['score']:.2f}"
+                print(f"      {mark} {entry['metric']:26s} {score}  {entry['reason']}")
 
         # DeepEval writes its own run artefact into a `.deepeval` directory in the working
         # directory, with the same tool-result content as the private report but default
@@ -293,7 +352,17 @@ def main() -> int:
         report_path = RESULTS / "read-surface.json"
         report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         report_path.chmod(0o600)
+        # DeepEval writes its own timestamped run document with default permissions, and it holds
+        # the same tool results as the private report. The owner-only directory already shields it;
+        # this makes the file itself say so.
+        for artefact in _RUNS.glob("*.json"):
+            artefact.chmod(0o600)
+        if judge:
+            report["judge_usage"] = judge.usage.as_hyperparameters()
+            report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            print(f"\njudge (advisory)  : {judge.usage.as_hyperparameters()}")
         print(f"\nreport: {report_path}")
+        print(f"agent cost: ${agent_cost:.2f}")
         print(f"metric failures: {failed}")
         if transport_failures:
             return 3

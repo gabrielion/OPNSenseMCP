@@ -77,6 +77,7 @@
     "evidence:check": "npm run build && vitest run --project evidence",
     "evidence:verify": "node scripts/verify-vm-attestation.mjs",
     "eval:setup": "uv venv --python 3.13 evals/.venv && VIRTUAL_ENV=evals/.venv uv pip install -r evals/requirements.txt",
+    "eval:offline": "evals/.venv/bin/python -m pytest evals/test_offline.py -q -p no:cacheprovider",
     "eval:read-surface": "evals/.venv/bin/python evals/run_eval.py"
   },
   "dependencies": {

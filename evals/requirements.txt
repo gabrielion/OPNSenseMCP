@@ -3,3 +3,6 @@ deepeval==4.1.4
 # Not optional despite being undocumented as a requirement: LLMTestCase refuses an
 # `mcp_tools_called` entry whose `result` is not an `mcp.types.CallToolResult`.
 mcp==2.0.0
+# deepeval already pulls pytest in, but the offline level depends on it directly and a transitive
+# dependency is not a promise.
+pytest==9.1.1
