@@ -38,14 +38,14 @@ exactly what is published on npm.
 
 ## How it is put together
 
-| File                             | Role                                                                                   |
-| -------------------------------- | -------------------------------------------------------------------------------------- |
-| `groundtruth/read-surface.jsonl` | one golden per line: question, required tools, pinned facts, and _why_ the case exists |
-| `groundtruth/environment.json`   | the lab fingerprint the goldens assume                                                 |
-| `probe.py`                       | a model-free MCP client that reads the fingerprint before anything is scored           |
-| `harness.py`                     | drives the `claude` CLI as the agent under test and records its MCP calls              |
-| `metrics.py`                     | four deterministic metrics                                                             |
-| `run_eval.py`                    | fingerprint → ask → score → report                                                     |
+| File                             | Role                                                                                                  |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `groundtruth/read-surface.jsonl` | one golden per line: question, required tools, the _kind_ of fact required, and _why_ the case exists |
+| `groundtruth/environment.json`   | what the lab is, for the reader — the goldens no longer depend on it for values                       |
+| `oracle.py`                      | reads the firewall twice, through MCP and through its own REST API, and compares them                 |
+| `harness.py`                     | drives the `claude` CLI as the agent under test, under a byte cap and a deadline                      |
+| `metrics.py`                     | six deterministic metrics                                                                             |
+| `run_eval.py`                    | read the firewall → ask → score against that reading → report                                         |
 
 The agent is the `claude` CLI in print mode, configured with this server and nothing else
 (`--strict-mcp-config`). Only MCP tool calls are recorded; the client's own harness tools are
@@ -53,32 +53,45 @@ ignored, because counting them would score the client rather than the server.
 
 **Every metric is deterministic and offline.** No judge model, no API key, no network:
 
-| Metric            | Fails when                                                                                                                              |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Tool Selection    | a tool the question genuinely requires was never called (recall over the golden's `expected_tools`; extra exploration is not penalised) |
-| No Tool Error     | any MCP call came back as an error, beyond those the golden tolerates                                                                   |
-| No Forbidden Tool | a tool the golden marks off-limits was called — this is how the read-only posture is tested from outside rather than asserted           |
-| Fact Containment  | a value the firewall actually returned is missing from the answer                                                                       |
+| Metric                   | Fails when                                                                                                                                      |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tool Selection           | a tool the question requires was never called (recall over `expected_tools`; extra exploration is not penalised)                                |
+| No Tool Error            | any MCP call came back as an error, beyond those the golden tolerates                                                                           |
+| No Forbidden Tool        | a tool the golden marks off-limits was called — the read-only posture tested from outside rather than asserted                                  |
+| Answer Supported By VM   | a value the firewall reports right now is missing from the answer                                                                               |
+| No Contradiction With VM | the answer asserts something the firewall contradicts — a wrong total, a wrong status, a wrong per-service state, a service that does not exist |
+| Server Faithful To VM    | the MCP reading and the firewall's own REST reading disagree, or the second reading was not taken at all                                        |
 
 DeepEval's own `ToolCorrectnessMetric` is documented as deterministic without `available_tools`, but
 in 4.1.4 its constructor builds an OpenAI client unconditionally and raises without an
 `OPENAI_API_KEY`. `ToolSelectionMetric` reimplements the same recall semantics with no model at all;
 the semantics were verified against 4.1.4 and the numbers are recorded in `metrics.py`.
 
-### Why the lab is fingerprinted first
+### The answer is checked against the firewall, not against a note
 
-The goldens pin values the firewall really returned — twelve service names, a total, a status word.
-That makes them precise and makes them fragile: on a different lab they would fail for reasons that
-have nothing to do with the server. So `run_eval.py` reads the fingerprint model-free and refuses to
-score a mismatch. A drifted lab is a precondition failure, never a low score blamed on the server.
+Earlier versions wrote the expected values into the goldens — twelve service names, a total, a
+status word. That is precise and it rots: on a different lab the goldens fail for reasons that have
+nothing to do with the server. Now a golden declares only the _kind_ of fact it needs
+(`services_total`, `all_service_names`, `last_page_service_names`, …) and the runner resolves it
+against the firewall at run time, immediately before asking. A passing run means the answer matched
+what the firewall held, not what someone wrote down last Tuesday.
 
-The precondition is deliberately narrow — system status, service `total`, and the exposed tool list,
-read with `pageSize: 1` — and it must keep succeeding against a **defective** server. The first
-version read `pageSize: 100` instead, reasoning that the precondition could double as a regression
-check. That was backwards: `pageSize: 100` is the exact shape published `0.1.0` fails, so the
-precondition tripped, exited before scoring, and reported a product defect as lab drift. Anything a
-broken server would fail belongs in a golden, where the failure is attributed to the server. The
-twelve service names are checked that way, by `services-full-listing`.
+The firewall is read **twice**: once through the MCP server, and once straight from its own REST
+API with no shared code — the REST reader even re-derives the status enum, because an oracle that
+imports the mapping cannot notice the mapping being wrong. The two readings are compared with each
+other before either is used to judge the agent, and a disagreement is its own finding rather than
+being silently resolved in favour of one side.
+
+That second reading is a deliberate disagreement with the design spec, which forbids a "parallel raw
+REST implementation as an oracle". The reasoning is in
+[the challenge note](../docs/superpowers/specs/2026-07-30-deepeval-spec-challenge.md): when the
+answer and the check both flow through the same server, a server-side _mistranslation_ agrees with
+itself forever and every check goes green. The clamped-pagination defect below does not prove this —
+it failed loudly on the wire. The 26.7 status-enum defect does.
+
+Both readers walk small pages on purpose. They must keep working against a **defective** server: a
+check that a broken server fails would report a product defect as lab drift and stop the goldens
+from ever running. An earlier precondition read `pageSize: 100` and did exactly that.
 
 ## What it caught
 

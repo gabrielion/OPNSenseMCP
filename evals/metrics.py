@@ -22,6 +22,8 @@ semantics with no model at all. Verified against 4.1.4:
 
 from __future__ import annotations
 
+import re
+
 from deepeval.metrics import BaseMetric
 from deepeval.test_case import LLMTestCase
 
@@ -170,11 +172,214 @@ class FactContainmentMetric(_DeterministicMetric):
         return self._settle(found / len(facts), reason)
 
 
+# Real OPNsense services that this lab does not run. Naming one *with a state* is the cheapest
+# deterministic signature of an invented answer: the agent cannot have read it from the firewall.
+DECOY_SERVICES = (
+    "openvpn",
+    "ipsec",
+    "wireguard",
+    "haproxy",
+    "suricata",
+    "squid",
+    "zabbix",
+    "telegraf",
+    "monit",
+    "radvd",
+)
+
+# Checked in this order: several "stopped" phrasings embed a "running" word ("non démarré"), so the
+# stopped vocabulary has to win.
+_STOPPED_MARKERS = (
+    "non démarré",
+    "pas démarré",
+    "non demarre",
+    "not running",
+    "arrêté",
+    "arrete",
+    "stopped",
+    "inactif",
+    "⛔",
+    "❌",
+    "🔴",
+)
+_RUNNING_MARKERS = (
+    "en marche",
+    "en fonctionnement",
+    "démarré",
+    "demarre",
+    "tourne",
+    "running",
+    "actif",
+    "✅",
+    "🟢",
+)
+
+
+# Only a phrasing that claims the size of the whole collection. "11 services en fonctionnement" is
+# a subset and must not be read as a total.
+_TOTAL_CLAIM = re.compile(
+    r"(?:au total|en tout|total(?:e|ement)?(?:\s+de)?|configur\w+)[^.\n]{0,30}?(?P<count>\d{1,4})\s*services?"
+    r"|(?P<c2>\d{1,4})\s*services?[^.\n]{0,30}?(?:au total|en tout|configur\w+|in total)",
+    flags=re.I,
+)
+_SUBSET_QUALIFIERS = (
+    "en fonctionnement",
+    "en marche",
+    "démarré",
+    "actif",
+    "running",
+    "arrêté",
+    "stopped",
+    "sur cette page",
+    "dernière page",
+    "cette page",
+)
+
+
+def _claimed_state(line: str) -> str | None:
+    lowered = line.lower()
+    if any(marker in lowered for marker in _STOPPED_MARKERS):
+        return "stopped"
+    if any(marker in lowered for marker in _RUNNING_MARKERS):
+        return "running"
+    return None
+
+
+def _mentions_both_states(lowered: str) -> bool:
+    return any(m in lowered for m in _STOPPED_MARKERS) and any(
+        m in lowered for m in _RUNNING_MARKERS
+    )
+
+
+class AnswerSupportedByVmMetric(_DeterministicMetric):
+    """Every fact the golden requires must appear in the answer — and the facts are read live.
+
+    The values are not written into the goldens. A golden names the *kind* of fact it needs
+    (`services_total`, `all_service_names`, …) and the runner resolves it against the firewall at
+    run time. That is the difference between "the answer matches what we wrote down last Tuesday"
+    and "the answer matches what the firewall holds right now".
+    """
+
+    label = "Answer Supported By VM"
+
+    def measure(self, test_case: LLMTestCase, *args: object, **kwargs: object) -> float:
+        facts = (test_case.additional_metadata or {}).get("resolved_facts") or []
+        if not facts:
+            return self._settle(1.0, "no fact was required for this question")
+        haystack = (test_case.actual_output or "").lower()
+        missing = [fact for fact in facts if str(fact).lower() not in haystack]
+        found = len(facts) - len(missing)
+        reason = f"{found}/{len(facts)} live facts present" + (
+            f"; missing {missing}" if missing else ""
+        )
+        return self._settle(found / len(facts), reason)
+
+
+class NoContradictionWithVmMetric(_DeterministicMetric):
+    """The answer must not assert anything the firewall contradicts.
+
+    Presence checks alone reward an answer that says everything; this is the other half — the
+    answer must not say something *wrong*. Deterministic and necessarily narrow: it checks the
+    claim shapes this domain actually produces (a service count, a system status word, a per-service
+    state, a service that does not exist) rather than pretending to understand prose. Its silence is
+    not proof of truthfulness, only the absence of these specific lies.
+    """
+
+    label = "No Contradiction With VM"
+
+    def measure(self, test_case: LLMTestCase, *args: object, **kwargs: object) -> float:
+        metadata = test_case.additional_metadata or {}
+        truth = metadata.get("vm_truth")
+        answer = test_case.actual_output or ""
+        if not truth or not answer:
+            return self._settle(1.0, "nothing to contradict")
+
+        services: dict[str, str] = dict(truth.get("services") or [])
+        total = truth.get("services_total")
+        contradictions: list[str] = []
+
+        # A stated *total* must be the real total. Deliberately narrow: an earlier version flagged
+        # every "<n> services" and cried wolf at two perfectly true sentences — "11 services en
+        # fonctionnement" (11 of 12 run) and "la dernière page contient 2 services". A contradiction
+        # metric that fires on true statements is worse than no metric, so only phrasings that
+        # actually claim the whole collection count, and a number qualified as a subset is skipped.
+        for match in _TOTAL_CLAIM.finditer(answer):
+            stated = int(match.group("count") or match.group("c2"))
+            window = answer[max(0, match.start() - 40) : match.end() + 40].lower()
+            if any(qualifier in window for qualifier in _SUBSET_QUALIFIERS):
+                continue
+            if stated != int(total):
+                contradictions.append(f"claims {stated} services in total, firewall has {total}")
+
+        # A system status word, when the question was about system status.
+        if "system_status" in (metadata.get("require") or []):
+            named = {
+                token
+                for token in re.findall(r"\b(OK|NOTICE|WARNING|ERROR)\b", answer)
+                if token != truth.get("system_status")
+            }
+            if named:
+                contradictions.append(
+                    f"names status {sorted(named)} but the firewall reports {truth.get('system_status')!r}"
+                )
+
+        for line in answer.splitlines():
+            claimed = _claimed_state(line)
+            if claimed is None:
+                continue
+            lowered = line.lower()
+            # A line that carries BOTH vocabularies is a summary sentence ("11 run, hostwatch is
+            # stopped"), not a claim about one service. Attributing its single state word to every
+            # name on it manufactures contradictions.
+            if _mentions_both_states(lowered):
+                continue
+            for name, actual in services.items():
+                # Word boundaries, not substrings: `pf` and `cron` are short enough to appear
+                # inside unrelated words and be blamed for a state they were never given.
+                if claimed != actual and re.search(rf"\b{re.escape(name)}\b", lowered):
+                    contradictions.append(f"{name} reported {claimed}, firewall says {actual}")
+            for decoy in DECOY_SERVICES:
+                if decoy not in services and re.search(rf"\b{re.escape(decoy)}\b", lowered):
+                    contradictions.append(f"reports a state for {decoy}, which the firewall does not run")
+
+        if contradictions:
+            unique = sorted(set(contradictions))
+            return self._settle(0.0, "; ".join(unique[:4]) + (" …" if len(unique) > 4 else ""))
+        return self._settle(1.0, "no claim contradicts the firewall")
+
+
+class ServerFaithfulToVmMetric(_DeterministicMetric):
+    """The MCP server's view of the firewall must match the firewall's own API.
+
+    This is the check the evaluation design spec argues against — it says the state verifier should
+    read through the installed server and not stand up a parallel REST oracle. The objection is
+    sound about scope creep and wrong about blind spots: when the answer and the check share a
+    server, a server that misreports is invisible to both. Two defects of that exact shape have
+    already shipped here. This does not replace the MCP readback; it sits beside it and fails when
+    the two disagree.
+    """
+
+    label = "Server Faithful To VM"
+
+    def measure(self, test_case: LLMTestCase, *args: object, **kwargs: object) -> float:
+        found = (test_case.additional_metadata or {}).get("oracle_disagreements")
+        if found is None:
+            # An absent check is not a passed check. The first version returned 1.0 here, which
+            # meant a run where the second reading silently failed to happen looked identical to
+            # one where the server was proven faithful.
+            return self._settle(0.0, "the second reading was not taken, so fidelity is unproven")
+        if found:
+            return self._settle(0.0, "MCP and REST disagree: " + "; ".join(found[:4]))
+        return self._settle(1.0, "MCP and the firewall's own API agree")
+
+
 def read_surface_metrics() -> list[BaseMetric]:
-    """The metric set the read-surface eval runs. All deterministic, all offline."""
+    """The metric set the read-surface eval runs. All deterministic, all offline, no judge."""
     return [
         ToolSelectionMetric(),
         NoToolErrorMetric(),
         NoForbiddenToolMetric(),
-        FactContainmentMetric(),
+        AnswerSupportedByVmMetric(),
+        NoContradictionWithVmMetric(),
+        ServerFaithfulToVmMetric(),
     ]

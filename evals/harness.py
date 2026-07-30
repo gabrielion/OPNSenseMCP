@@ -31,6 +31,10 @@ from pathlib import Path
 TOOL_PREFIX = "mcp__opnsense__"
 SERVER_KEY = "opnsense"
 TRANSIENT_MARKERS = ("Overloaded", "API Error: 529", "API Error: 500", "API Error: 503")
+# A complete stream-json trace for these questions runs well under a megabyte; the cap exists so a
+# runaway agent cannot decide how much memory this process holds.
+MAX_OUTPUT_BYTES = 8 * 1024 * 1024
+AGENT_TIMEOUT_SECONDS = 600
 DENIED_TOOLS = (
     "Bash",
     "Read",
@@ -173,6 +177,65 @@ def _parse_events(stream: str) -> AgentRun:
     return run
 
 
+@dataclass(frozen=True)
+class _Completed:
+    stdout: str
+    stderr: str
+    returncode: int
+    truncated: bool
+
+
+def _run_bounded(
+    argv: list[str],
+    *,
+    cwd: Path,
+    max_bytes: int = MAX_OUTPUT_BYTES,
+    timeout: int = AGENT_TIMEOUT_SECONDS,
+) -> _Completed:
+    """Run a child with a hard cap on how much it can make us hold.
+
+    `subprocess.run(capture_output=True)` reads until EOF, so a runaway agent decides this
+    process's memory. The evaluation design spec requires stdout, stderr and wall time to be
+    bounded; this is that bound. Output beyond the cap is dropped and flagged rather than silently
+    kept, because a truncated trace must not be scored as if it were complete.
+    """
+    process = subprocess.Popen(  # noqa: S603 - argv is built here, never shell-interpolated
+        argv,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    chunks: list[str] = []
+    size = 0
+    truncated = False
+    assert process.stdout is not None
+    deadline = time.monotonic() + timeout
+    for line in process.stdout:
+        if time.monotonic() > deadline:
+            truncated = True
+            break
+        size += len(line)
+        if size > max_bytes:
+            truncated = True
+            break
+        chunks.append(line)
+    if truncated:
+        process.kill()
+    try:
+        stderr = process.communicate(timeout=30)[1] or ""
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stderr = ""
+    return _Completed(
+        stdout="".join(chunks),
+        stderr=stderr[:MAX_OUTPUT_BYTES],
+        returncode=process.returncode if process.returncode is not None else -1,
+        truncated=truncated,
+    )
+
+
 def ask(question: str, *, config: Path, workdir: Path, attempts: int = 6) -> AgentRun:
     """Put one question to the agent, retrying only on upstream capacity errors.
 
@@ -184,7 +247,7 @@ def ask(question: str, *, config: Path, workdir: Path, attempts: int = 6) -> Age
 
     last: AgentRun | None = None
     for attempt in range(1, attempts + 1):
-        completed = subprocess.run(
+        completed = _run_bounded(
             [
                 "claude",
                 "-p",
@@ -204,15 +267,17 @@ def ask(question: str, *, config: Path, workdir: Path, attempts: int = 6) -> Age
                 "--verbose",
             ],
             cwd=workdir,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            check=False,
         )
         run = _parse_events(completed.stdout)
         run.question = question
         last = run
+
+        if completed.truncated:
+            run.transport_error = (
+                'the agent trace exceeded the output or time bound and was cut short; '
+                'scoring a partial trace would understate the tool calls'
+            )
+            return run
 
         transient = any(marker in completed.stdout for marker in TRANSIENT_MARKERS)
         if transient and attempt < attempts:
