@@ -695,12 +695,19 @@ Branch: p0c/slice1-state-identity (2026-08-10)
   - Two traps for Slice 2 (inter-process lock):
     (a) noUncheckedIndexedAccess: bracket-indexing a string then concatenating fails restrict-plus-operands
         — use charAt() instead.
-    (b) KNOWN PARKED RACE: a concurrent loser can observe nlink=2 during the winner's link->unlink window
-        and spuriously report an integrity error on a healthy key. This is not a defect; the race exists
-        in the spec. Slice 2 must add bounded revalidation retry when the kernel calls this under the
-        inter-process lock.
+    (b) KNOWN PARKED RACES (Slice 2 bounded retry): concurrent loser observes nlink=2 during winner's
+        link->unlink window and spuriously reports integrity error on healthy key (allowed by spec);
+        concurrent startup cleanup can unlink another live starter's not-yet-linked candidate, whose
+        linkSync/unlinkSync then throws raw path-bearing ENOENT (and the unlinkSync inside catch masks
+        the original error). Slice 2's bounded retry must cover BOTH races by retrying the whole
+        publication attempt, not just revalidation.
   - Gate results:
     - `npm run license:check`: exit 0
-    - `npm run verify`: exit 0 (58 files / 1194 tests, format/lint/typecheck/license all pass)
+    - `npm run verify`: exit 0 (61 files / 1194 tests, format/lint/typecheck/license all pass)
     - `npm run test:conformance`: exit 0 (2025-11-25 and 2026-07-28 profiles, 13/13 each)
     - `git diff --check`: exit 0
+  - Required Slice 2 carry-over: unsafe-ancestor validation (spec 'State root and target identity',
+    directory-discipline paragraph) is not implemented. ensurePrivateDirectory validates canonical path
+    and leaf owner/mode but never walks ancestor ownership/writability. Unreachable in Slice 1 (defaults
+    under $HOME); required decision in Slice 2 (implement the ancestor walk or record an explicit scope
+    ruling).
