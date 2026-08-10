@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { resolveStateRootPath } from '../../src/state/state-root.js';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import {
+  ensurePrivateDirectory,
+  ensureTargetDirectory,
+  openStateRoot,
+  resolveStateRootPath
+} from '../../src/state/state-root.js';
+import { deriveTargetId } from '../../src/state/target-identity.js';
 
 const HOME = '/home/operator';
 
@@ -50,6 +60,90 @@ describe('resolveStateRootPath', () => {
       expect(() => resolveStateRootPath('/abs', environment(platform))).toThrow(
         'Durable state is not supported on this platform'
       );
+    }
+  });
+});
+
+function scratch(): string {
+  // realpathSync: on macOS tmpdir() is /var/..., a symlink to /private/var/..., and the canonical
+  // path check must operate on the canonical form.
+  return mkdtempSync(join(realpathSync(tmpdir()), 'opnsense-state-test-'));
+}
+
+describe('ensurePrivateDirectory / openStateRoot', () => {
+  it('creates missing directories 0700 and accepts them on re-open', () => {
+    const base = scratch();
+    try {
+      const rootPath = join(base, 'state');
+      const root = openStateRoot(rootPath);
+      expect(root.path).toBe(rootPath);
+      expect(root.targetsPath).toBe(join(rootPath, 'targets'));
+      // Idempotent and still valid on a second open.
+      expect(openStateRoot(rootPath).targetsPath).toBe(join(rootPath, 'targets'));
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a pre-existing directory with drifted permissions instead of repairing it', () => {
+    const base = scratch();
+    try {
+      const rootPath = join(base, 'state');
+      mkdirSync(rootPath, { mode: 0o755 });
+      expect(() => openStateRoot(rootPath)).toThrow('State directory failed its integrity checks');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a symlinked root', () => {
+    const base = scratch();
+    try {
+      const real = join(base, 'real');
+      mkdirSync(real, { mode: 0o700 });
+      const alias = join(base, 'alias');
+      symlinkSync(real, alias);
+      expect(() => openStateRoot(alias)).toThrow('State directory failed its integrity checks');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a regular file where a directory is required', () => {
+    const base = scratch();
+    try {
+      const rootPath = join(base, 'state');
+      writeFileSync(rootPath, 'not a directory', { mode: 0o600 });
+      expect(() => {
+        ensurePrivateDirectory(rootPath);
+      }).toThrow('State directory failed its integrity checks');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('ensureTargetDirectory', () => {
+  it('creates targets/<id> with the same discipline and returns its path', () => {
+    const base = scratch();
+    try {
+      const root = openStateRoot(join(base, 'state'));
+      const id = deriveTargetId(randomBytes(32), 'https://a.example:443');
+      const targetPath = ensureTargetDirectory(root, id);
+      expect(targetPath).toBe(join(root.targetsPath, id));
+      expect(ensureTargetDirectory(root, id)).toBe(targetPath);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a malformed id before touching the filesystem', () => {
+    const base = scratch();
+    try {
+      const root = openStateRoot(join(base, 'state'));
+      expect(() => ensureTargetDirectory(root, '../escape')).toThrow('Invalid target id');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
     }
   });
 });
