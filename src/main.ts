@@ -55,7 +55,20 @@ export interface CommandLineDependencies {
   startStdio(): Promise<unknown>;
   runConfigure(arguments_: readonly string[]): Promise<0 | 1>;
   writeError(message: string): void;
+  writeOutput(message: string): void;
 }
+
+// Must match the version in package.json and src/server/build-server.ts.
+const CLI_VERSION = '0.1.0';
+
+const CLI_USAGE = `opnsense-mcp ${CLI_VERSION} — MCP server for OPNsense
+
+Usage:
+  opnsense-mcp              start the MCP server on stdio (what MCP clients run)
+  opnsense-mcp configure    store OPNsense connection settings interactively
+  opnsense-mcp --help       show this help
+  opnsense-mcp --version    print the version
+`;
 
 const DEFAULT_COMMAND_LINE_DEPENDENCIES: CommandLineDependencies = Object.freeze({
   startStdio: runStdioEntrypoint,
@@ -67,6 +80,9 @@ const DEFAULT_COMMAND_LINE_DEPENDENCIES: CommandLineDependencies = Object.freeze
     ),
   writeError: (message: string) => {
     process.stderr.write(message);
+  },
+  writeOutput: (message: string) => {
+    process.stdout.write(message);
   }
 });
 
@@ -79,6 +95,14 @@ export async function runCommandLine(
     return 0;
   }
   if (arguments_[0] === 'configure') return dependencies.runConfigure(arguments_.slice(1));
+  if (arguments_.length === 1 && (arguments_[0] === '--help' || arguments_[0] === '-h')) {
+    dependencies.writeOutput(CLI_USAGE);
+    return 0;
+  }
+  if (arguments_.length === 1 && arguments_[0] === '--version') {
+    dependencies.writeOutput(`${CLI_VERSION}\n`);
+    return 0;
+  }
   dependencies.writeError('Error\n');
   return 1;
 }

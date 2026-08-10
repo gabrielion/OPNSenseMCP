@@ -6,11 +6,13 @@ function dependencies(): CommandLineDependencies & {
   readonly startStdio: ReturnType<typeof vi.fn>;
   readonly runConfigure: ReturnType<typeof vi.fn>;
   readonly writeError: ReturnType<typeof vi.fn>;
+  readonly writeOutput: ReturnType<typeof vi.fn>;
 } {
   const startStdio = vi.fn(() => Promise.resolve());
   const runConfigure = vi.fn(() => Promise.resolve(0 as const));
   const writeError = vi.fn();
-  return { startStdio, runConfigure, writeError };
+  const writeOutput = vi.fn();
+  return { startStdio, runConfigure, writeError, writeOutput };
 }
 
 describe('main command selection', () => {
@@ -32,6 +34,31 @@ describe('main command selection', () => {
     expect(command.startStdio).not.toHaveBeenCalled();
     expect(command.runConfigure).toHaveBeenCalledWith([]);
     expect(command.writeError).not.toHaveBeenCalled();
+  });
+
+  it.each([['--help'], ['-h']])('prints usage for %s without starting anything', async (flag) => {
+    const command = dependencies();
+
+    await expect(runCommandLine([flag], command)).resolves.toBe(0);
+
+    expect(command.startStdio).not.toHaveBeenCalled();
+    expect(command.runConfigure).not.toHaveBeenCalled();
+    expect(command.writeError).not.toHaveBeenCalled();
+    expect(command.writeOutput).toHaveBeenCalledTimes(1);
+    const usage = command.writeOutput.mock.calls[0]?.[0] as string;
+    expect(usage).toContain('configure');
+    expect(usage).toContain('--version');
+  });
+
+  it('prints only the version for --version', async () => {
+    const command = dependencies();
+
+    await expect(runCommandLine(['--version'], command)).resolves.toBe(0);
+
+    expect(command.startStdio).not.toHaveBeenCalled();
+    expect(command.runConfigure).not.toHaveBeenCalled();
+    expect(command.writeError).not.toHaveBeenCalled();
+    expect(command.writeOutput).toHaveBeenCalledWith('0.1.0\n');
   });
 
   it('rejects every non-configure argument without starting stdio', async () => {
