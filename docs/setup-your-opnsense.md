@@ -26,13 +26,15 @@ differ; the menu paths in the text are what to trust if a picture no longer matc
 ## 1. Install the server
 
 ```bash
-npx -y @gabrielion/opnsense-mcp --help
+npx -y @gabrielion/opnsense-mcp --version
 ```
 
-If that reports the package is not found, it has not been published yet — use the clone below, which is
-equivalent in every other respect.
+That downloads the published package on first use and prints its version number. (Releases before
+0.1.1 predate the `--version` flag and print `Error` instead — the download still proves the package
+resolves, but prefer the current release.) Do not run this from inside a clone of this repository:
+there, npx resolves the local package instead of the registry.
 
-Or from a clone, which is also what you want if you intend to modify it:
+Or install from a clone, which is also what you want if you intend to modify it:
 
 ```bash
 git clone https://github.com/gabrielion/OPNSenseMCP.git

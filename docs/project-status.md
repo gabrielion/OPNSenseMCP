@@ -1,12 +1,20 @@
 # OPNSenseMCP Project Status and Session Handoff
 
-- **Snapshot date:** 2026-07-29
-- **Working branch:** `codex/p0b-resume-wip`
-- **Head at handoff:** `562004b` (`docs: record DeepEval current project position and phased sequence`)
+- **Snapshot date:** 2026-08-10
+- **Working branch:** `main` (`codex/p0b-resume-wip` was merged and retired)
+- **Base at snapshot:** `de40788` (`docs: renew Product 3 VM attestation`)
 - **Remote:** `https://github.com/gabrielion/OPNSenseMCP.git`
-- **VM evidence state:** **stale — `npm run evidence:verify` returns 2.** The published attestation covers
-  `3fcb8a3`; two later non-evidence commits (`7ad2684`, `562004b`) invalidate it by design. Renewing it on
-  a machine that can run the disposable VM is the first task below.
+- **npm:** `@gabrielion/opnsense-mcp@0.1.0` has been on the public registry since 2026-07-29
+  (OIDC `release.yml`, no stored credential). 0.1.0 predates the `b848501` services-listing fix and
+  the `--help`/`--version` CLI flags; publishing 0.1.1 is the standing distribution task.
+- **VM evidence state:** coherent at `de40788` (`npm run evidence:verify` returns 0). Any later
+  non-evidence commit makes it stale by design until `npm run vm:product3` renews it.
+- **OpenCode evidence state:** stale — `npm run evidence:check` fails because `README.md` and `src`
+  changed after the last real `npm run smoke:opencode` seal (`3fcb8a3`). A renewal was attempted on
+  2026-08-10 with OpenCode 1.18.16: the packaged server connected (`mcpConnected: true`) but the
+  pinned free model `opencode/north-mini-code-free` hung and the run stayed
+  `model-service-unavailable`, so the sealed fixture was left untouched. CI does not run this gate;
+  renew it when the model service answers again, before any npm publication.
 
 This document is the starting point for a new human or coding-agent session. It describes what is actually
 implemented, what has been proved, what remains incomplete, and the exact next design gate. When a statement
@@ -145,8 +153,12 @@ without changing production source. The public CI run recorded in the ledger was
 
 ### P0-B — truthful public boundary
 
-**State:** implementation complete through the pre-attestation candidate; final evidence coherence is
-determined only by `npm run evidence:verify`.
+**State:** complete and merged to `origin/main`. The 2026-07-30 sessions renewed the Product 3 VM
+attestation (`npm run evidence:verify` returns 0 at `de40788`), published `0.1.0` to npm through the
+OIDC release workflow, moved the pinned image to OPNsense 26.7 with a credential-free serial
+bootstrap, and landed the DeepEval read-surface eval, which found and fixed a real listing defect
+(`b848501`, clamped `rowCount` echo). The remainder of this section is kept as the historical record
+of what P0-B covered.
 
 Completed work includes:
 
@@ -211,8 +223,13 @@ The full design is in
 
 ### DeepEval agentic evaluation
 
-**State:** framework and architecture selected; written specification added; no evaluation code or canonical
-benchmark result exists yet.
+**State:** first vertical implemented. `evals/` carries the read-surface suite — nine goldens,
+offline Level A (`npm run eval:offline`, no VM, no model, no network) and live Level C
+(`npm run eval:read-surface` against the disposable VM), with `claude -p` as the judge and answers
+checked against the live firewall rather than pinned notes. Its first live run caught the clamped
+`rowCount` listing defect. Known deviations from the written specification are recorded in
+`evals/README.md`. Write scenarios (reversible alias lifecycle with deterministic readback, the
+Elicitation hook) are not implemented yet. The decisions below remain the governing contract.
 
 Decisions already made:
 
@@ -376,83 +393,68 @@ Those facts guide the clean-room design; they do not authorize copying implement
 
 ## Immediate next-session objective
 
-The branch was handed off from a workstation with too little RAM to keep running the disposable VM. Work
-resumes on a larger machine. Do these in order and do not reorder them: the attestation is commit-bound, so
-any non-evidence commit made before the producer runs invalidates the run again.
+P0-B is closed: the attestation was renewed on 2026-07-30 and `evidence:verify` returns 0 at
+`de40788`. The 2026-08-10 session verified the published 0.1.0 end to end in a real Claude Code
+session — registered with `claude mcp add` exactly as the README instructs, live reads of
+`system.status` and `core.services` against the disposable VM — then added `--help`/`--version` to
+the CLI and refreshed the public documentation. The remaining ordered work:
 
-### Task 1 — renew the stale Product 3 VM attestation (blocking)
+### Task 1 — publish 0.1.1
 
-`npm run evidence:verify` currently returns `2`. Nothing may be called published or complete until it
-returns `0`.
+`0.1.0` predates the `b848501` listing fix and the CLI flags; a user on 0.1.0 can still hit the
+clamped-`rowCount` failure on large service pages (observed live in the 2026-08-10 session). Bump
+the version everywhere it is pinned (`package.json`, `CLI_VERSION` in `src/main.ts`, the literals in
+`src/server/build-server.ts`, `src/capabilities/foundation/server-status.ts` and
+`src/http/legacy-sse.ts`, plus their tests), run the evidence sequence below, then dispatch the
+`Release` workflow; the operator must approve the `npm-publish` environment.
+
+### Task 2 — evidence renewal sequence for any publishable candidate
+
+The attestation is commit-bound: any non-evidence commit makes it stale again. For every candidate,
+in this order and without reordering:
 
 ```text
-git switch codex/p0b-resume-wip
-git pull --ff-only
 PATH=/opt/homebrew/opt/node@22/bin:$PATH      # or any Node >=22.19 <23
-npm ci --ignore-scripts
-npm run evidence:verify                       # expect 2 before the producer runs
 npm run license:check && npm run verify && npm run test:conformance && git diff --check
+npm run smoke:opencode                        # renews the sealed OpenCode evidence on the final tree
+npm run evidence:check                        # MUST return 0 afterwards
+git add -A && git commit                      # the complete clean candidate
 npm run vm:doctor                             # expect READY
 git status --porcelain=v1 --untracked-files=all   # MUST be empty, the producer refuses otherwise
 npm run vm:product3 -- --attestation-out "$PWD/docs/evidence/product3-vm.json"
-```
-
-The producer no longer prompts for anything. The serial bootstrap now takes the pinned image's own
-unauthenticated single-user shell, stages its helper on the root filesystem and lets a stock
-`rc.syshook.d/start` hook run it at the next multi-user boot; no operator credential exists on any path.
-
-Then commit **only** the evidence file, require `0`, and push:
-
-```text
 git add docs/evidence/product3-vm.json
 git commit -m "docs: renew Product 3 VM attestation"
 npm run evidence:verify                       # MUST return 0
-git push origin codex/p0b-resume-wip
+git push origin main
 ```
 
-If the producer fails, read `failureStage` in its JSON line. It stops the VM and verifies residue on every
-path; never hand-edit, synthesize or bypass the evidence.
+If the producer fails, read `failureStage` in its JSON line. It stops the VM and verifies residue on
+every path; never hand-edit, synthesize or bypass the evidence. CI runs `evidence:verify` but not
+`evidence:check`, so a stale OpenCode seal passes CI silently; adding that gate to CI is a pending
+owner decision.
 
-### Task 2 — RESOLVED: the serial-bootstrap fix is proved by direct measurement
+### Task 3 — choose the next vertical: P0-C or DeepEval writes
 
-`7ad2684` changed the serial-bootstrap deadline so it bounds absence of console progress instead of the
-length of a healthy boot. The originally planned proof — a renewal run with the password typed immediately
-at the prompt — is impossible by construction now that the credential-free bootstrap has removed the
-`login:` path entirely. The fix was instead proved by direct measurement over three boots: maximum console
-silence 11 754 ms against the 30 000 ms progress deadline, `login:` at 95–126 s against the 600 000 ms
-absolute cap, and the old single 30 s window armed at connect missing the prompt by 10.7 s and 3.5 s. See
-`.superpowers/sdd/progress.md`.
+Two candidates, not to be started in parallel in the same worktree — they touch lifecycle, evidence
+and mutation contracts that need a clear ordering or isolated worktrees:
 
-The whole Product 1B lifecycle is green end to end: `npm run test:product1b` returns `status: passed` with
-all eleven checks true and leaves no qemu process and no instance directory.
+- **P0-C — durable and correct first mutation** (the recommended next milestone): write the
+  implementation plan with `superpowers:writing-plans` from the approved design in
+  [`2026-07-25-post-cutover-p0-hardening-design.md`](superpowers/specs/2026-07-25-post-cutover-p0-hardening-design.md),
+  then implement it TDD-first.
+- **DeepEval write scenarios**: extend `evals/` with the reversible alias lifecycle under
+  deterministic MCP readback and the Elicitation-gated confirmation, per the written specification.
+  The read-surface suite and its recorded spec deviations in `evals/README.md` are the starting
+  point.
 
-### Historical note — the superseded password path
-
-Earlier handoffs told the next session to type the OPNsense factory password at a hidden prompt and treated
-a failure at stage `login` as a sign that the root-cause analysis was incomplete. That instruction is
-obsolete: no runner path reads a credential any more, and stage `login` no longer exists. The note is kept
-only so an older transcript can be read; nothing in it should be executed.
-
-### Task 3 — resume the DeepEval vertical
-
-Only after Task 1 returns `0`:
-
-1. review the written DeepEval specification with the owner;
-2. invoke `superpowers:writing-plans` and plan only the first clean-room vertical;
-3. begin with offline failing tests for trace parsing and the success-shaped no-op;
-4. add the Python DeepEval adapter;
-5. prove one installed synthetic-target run;
-6. prove real VM reads;
-7. prove the reversible alias lifecycle with deterministic readback;
-8. review and attest before claiming any benchmark result.
-
-Do not start P0-C and the DeepEval implementation in parallel in the same worktree. They touch lifecycle,
-evidence and mutation contracts that need a clear ordering or isolated worktrees.
+The serial-bootstrap fix (`7ad2684`) and the credential-free bootstrap are proved by direct
+measurement and recorded in `.superpowers/sdd/progress.md`; the superseded password-path
+instructions found in older handoffs must not be executed.
 
 ## Copy/paste prompt for a new session
 
 ```text
-Resume OPNSenseMCP from the public branch codex/p0b-resume-wip.
+Resume OPNSenseMCP from the public branch main.
 
 Start by reading, in full:
 1. AGENTS.md
@@ -464,34 +466,29 @@ Start by reading, in full:
 7. docs/superpowers/plans/2026-07-19-private-provenance-contract-preflight.md
 8. .superpowers/sdd/progress.md
 
-This is a NEW machine: the previous workstation lacked the RAM to run the disposable VM.
 Use Node >=22.19 and <23. On macOS with Homebrew that is PATH=/opt/homebrew/opt/node@22/bin:$PATH;
-elsewhere select an equivalent Node 22 and never validate with the default Node 26.
+elsewhere select an equivalent Node 22 and never validate with the default Node.
 Install with npm ci --ignore-scripts. Never use a production firewall and never expose credentials.
-npm run vm:doctor must report READY: it needs qemu-system-x86_64, qemu-img, curl and bzip2. If the image
-cache is empty this machine will download the pinned OPNsense 26.1.6 nano image (556 MB compressed,
-3 GB raw) on the first VM run; npm run vm:prepare-image does that step alone.
+npm run vm:doctor must report READY: it needs qemu-system-x86_64, qemu-img, curl and bzip2. If the
+image cache is empty the first VM run downloads the pinned OPNsense 26.7 nano image;
+npm run vm:prepare-image does that step alone.
 
 Before changing anything, report:
 - current branch, HEAD, upstream and worktree status;
-- npm run evidence:verify exit status;
+- npm run evidence:verify AND npm run evidence:check exit statuses (CI only runs the first);
 - which P0 increment is actually complete;
-- whether the written DeepEval specification has owner approval;
 - the exact provenance status of tests/agentic/**.
 
-The FIRST task is not DeepEval. evidence:verify returns 2: the published Product 3 attestation covers
-3fcb8a3 and two later non-evidence commits (7ad2684, 562004b) made it stale. Renew it exactly as
-"Immediate next-session objective / Task 1" describes: clean worktree, run npm run vm:product3 with the
-password typed at the hidden prompt, commit only docs/evidence/product3-vm.json, require evidence:verify 0,
-then push. That same run is the live proof of the serial-bootstrap fix in 7ad2684, which deterministic
-tests cover but no real VM run has yet confirmed.
+The standing distribution task is publishing 0.1.1: npm 0.1.0 predates the b848501 listing fix and
+the --help/--version CLI flags. Follow "Immediate next-session objective / Task 1", using the Task 2
+evidence renewal sequence for the candidate: gates, real smoke:opencode, evidence:check 0, commit the
+candidate, real vm:product3, commit only docs/evidence/product3-vm.json, evidence:verify 0, push.
 
-Only after that, the intended work is the clean-room DeepEval 4.1.4 evaluation vertical described in the
-spec: Claude Code host -> installed OPNSenseMCP -> disposable OPNsense VM -> MCP readback -> deterministic
-state-transition gate plus DeepEval metrics. A successful tool result without a changed VM must fail.
+After that, choose ONE of P0-C (durable mutation, recommended) or the DeepEval write scenarios —
+never both in the same worktree. A successful tool result without a changed VM must fail.
 
-Do not restore legacy tests/agentic files, execute superseded plans, start implementation before written-spec
-approval, or claim a VM/agentic result without running its real producer and cleanup.
+Do not restore legacy tests/agentic files, execute superseded plans, start implementation before
+written-spec approval, or claim a VM/agentic result without running its real producer and cleanup.
 ```
 
 ## Handoff verification
@@ -499,11 +496,12 @@ approval, or claim a VM/agentic result without running its real producer and cle
 On the other machine, after fetching the branch:
 
 ```text
-git switch codex/p0b-resume-wip
+git switch main
 git pull --ff-only
 git status --short --branch
 npm ci --ignore-scripts
 npm run evidence:verify
+npm run evidence:check
 ```
 
 The last command is intentionally early: it distinguishes a coherent published VM attestation from a branch

@@ -549,9 +549,10 @@ describe('product documentation', () => {
     ]) {
       expect(readme).toContain(`\`${privilege}\``);
     }
-    // The package is private: it cannot be installed from a registry today, and the README must not
-    // imply otherwise.
-    expect(readme).toContain('not published');
+    // The package is on the public registry since 0.1.0; the README must say so and must not keep
+    // the pre-publication claim.
+    expect(prose).toContain('published on npm as');
+    expect(prose).not.toContain('not published');
     expect(readme).toContain('stdio');
   });
 

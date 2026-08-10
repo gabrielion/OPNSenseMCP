@@ -49,7 +49,7 @@ nothing is passed as a process argument. Need to create that key first? The
 <summary><b>Claude Code</b></summary>
 
 ```bash
-claude mcp add --env READ_ONLY=true --transport stdio opnsense -- npx -y @gabrielion/opnsense-mcp
+claude mcp add opnsense --transport stdio --env READ_ONLY=true -- npx -y @gabrielion/opnsense-mcp
 ```
 
 </details>
@@ -369,12 +369,12 @@ Later guided workflows are deliberately user-level goals, for example:
 Those three workflows are roadmap examples, not Product 1A claims. Internet-facing publication with public
 DNS, Let's Encrypt, and HAProxy is a longer-term lab milestone after safe writes and private-VM coverage.
 
-**Distribution status:** this package is prepared for npm as `@gabrielion/opnsense-mcp`, with public
-access, registry metadata, and a `prepare` script so that a git-URL install builds its own `dist/`.
-Publication is a maintainer action and is **not published** until `npm publish` has run; until then,
-install from a clone. The packaged proofs install a locally built tarball served by a lock-derived
-loopback registry either way, so what they exercise is this tree rather than any registry copy. No
-versioning or upgrade guarantee is offered yet.
+**Distribution status:** published on npm as
+[`@gabrielion/opnsense-mcp`](https://www.npmjs.com/package/@gabrielion/opnsense-mcp), so
+`npx -y @gabrielion/opnsense-mcp` runs the released server; a git-URL install still builds its own
+`dist/` through the `prepare` script. The packaged proofs install a locally built tarball served by a
+lock-derived loopback registry either way, so what they exercise is this tree rather than any registry
+copy. No versioning or upgrade guarantee is offered yet.
 
 **Platform status:** macOS and Linux are the currently verified development hosts. Native Windows remains a required product target, but package and client support are not claimed until the later `windows-2025` gate passes.
 
