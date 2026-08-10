@@ -15,7 +15,7 @@ import {
 } from './testing/private-fixture-root.mjs';
 import { prepareInstalledPackage } from './testing/prepare-installed-package.mjs';
 
-const MODEL = 'opencode/north-mini-code-free';
+const MODEL = 'opencode/deepseek-v4-flash-free';
 const EVIDENCE_PATH = 'tests/fixtures/opencode.product1a.json';
 export const OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024;
 const GROUP_EXIT_DEADLINE_MS = 5_000;

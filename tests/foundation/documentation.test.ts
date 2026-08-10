@@ -202,15 +202,15 @@ describe('product documentation', () => {
     expect(readme).toContain('POST /api/core/service/search');
     for (const nonClaim of ['public DNS, ACME, or HAProxy', 'Windows', 'agentic benchmark'])
       expect(readme).toContain(nonClaim);
-    expect(readme).toContain('OpenCode 1.18.3');
-    expect(readme).toContain('opencode/north-mini-code-free');
+    expect(readme).toContain('OpenCode 1.18.16');
+    expect(readme).toContain('opencode/deepseek-v4-flash-free');
     expect(readme).toContain('AGPL-3.0-or-later');
     expect(readme).toContain('not affiliated with, sponsored by, or endorsed by');
     expect(readme).not.toContain('Foundation development snapshot');
     expect(JSON.parse(evidence)).toMatchObject({
       status: 'passed',
-      client: { name: 'OpenCode', version: '1.18.3' },
-      model: 'opencode/north-mini-code-free',
+      client: { name: 'OpenCode', version: '1.18.16' },
+      model: 'opencode/deepseek-v4-flash-free',
       checks: { cleanupConfirmed: true, secretAbsent: true }
     });
     expect(JSON.parse(liveEvidence)).toMatchObject({

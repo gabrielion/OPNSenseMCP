@@ -304,7 +304,7 @@ Add a project-level `opencode.json` (replace both absolute paths):
 ```
 
 Then run `opencode mcp list`; `opnsense` should be connected. The committed smoke evidence covers only
-OpenCode 1.18.3 with `opencode/north-mini-code-free` against the installed tarball and synthetic HTTPS
+OpenCode 1.18.16 with `opencode/deepseek-v4-flash-free` against the installed tarball and synthetic HTTPS
 target. It records tool/result digests, not firewall data or credentials. See the
 [machine-readable evidence](tests/fixtures/opencode.product1a.json).
 
@@ -326,7 +326,7 @@ own versioned smoke passes.
   every dependency from a lock-derived loopback-only npm registry, with an empty cache and unreachable
   proxies, so no Internet access is involved and no upstream release can change what is installed.
 - Targeted MCP interoperability checks for protocol versions `2025-11-25` and draft `2026-07-28`.
-- One real OpenCode 1.18.3 routing smoke using `opencode/north-mini-code-free`.
+- One real OpenCode 1.18.16 routing smoke using `opencode/deepseek-v4-flash-free`.
 
 The complete development state and machine-to-machine handoff are recorded in
 [`docs/project-status.md`](docs/project-status.md). The planned canonical agent evaluation is specified in

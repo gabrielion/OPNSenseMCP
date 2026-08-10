@@ -9,12 +9,13 @@
   the `--help`/`--version` CLI flags; publishing 0.1.1 is the standing distribution task.
 - **VM evidence state:** coherent at `de40788` (`npm run evidence:verify` returns 0). Any later
   non-evidence commit makes it stale by design until `npm run vm:product3` renews it.
-- **OpenCode evidence state:** stale — `npm run evidence:check` fails because `README.md` and `src`
-  changed after the last real `npm run smoke:opencode` seal (`3fcb8a3`). A renewal was attempted on
-  2026-08-10 with OpenCode 1.18.16: the packaged server connected (`mcpConnected: true`) but the
-  pinned free model `opencode/north-mini-code-free` hung and the run stayed
-  `model-service-unavailable`, so the sealed fixture was left untouched. CI does not run this gate;
-  renew it when the model service answers again, before any npm publication.
+- **OpenCode evidence state:** coherent — renewed on 2026-08-10 by the real `npm run smoke:opencode`
+  (OpenCode 1.18.16 standalone at `~/.opencode/bin/opencode`, the path the script expects). The
+  smoke model was repinned from `opencode/north-mini-code-free`, which had become unavailable
+  upstream (401, then silent hangs, while `opencode models` still listed it), to
+  `opencode/deepseek-v4-flash-free`. Remember: `evidence:check` goes stale whenever `README.md`,
+  `LICENSE` or `dist` content changes, and CI does not run this gate — check it locally before any
+  npm publication.
 
 This document is the starting point for a new human or coding-agent session. It describes what is actually
 implemented, what has been proved, what remains incomplete, and the exact next design gate. When a statement

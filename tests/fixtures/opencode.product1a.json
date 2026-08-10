@@ -1,23 +1,23 @@
 {
   "schemaVersion": 2,
   "status": "passed",
-  "claim": "This evidence covers only OpenCode 1.18.3 with opencode/north-mini-code-free selecting the three Product 1A reads from the installed package against a synthetic HTTPS OPNsense target.",
+  "claim": "This evidence covers only OpenCode 1.18.16 with opencode/deepseek-v4-flash-free selecting the three Product 1A reads from the installed package against a synthetic HTTPS OPNsense target.",
   "client": {
     "name": "OpenCode",
-    "version": "1.18.3"
+    "version": "1.18.16"
   },
-  "model": "opencode/north-mini-code-free",
+  "model": "opencode/deepseek-v4-flash-free",
   "package": {
     "name": "@gabrielion/opnsense-mcp",
     "version": "0.1.0",
-    "sha256": "d68d355cfdb90036aae7dbb4db9a7ac451848a7c4d75579b84e73ec9ca16c438",
-    "tarSha256": "339dcafa576979934d25c49bd7ca7f8b211f2986c47d9a15a696558bea4dff60"
+    "sha256": "2f809718bb5907c672f15db6e439f14d1fb810b1869a699295cd0fe244c4e3e8",
+    "tarSha256": "7ee6bb0692b899adaef757a5f4141168005cccb9a5163070db9c90942070f7d8"
   },
   "tools": [
     {
       "name": "opn_describe",
-      "inputSha256": "f477e012f80fd57540559de68602c5b2900c3c745aacac1dddc8f0504acae421",
-      "resultSha256": "35d153a52fbe67d18bb7f115cf333f75b426a7f958b0695bf800e5a19a5e2c5b"
+      "inputSha256": "d91c301e703349bfe7de35983fba180bbde21a6fdf347d62c324618acf274cb1",
+      "resultSha256": "cd7238a87865856d5d03d7b96c29b17b9cdebda79523c59fbbe6de5d4d89a06b"
     },
     {
       "name": "opn_get",
