@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   chmodSync,
+  linkSync,
   lstatSync,
   mkdtempSync,
   readFileSync,
@@ -70,6 +71,60 @@ describe('ensureIdentityKey', () => {
       const root = openStateRoot(rootPath);
       corrupt(join(rootPath, 'identity.key'));
       expect(() => ensureIdentityKey(root)).toThrow('Identity key failed its integrity checks');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('ensureIdentityKey recovery', () => {
+  it('recovers a crash between link and cleanup: candidate shares the key inode', () => {
+    const { base, rootPath } = scratchRoot();
+    try {
+      const root = openStateRoot(rootPath);
+      const key = Buffer.from(ensureIdentityKey(root));
+      // Simulate the crash: re-create a candidate hard link to the published key (nlink becomes 2).
+      const candidate = join(rootPath, `identity.key.candidate-${'a'.repeat(16)}`);
+      linkSync(join(rootPath, 'identity.key'), candidate);
+      expect(lstatSync(join(rootPath, 'identity.key')).nlink).toBe(2);
+
+      const reread = Buffer.from(ensureIdentityKey(root));
+      expect(reread.equals(key)).toBe(true);
+      expect(lstatSync(join(rootPath, 'identity.key')).nlink).toBe(1);
+      expect(readdirSync(rootPath).filter((name) => name.includes('candidate'))).toEqual([]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('removes an unpublished candidate left by a dead process', () => {
+    const { base, rootPath } = scratchRoot();
+    try {
+      const root = openStateRoot(rootPath);
+      const orphan = join(rootPath, `identity.key.candidate-${'b'.repeat(16)}`);
+      writeFileSync(orphan, Buffer.alloc(32), { mode: 0o600 });
+
+      const key = ensureIdentityKey(root);
+      expect(key).toHaveLength(32);
+      expect(readdirSync(rootPath).filter((name) => name.includes('candidate'))).toEqual([]);
+      // The orphan's bytes were all zero; the published key must not be that orphan.
+      expect(Buffer.from(key).equals(Buffer.alloc(32))).toBe(false);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('a loser rereads the winner: with a published key, a fresh call changes nothing', () => {
+    const { base, rootPath } = scratchRoot();
+    try {
+      const root = openStateRoot(rootPath);
+      const winner = Buffer.from(ensureIdentityKey(root));
+      const statsBefore = lstatSync(join(rootPath, 'identity.key'));
+      const loser = Buffer.from(ensureIdentityKey(root));
+      const statsAfter = lstatSync(join(rootPath, 'identity.key'));
+      expect(loser.equals(winner)).toBe(true);
+      expect(statsAfter.ino).toBe(statsBefore.ino);
+      expect(statsAfter.mtimeMs).toBe(statsBefore.mtimeMs);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
