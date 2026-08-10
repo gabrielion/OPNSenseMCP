@@ -672,3 +672,35 @@ Product 1B live proof fully green (2026-07-29).
     servicesPage, vmStopped, residueFree — and exited within 40 s of the VM stopping, leaving no qemu
     process and no instance directory. This is the first run to prove the credential-free bootstrap and the
     hermetic install together against a real disposable VM.
+
+=== P0-C SLICE 1 (durable state root + target identity) — COMPLETE ===
+Branch: p0c/slice1-state-identity (2026-08-10)
+  - New module src/state/ with three implementations (target-identity.ts, state-root.ts, identity-key.ts)
+    and one barrel export (index.ts); tests/state/ provides 40 conformance tests covering all paths.
+  - Invariants proved:
+    - Canonical origin (https scheme only, lower-cased host, explicit default port 443 or explicit non-default,
+      no credentials/path/query/fragment, static error strings).
+    - Target identity: lowercase unpadded base32 of HMAC-SHA-256(identity.key, canonicalOrigin), exactly
+      52 characters, cryptographically underivable without possession of the 32-byte key.
+    - State root resolution: absolute override respected on darwin and linux (XDG_STATE_HOME or ~/.local/state
+      default on linux, Application Support on darwin), win32 and unknown platforms fail closed even with
+      override.
+    - Directory discipline: 0700 mode on state root and targets/<id>, 0600 on identity.key, canonical
+      absolute paths enforced, O_NOFOLLOW option used for all operations, directory drift rejected and
+      never automatically repaired.
+    - Identity key publication: exclusive winner via link->unlink protocol with exactly one survivor,
+      losers reread the published key, fsync before publish and fsync parent of published key, crash
+      residue (candidate files) swept at startup, existing key never overwritten, validated owner/0600/nlink1/
+      32-bytes on every opening.
+  - Two traps for Slice 2 (inter-process lock):
+    (a) noUncheckedIndexedAccess: bracket-indexing a string then concatenating fails restrict-plus-operands
+        — use charAt() instead.
+    (b) KNOWN PARKED RACE: a concurrent loser can observe nlink=2 during the winner's link->unlink window
+        and spuriously report an integrity error on a healthy key. This is not a defect; the race exists
+        in the spec. Slice 2 must add bounded revalidation retry when the kernel calls this under the
+        inter-process lock.
+  - Gate results:
+    - `npm run license:check`: exit 0
+    - `npm run verify`: exit 0 (58 files / 1194 tests, format/lint/typecheck/license all pass)
+    - `npm run test:conformance`: exit 0 (2025-11-25 and 2026-07-28 profiles, 13/13 each)
+    - `git diff --check`: exit 0
