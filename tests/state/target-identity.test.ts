@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { randomBytes } from 'node:crypto';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { canonicalizeOrigin } from '../../src/state/target-identity.js';
+import {
+  base32LowerNoPadding,
+  canonicalizeOrigin,
+  deriveTargetId,
+  targetDirectoryPath
+} from '../../src/state/target-identity.js';
 
 describe('canonicalizeOrigin', () => {
   it('lower-cases the host and makes the default port explicit', () => {
@@ -30,5 +37,63 @@ describe('canonicalizeOrigin', () => {
     ['', 'empty input']
   ])('rejects %s (%s)', (input) => {
     expect(() => canonicalizeOrigin(input)).toThrow('Invalid OPNsense origin');
+  });
+});
+
+describe('base32LowerNoPadding', () => {
+  // RFC 4648 section 10 test vectors, lower-cased, padding stripped.
+  it.each([
+    ['f', 'my'],
+    ['fo', 'mzxq'],
+    ['foo', 'mzxw6'],
+    ['foob', 'mzxw6yq'],
+    ['fooba', 'mzxw6ytb'],
+    ['foobar', 'mzxw6ytboi']
+  ])('encodes %s as %s', (input, expected) => {
+    expect(base32LowerNoPadding(Buffer.from(input, 'ascii'))).toBe(expected);
+  });
+});
+
+describe('deriveTargetId', () => {
+  const key = randomBytes(32);
+  const origin = 'https://firewall.example.net:443';
+
+  it('is deterministic, 52 chars of lower-case base32', () => {
+    const id = deriveTargetId(key, origin);
+    expect(id).toMatch(/^[a-z2-7]{52}$/u);
+    expect(deriveTargetId(key, origin)).toBe(id);
+  });
+
+  it('changes with the origin but not with anything else', () => {
+    expect(deriveTargetId(key, 'https://firewall.example.net:8443')).not.toBe(
+      deriveTargetId(key, origin)
+    );
+  });
+
+  it('changes with the identity key, so ids are not enumerable from origins', () => {
+    expect(deriveTargetId(randomBytes(32), origin)).not.toBe(deriveTargetId(key, origin));
+  });
+
+  it('rejects a wrong-size key and a non-canonical origin', () => {
+    expect(() => deriveTargetId(randomBytes(31), origin)).toThrow('Invalid identity key');
+    expect(() => deriveTargetId(key, 'https://Firewall.example.net:443')).toThrow(
+      'Invalid OPNsense origin'
+    );
+    expect(() => deriveTargetId(key, 'https://firewall.example.net')).toThrow(
+      'Invalid OPNsense origin'
+    );
+  });
+});
+
+describe('targetDirectoryPath', () => {
+  it('lays out targets/<id> under the state root', () => {
+    const id = deriveTargetId(randomBytes(32), 'https://a.example:443');
+    expect(targetDirectoryPath('/private/state', id)).toBe(join('/private/state', 'targets', id));
+  });
+
+  it('rejects anything that is not a derived id', () => {
+    for (const bad of ['', 'UPPER', 'short', '../escape', 'a'.repeat(52).replace('a', '/')]) {
+      expect(() => targetDirectoryPath('/private/state', bad)).toThrow('Invalid target id');
+    }
   });
 });
