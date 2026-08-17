@@ -712,16 +712,20 @@ describe('commit-bound VM attestation verifier', () => {
   });
 
   it('makes commit-bound VM evidence verification mandatory in CI and the release gate', async () => {
-    const [workflow, contributing] = await Promise.all([
+    const [workflow, release, contributing] = await Promise.all([
       readFile('.github/workflows/ci.yml', 'utf8'),
+      readFile('.github/workflows/release.yml', 'utf8'),
       readFile('CONTRIBUTING.md', 'utf8')
     ]);
 
     expect(workflow).toMatch(/- run: npm run verify\s+- run: npm run evidence:verify/u);
-    // The sealed-package gate owns an independent job, so that a stale seal reddens only itself
-    // instead of failing `verify` and skipping the `protocol` job that needs it. This pin is
-    // therefore deliberately location-agnostic: it must survive the gate moving between jobs.
-    expect(workflow).toMatch(/- run: npm run evidence:check/u);
+    // Both paths must run the sealed-package gate. In CI it owns an independent job, so a stale
+    // seal reddens only itself instead of failing `verify` and skipping the `protocol` job that
+    // needs it; on the release path it runs inline, because a release follows a reseal and the
+    // gate is expected green there. Each pin matches a whole line: location-agnostic, so the gate
+    // may move between jobs, yet comment-proof, so a commented-out step cannot satisfy it.
+    expect(workflow).toMatch(/^[ \t]*- run: npm run evidence:check[ \t]*$/mu);
+    expect(release).toMatch(/^[ \t]*- run: npm run evidence:check[ \t]*$/mu);
     expect(contributing.replace(/\s+/gu, ' ')).toContain(
       'npm run evidence:check && npm run evidence:verify'
     );

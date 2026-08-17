@@ -72,6 +72,10 @@ jobs:
       # A release therefore requires a fresh VM attestation. That is deliberate: the package
       # should not ship while its own evidence is stale.
       - run: npm run evidence:verify
+      # The same rule for the sealed OpenCode evidence. CI keeps this gate in a job of its own, so
+      # an ordinary commit that changes the packaged content reddens only that job; here it runs
+      # inline, because a release follows the reseal and must not ship past a stale seal.
+      - run: npm run evidence:check
 
   protocol:
     if: github.repository == 'gabrielion/OPNSenseMCP'

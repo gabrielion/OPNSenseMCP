@@ -70,7 +70,9 @@ describe('foundation CI workflow', () => {
     // masked by an upstream failure nor skip the conformance profiles downstream.
     expect(workflow.match(/^[ \t]*needs:/gmu)).toHaveLength(1);
     expect(lines).toContain('timeout-minutes: 10');
-    expect(lines).toContain('timeout-minutes: 20');
+    // Counted, not merely present: `verify` and `evidence-freshness` both bound at 20, so a
+    // membership check would stop proving that every job carries its own bound.
+    expect(count('timeout-minutes: 20')).toBe(2);
     expect(lines).toContain('timeout-minutes: 15');
     expect(count('test ! -e results')).toBe(4);
     expect(count('test -z "$(git status --porcelain=v1 --untracked-files=all)"')).toBe(4);
