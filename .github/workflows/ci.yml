@@ -50,7 +50,6 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm run verify
       - run: npm run evidence:verify
-      - run: npm run evidence:check
       - name: Assert no generated or repository residue
         run: |
           git diff --check
@@ -71,6 +70,31 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm run test:conformance
+      - name: Assert no generated or repository residue
+        run: |
+          git diff --check
+          test ! -e results
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+  # Deliberately independent: no `needs:`, and nothing needs it. The sealed OpenCode evidence goes
+  # stale whenever the packaged content changes, and only its real producer (`npm run smoke:opencode`,
+  # which needs an external client and a model) can re-seal it. Hanging this gate off `verify` would
+  # make every such change fail `verify` and therefore SKIP `protocol`, costing the repository both
+  # conformance profiles for the whole window until the reseal. Here a stale seal reddens this job
+  # alone and every other signal survives.
+  evidence-freshness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.1 # current patched Node 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run evidence:check
       - name: Assert no generated or repository residue
         run: |
           git diff --check

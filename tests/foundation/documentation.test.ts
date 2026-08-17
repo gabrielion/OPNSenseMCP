@@ -718,6 +718,10 @@ describe('commit-bound VM attestation verifier', () => {
     ]);
 
     expect(workflow).toMatch(/- run: npm run verify\s+- run: npm run evidence:verify/u);
+    // The sealed-package gate owns an independent job, so that a stale seal reddens only itself
+    // instead of failing `verify` and skipping the `protocol` job that needs it. This pin is
+    // therefore deliberately location-agnostic: it must survive the gate moving between jobs.
+    expect(workflow).toMatch(/- run: npm run evidence:check/u);
     expect(contributing.replace(/\s+/gu, ' ')).toContain(
       'npm run evidence:check && npm run evidence:verify'
     );
