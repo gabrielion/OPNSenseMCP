@@ -1,12 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import {
   ensurePrivateDirectory,
   ensureTargetDirectory,
+  openResolvedStateRoot,
   openStateRoot,
   resolveStateRootPath
 } from '../../src/state/state-root.js';
@@ -30,7 +39,7 @@ describe('resolveStateRootPath', () => {
 
   it('rejects a relative override', () => {
     expect(() => resolveStateRootPath('relative/state', environment('linux'))).toThrow(
-      'OPNSENSE_MCP_STATE_DIR must be an absolute path'
+      'OPNSENSE_MCP_STATE_DIR must be a normalized absolute path'
     );
   });
 
@@ -121,6 +130,36 @@ describe('ensurePrivateDirectory / openStateRoot', () => {
       rmSync(base, { recursive: true, force: true });
     }
   });
+});
+
+describe('openResolvedStateRoot', () => {
+  it('accepts an override whose realpath differs (macOS /var vs /private/var) and returns the canonical root', () => {
+    // tmpdir() without realpathSync IS the non-canonical spelling on macOS; on Linux the two are
+    // equal and the test still passes.
+    const base = mkdtempSync(join(tmpdir(), 'opnsense-state-canon-'));
+    try {
+      const override = join(base, 'state');
+      const root = openResolvedStateRoot(override, {
+        platform: process.platform,
+        env: {},
+        homeDir: '/home/unused'
+      });
+      expect(root.path).toBe(realpathSync(override));
+      expect(lstatSync(root.path).mode & 0o777).toBe(0o700);
+      expect(openStateRoot(root.path).path).toBe(root.path);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it.each([['/tmp/state/'], ['/tmp//state'], ['/tmp/a/../state'], ['relative/state']])(
+    'rejects the non-normalized or relative override %s',
+    (override) => {
+      expect(() =>
+        openResolvedStateRoot(override, { platform: 'linux', env: {}, homeDir: '/home/x' })
+      ).toThrow('OPNSENSE_MCP_STATE_DIR must be a normalized absolute path');
+    }
+  );
 });
 
 describe('ensureTargetDirectory', () => {

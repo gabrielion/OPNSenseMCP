@@ -8,6 +8,7 @@ export {
 export {
   ensurePrivateDirectory,
   ensureTargetDirectory,
+  openResolvedStateRoot,
   openStateRoot,
   resolveStateRootPath
 } from './state-root.js';
