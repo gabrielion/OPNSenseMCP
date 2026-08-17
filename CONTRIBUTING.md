@@ -130,8 +130,12 @@ touching anything in the first list therefore shows the `evidence-freshness` job
 re-seals with the real producer, `npm run smoke:opencode`, which needs the OpenCode client and a model;
 that reseal cannot happen in CI. The second check requires the commit-bound Product 3 VM attestation to
 remain coherent with the release history. The VM verifier accepts either the exact pre-evidence commit
-and tree or one later commit whose sole change is `docs/evidence/product3-vm.json`. Never hand-edit
-either evidence document; renew each one only with its real producer.
+and tree or one later commit whose sole change is `docs/evidence/product3-vm.json`. Expect that second
+check to exit `2` on a contributor pull request — a docs-only change included — because any commit that
+is neither the attested one nor a sole-evidence successor makes the attestation stale; it runs inside
+CI's `verify` job, so the `protocol` job that needs `verify` is skipped with it, and only a maintainer's
+real `npm run vm:product3` heals it. Never hand-edit either evidence document; renew each one only with
+its real producer.
 
 ## Publishing a release
 

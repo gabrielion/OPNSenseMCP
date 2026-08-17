@@ -407,7 +407,7 @@ Those facts guide the clean-room design; they do not authorize copying implement
 - Do not use a fake OpenAI key to make an import or deterministic metric appear configured.
 - `tests/state/identity-key-race.test.ts` spawns real child processes that import a **compiled** build,
   passed to them as an argument. Its `beforeAll` compiles `src` into a private scratch directory — never
-  `dist/`, which five sibling tests in the same `parallel` project read or execute. A hand-run that points
+  `dist/`, which three sibling tests in the same `parallel` project read or execute. A hand-run that points
   the children at `dist/` instead exercises whatever was last built there, so a stale `dist/` can make a
   fixed race look broken or a broken one look fixed.
 - That race test runs 12 starters across 4 fresh rounds plus a residue pass. If it ever flakes, suspect the
@@ -517,7 +517,10 @@ suggestions:
   `package.json` or add a drift assertion.
 - **`config-backup.ts` cleanup.** Its comment still refers to the module Slice 1.1 deleted, and the
   repository's now-sole backup discipline has three unguarded legs — `nlink === 1`, checksum
-  mismatch and truncation — worth roughly a 15-line test addition.
+  mismatch and truncation — worth roughly a 15-line test addition. A second stale comment sits above
+  `openResolvedStateRoot` in `src/state/state-root.ts`: it says the canonicalizing entry "widens the
+  accepted spelling, not the accepted directory", which the fail-open ancestor delta falsifies. That
+  file is packed, so correcting it moves the tarball digest; it rides to Slice 2 under the same rule.
 
 The two concurrent-first-start races that Slice 1 parked are **closed** by Slice 1.1 (ENOENT-tolerant
 sweep, bounded retry, and a real multi-process race test) and are no longer carried.
