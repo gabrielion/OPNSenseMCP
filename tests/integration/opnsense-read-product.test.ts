@@ -60,7 +60,7 @@ describe.each(MCP_ERAS)('$label Product 1A secure read composition', ({ connect 
       await expect(
         connection.client.callTool({ name: 'server_status', arguments: {} })
       ).resolves.toMatchObject({
-        structuredContent: { status: 'ok', readOnly: true, version: '0.1.0' }
+        structuredContent: { status: 'ok', readOnly: true, version: '0.1.1' }
       });
       await expect(
         connection.client.callTool({

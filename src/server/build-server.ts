@@ -16,7 +16,7 @@ export function buildServer(application: ApplicationContext, transport: Transpor
     (context) => `${context.mcpReq.method}\0${principalForRequest(transport, context)}`
   );
   const server = new McpServer(
-    { name: 'opnsense-mcp', version: '0.1.0' },
+    { name: 'opnsense-mcp', version: '0.1.1' },
     {
       instructions: SERVER_INSTRUCTIONS,
       inputRequired: { legacyShim: true, maxRounds: 4, roundTimeoutMs: 120_000 },

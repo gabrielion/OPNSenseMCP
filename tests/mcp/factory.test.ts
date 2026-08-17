@@ -33,7 +33,7 @@ describe.each(MCP_ERAS)('$label MCP server factory', ({ connect }) => {
     try {
       expect(connection.client.getServerVersion()).toEqual({
         name: 'opnsense-mcp',
-        version: '0.1.0'
+        version: '0.1.1'
       });
       expect(connection.client.getInstructions()).toBe(SERVER_INSTRUCTIONS);
     } finally {
@@ -72,7 +72,7 @@ describe.each(MCP_ERAS)('$label MCP server factory', ({ connect }) => {
     try {
       const result = await connection.client.callTool({ name: 'server_status', arguments: {} });
       expect(result.isError).not.toBe(true);
-      expect(result.structuredContent).toEqual({ status: 'ok', readOnly: true, version: '0.1.0' });
+      expect(result.structuredContent).toEqual({ status: 'ok', readOnly: true, version: '0.1.1' });
       expect(result.content).toEqual([
         { type: 'text', text: JSON.stringify(result.structuredContent) }
       ]);

@@ -589,7 +589,7 @@ describe('real foundation product preflight', () => {
 
   const success = Object.freeze({
     kind: 'success',
-    output: { status: 'ok', readOnly: true, version: '0.1.0' }
+    output: { status: 'ok', readOnly: true, version: '0.1.1' }
   });
 
   function acceptInvalidSchemaInput(predicate) {
@@ -714,11 +714,11 @@ describe('real foundation product preflight', () => {
     ['confirmation', () => ({ kind: 'confirmation', confirmation: {} })],
     [
       'wrong status',
-      () => ({ kind: 'success', output: { status: 'changed', readOnly: true, version: '0.1.0' } })
+      () => ({ kind: 'success', output: { status: 'changed', readOnly: true, version: '0.1.1' } })
     ],
     [
       'wrong readOnly',
-      () => ({ kind: 'success', output: { status: 'ok', readOnly: false, version: '0.1.0' } })
+      () => ({ kind: 'success', output: { status: 'ok', readOnly: false, version: '0.1.1' } })
     ],
     [
       'wrong version',
@@ -728,7 +728,7 @@ describe('real foundation product preflight', () => {
       'extra output field',
       () => ({
         kind: 'success',
-        output: { status: 'ok', readOnly: true, version: '0.1.0', poison: true }
+        output: { status: 'ok', readOnly: true, version: '0.1.1', poison: true }
       })
     ],
     [

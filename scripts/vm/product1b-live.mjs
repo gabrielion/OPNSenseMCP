@@ -347,7 +347,7 @@ export function inspectReadResult(result) {
       exactKeys(status, ['status', 'readOnly', 'version']) &&
       status.status === 'ok' &&
       status.readOnly === true &&
-      status.version === '0.1.0';
+      status.version === '0.1.1';
   }
 
   const descriptionResponse = result.resourceDescription;

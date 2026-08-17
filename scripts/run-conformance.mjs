@@ -261,7 +261,7 @@ export async function assertConformanceProductContract(application, overrides = 
       result.kind !== 'success' ||
       result.output.status !== 'ok' ||
       result.output.readOnly !== true ||
-      result.output.version !== '0.1.0' ||
+      result.output.version !== '0.1.1' ||
       Object.keys(result.output).sort().join(',') !== 'readOnly,status,version'
     ) {
       throw conformanceProductContractError();

@@ -207,7 +207,7 @@ function buildLegacySseServer(
 ): LegacyServer {
   const byName = new Map(prepared.map((entry) => [entry.definition.mcpName, entry] as const));
   const server = new LegacyServer(
-    { name: 'opnsense-mcp', version: '0.1.0' },
+    { name: 'opnsense-mcp', version: '0.1.1' },
     { instructions: SERVER_INSTRUCTIONS }
   );
   server.onerror = onerror;

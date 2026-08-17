@@ -12,7 +12,7 @@ export const serverStatusCapability = defineCapability({
     .object({
       status: z.literal('ok'),
       readOnly: z.boolean(),
-      version: z.literal('0.1.0')
+      version: z.literal('0.1.1')
     })
     .strict(),
   annotations: {
@@ -36,6 +36,6 @@ export const serverStatusCapability = defineCapability({
     Promise.resolve({
       status: 'ok' as const,
       readOnly: context.readOnly,
-      version: '0.1.0' as const
+      version: '0.1.1' as const
     })
 });

@@ -87,7 +87,7 @@ function refusalToolResult(code) {
 function successfulReadResult() {
   return {
     tools: listToolsResult(),
-    serverStatus: toolResult({ status: 'ok', readOnly: true, version: '0.1.0' }),
+    serverStatus: toolResult({ status: 'ok', readOnly: true, version: '0.1.1' }),
     resourceDescription: toolResult(systemStatusDescription()),
     systemStatus: toolResult({ item: { status: 'ok' } }),
     servicesPage: toolResult({

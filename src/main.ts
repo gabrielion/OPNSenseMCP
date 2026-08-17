@@ -59,7 +59,7 @@ export interface CommandLineDependencies {
 }
 
 // Must match the version in package.json and src/server/build-server.ts.
-const CLI_VERSION = '0.1.0';
+const CLI_VERSION = '0.1.1';
 
 const CLI_USAGE = `opnsense-mcp ${CLI_VERSION} — MCP server for OPNsense
 

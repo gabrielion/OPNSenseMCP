@@ -58,7 +58,7 @@ describe('main command selection', () => {
     expect(command.startStdio).not.toHaveBeenCalled();
     expect(command.runConfigure).not.toHaveBeenCalled();
     expect(command.writeError).not.toHaveBeenCalled();
-    expect(command.writeOutput).toHaveBeenCalledWith('0.1.0\n');
+    expect(command.writeOutput).toHaveBeenCalledWith('0.1.1\n');
   });
 
   it('rejects every non-configure argument without starting stdio', async () => {
