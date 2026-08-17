@@ -38,6 +38,30 @@ describe('canonicalizeOrigin', () => {
   ])('rejects %s (%s)', (input) => {
     expect(() => canonicalizeOrigin(input)).toThrow('Invalid OPNsense origin');
   });
+
+  // The URL parser preserves each of these spellings verbatim, so accepting them would give one
+  // firewall a second canonical origin, a second target id, and a second lock and state directory.
+  it.each([
+    ['https://fw.example.', 'trailing dot'],
+    ['https://a..example', 'empty label'],
+    ['https://a_b.example', 'underscore in label'],
+    ['https://a.example:0', 'port zero'],
+    ['https://192.0.2.1:0', 'port zero on an IP literal']
+  ])('rejects %s (%s)', (input) => {
+    expect(() => canonicalizeOrigin(input)).toThrow('Invalid OPNsense origin');
+  });
+
+  it('still accepts IP literals that the label rules do not apply to', () => {
+    expect(canonicalizeOrigin('https://192.0.2.1:8443')).toBe('https://192.0.2.1:8443');
+    expect(canonicalizeOrigin('https://[2001:DB8::1]')).toBe('https://[2001:db8::1]:443');
+    // A trailing dot after an IPv4 literal is consumed by the URL parser's address parser, not by
+    // the label rules: the host is already normalized to one spelling, so there is nothing to split.
+    expect(canonicalizeOrigin('https://192.0.2.1.')).toBe('https://192.0.2.1:443');
+  });
+
+  it('still accepts an internationalized host, which URL punycodes into hyphenated labels', () => {
+    expect(canonicalizeOrigin('https://café.example')).toBe('https://xn--caf-dma.example:443');
+  });
 });
 
 describe('base32LowerNoPadding', () => {

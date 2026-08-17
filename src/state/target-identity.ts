@@ -4,6 +4,8 @@ import { join } from 'node:path';
 
 export const INVALID_ORIGIN = 'Invalid OPNsense origin';
 
+const IPV4_LITERAL = /^\d{1,3}(\.\d{1,3}){3}$/u;
+
 // The canonical origin is the whole lock/state identity: scheme, lower-case ASCII host, effective
 // port. Credentials, TLS material, paths and queries must never influence or enter it.
 export function canonicalizeOrigin(url: string): string {
@@ -24,6 +26,19 @@ export function canonicalizeOrigin(url: string): string {
     // still upper-case did not come from that normalization and is refused rather than repaired.
     throw new Error(INVALID_ORIGIN);
   }
+  // URL brackets an IPv6 literal and re-spells an IPv4 one, so a literal already has a single
+  // spelling and the DNS rules below must not apply to it.
+  const isIpLiteral = host.startsWith('[') || IPV4_LITERAL.test(host);
+  if (!isIpLiteral && (host.split('.').includes('') || host.includes('_'))) {
+    // A DNS host carrying an empty label — a trailing dot leaves one — or an underscore reaches the
+    // same firewall as its clean spelling, yet URL preserves it. Admitting both spellings would give
+    // one firewall two target ids, hence two lock files and two state directories, so the second
+    // spelling is refused rather than repaired into the first.
+    throw new Error(INVALID_ORIGIN);
+  }
+  // Port 0 never identifies a listening firewall; it is caught before the substitution below, which
+  // only fills in the default port for a bare origin.
+  if (parsed.port === '0') throw new Error(INVALID_ORIGIN);
   const port = parsed.port === '' ? '443' : parsed.port;
   return `https://${host}:${port}`;
 }
