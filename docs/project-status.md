@@ -1,21 +1,31 @@
 # OPNSenseMCP Project Status and Session Handoff
 
-- **Snapshot date:** 2026-08-10
-- **Working branch:** `main` (`codex/p0b-resume-wip` was merged and retired)
-- **Base at snapshot:** `de40788` (`docs: renew Product 3 VM attestation`)
+- **Snapshot date:** 2026-08-18
+- **Working branch:** `p0c/slice1.1-hardening`, not yet landed. P0-C Slice 1 is merged to `main`
+  (`fc3b100`); this branch carries the Slice 1.1 hardening of that module and the 0.1.1 version bump.
+- **Base at snapshot:** `5d772b0` (`feat: version 0.1.1`); `main` is at `fc3b100`
+  (`docs: renew Product 3 VM attestation`).
 - **Remote:** `https://github.com/gabrielion/OPNSenseMCP.git`
 - **npm:** `@gabrielion/opnsense-mcp@0.1.0` has been on the public registry since 2026-07-29
   (OIDC `release.yml`, no stored credential). 0.1.0 predates the `b848501` services-listing fix and
-  the `--help`/`--version` CLI flags; publishing 0.1.1 is the standing distribution task.
-- **VM evidence state:** coherent at `de40788` (`npm run evidence:verify` returns 0). Any later
-  non-evidence commit makes it stale by design until `npm run vm:product3` renews it.
-- **OpenCode evidence state:** coherent — renewed on 2026-08-10 by the real `npm run smoke:opencode`
-  (OpenCode 1.18.16 standalone at `~/.opencode/bin/opencode`, the path the script expects). The
+  the `--help`/`--version` CLI flags; the tree is bumped to 0.1.1 on this branch and publishing it
+  is the standing distribution task.
+- **VM evidence state:** coherent on `main` — `npm run evidence:verify` returns 0 at `fc3b100`
+  (measured 2026-08-18 in a detached worktree). On this branch it returns 2, because eleven
+  non-evidence commits followed the attested commit. That staleness is by design and is cleared only
+  by a real `npm run vm:product3` in the landing sequence.
+- **OpenCode evidence state:** the seal in `tests/fixtures/opencode.product1a.json` was renewed on
+  2026-08-10 by the real `npm run smoke:opencode` (OpenCode 1.18.16 standalone at
+  `~/.opencode/bin/opencode`, the path the script expects) for the Slice 1 tarball at `0910b32`. The
   smoke model was repinned from `opencode/north-mini-code-free`, which had become unavailable
   upstream (401, then silent hangs, while `opencode models` still listed it), to
-  `opencode/deepseek-v4-flash-free`. Remember: `evidence:check` goes stale whenever `README.md`,
-  `LICENSE` or `dist` content changes, and CI does not run this gate — check it locally before any
-  npm publication.
+  `opencode/deepseek-v4-flash-free`. The seal is stale on this branch: Slice 1.1 changed `src/**`,
+  and it still records version 0.1.0. What moves the tarball digest is exactly `src/**` (through
+  `dist/`), `README.md`, `LICENSE`, `package.json` and the two tsconfigs; `scripts/**`, `docs/**`,
+  `tests/**`, `.github/**` and `evals/**` do not move it, and a `package-lock.json` bump matters only
+  when it moves the toolchain that produces `dist/`. CI now runs `evidence:check` in its own
+  `evidence-freshness` job, so a stale seal is visible instead of silent; only the real producer can
+  clear it.
 
 This document is the starting point for a new human or coding-agent session. It describes what is actually
 implemented, what has been proved, what remains incomplete, and the exact next design gate. When a statement
@@ -187,7 +197,8 @@ The 2026-07-29 session added, on top of the P0-B exit review at `24a0c2b`:
 
 `README.md` ships inside the npm tarball, so the documentation slice changed the package digest and the
 sealed OpenCode evidence had to be renewed by the real `npm run smoke:opencode`, not by editing the fixture.
-Expect the same whenever `README.md`, `LICENSE` or `dist` content changes.
+Expect the same whenever packed content changes: `src/**` through `dist/`, `README.md`, `LICENSE`,
+`package.json` or the two tsconfigs.
 
 The Product 3 attestation in `12bc618` was produced by a real disposable-VM run in which every one of the
 twelve lifecycle checks passed. It is nevertheless **stale as of `7ad2684`**, because the verifier is
@@ -205,12 +216,15 @@ If `npm run evidence:verify` returns `2`, the evidence is stale. Never hand-edit
 
 ### P0-C — durable and correct first mutation
 
-**State:** approved design exists; implementation plan has not been written and production implementation
-has not started.
+**State:** in progress. Slice 1 (durable private state root and target identity) is merged to `main` at
+`fc3b100`. Slice 1.1 (hardening of that module plus the 0.1.1 bump) is complete on
+`p0c/slice1.1-hardening` and waits for its landing sequence. Slice 2 — the inter-process lock and the
+durable envelope — has no plan yet; its required carry-overs are listed under "Immediate next-session
+objective / Task 3".
 
 P0-C covers:
 
-- durable private state root and target identity;
+- durable private state root and target identity (delivered by Slice 1, hardened by Slice 1.1);
 - inter-process kernel-backed lock;
 - durable backup and append-only audit;
 - reconciliation for unresolved transactions;
@@ -391,23 +405,60 @@ Those facts guide the clean-room design; they do not authorize copying implement
   precomputed output merely regrades the same output.
 - Claude Code authentication and a DeepEval judge provider are separate preconditions.
 - Do not use a fake OpenAI key to make an import or deterministic metric appear configured.
+- `tests/state/identity-key-race.test.ts` spawns real child processes that import a **compiled** build,
+  passed to them as an argument. Its `beforeAll` compiles `src` into a private scratch directory — never
+  `dist/`, which five sibling tests in the same `parallel` project read or execute. A hand-run that points
+  the children at `dist/` instead exercises whatever was last built there, so a stale `dist/` can make a
+  fixed race look broken or a broken one look fixed.
+- That race test runs 12 starters across 4 fresh rounds plus a residue pass. If it ever flakes, suspect the
+  5-attempt retry bound in `src/state/identity-key.ts`, not the harness: measured pre-fix failure was
+  19–28 % of starters per round at 12 concurrent starters and 33–43 % at 20; post-fix a stress diagnostic
+  saw 0 failures in 576 starters, but the deepest retry chain observed at 20-way used 4 of the 5 attempts.
+- `canonicalizeOrigin` now rejects underscored hostnames (`https://a_b.example`), a common internal
+  spelling, and every rejection returns the same opaque static sentence that never says which rule fired.
+  Expect that report from users of underscored internal names.
 
 ## Immediate next-session objective
 
-P0-B is closed: the attestation was renewed on 2026-07-30 and `evidence:verify` returns 0 at
-`de40788`. The 2026-08-10 session verified the published 0.1.0 end to end in a real Claude Code
+P0-B is closed. The 2026-08-10 session verified the published 0.1.0 end to end in a real Claude Code
 session — registered with `claude mcp add` exactly as the README instructs, live reads of
 `system.status` and `core.services` against the disposable VM — then added `--help`/`--version` to
-the CLI and refreshed the public documentation. The remaining ordered work:
+the CLI and refreshed the public documentation. P0-C Slice 1 landed on `main` the same day.
 
-### Task 1 — publish 0.1.1
+The 2026-08-17/18 Slice 1.1 hardened that module on `p0c/slice1.1-hardening`:
+
+- concurrent first starts no longer kill each other. The identity-key publication tolerates a swept
+  candidate, classifies transient failures and repeats the whole attempt up to 5 times; every error
+  that escapes is one static sentence carrying no path. A real multi-process race test (12 starters
+  on a shared barrier, fresh roots and planted residue) is the proof.
+- the state root is canonicalized before it is validated, through a new `openResolvedStateRoot`
+  entry point, so the macOS `/var` → `/private/var` spelling is accepted; a non-normalized override
+  is rejected with its own static message.
+- origin admission rejects trailing dots, empty labels, underscores and port `0`; IP literals are
+  exempt.
+- the dead duplicate backup module was deleted. The live `config-backup.ts` feature is byte-untouched.
+- CI gained an independent `evidence-freshness` job running `evidence:check`, mirrored inline on the
+  release path; both are pinned by tests.
+- the tree was bumped to 0.1.1 across 13 files, with the sealed fixture deliberately untouched.
+
+The remaining ordered work:
+
+### Task 1 — land this branch, then publish 0.1.1
 
 `0.1.0` predates the `b848501` listing fix and the CLI flags; a user on 0.1.0 can still hit the
-clamped-`rowCount` failure on large service pages (observed live in the 2026-08-10 session). Bump
-the version everywhere it is pinned (`package.json`, `CLI_VERSION` in `src/main.ts`, the literals in
-`src/server/build-server.ts`, `src/capabilities/foundation/server-status.ts` and
-`src/http/legacy-sse.ts`, plus their tests), run the evidence sequence below, then dispatch the
-`Release` workflow; the operator must approve the `npm-publish` environment.
+clamped-`rowCount` failure on large service pages (observed live in the 2026-08-10 session). The
+version is already bumped in the tree, so what remains is to land `p0c/slice1.1-hardening` with the
+Task 2 evidence sequence and then dispatch the `Release` workflow; the operator must approve the
+`npm-publish` environment. Two things about that landing:
+
+- **`npm run verify` is expected RED on this branch, on exactly one assertion.**
+  `tests/integration/installed-package.test.ts` compares the sealed fixture's `package.version`
+  (`0.1.0`, which is what the smoke really exercised) with `package.json` (`0.1.1`). Hand-editing the
+  sealed fixture would fabricate evidence and is forbidden; the real `npm run smoke:opencode`
+  regenerates the version and the digests together, after which `npm run verify` must be fully green
+  **before** `npm run vm:product3` runs.
+- **Check that the first green `main` run actually executed the `evidence-freshness` job**, rather
+  than reporting green because an earlier step failed and the job never ran.
 
 ### Task 2 — evidence renewal sequence for any publishable candidate
 
@@ -430,23 +481,51 @@ git push origin main
 ```
 
 If the producer fails, read `failureStage` in its JSON line. It stops the VM and verifies residue on
-every path; never hand-edit, synthesize or bypass the evidence. CI runs `evidence:verify` but not
-`evidence:check`, so a stale OpenCode seal passes CI silently; adding that gate to CI is a pending
-owner decision.
+every path; never hand-edit, synthesize or bypass the evidence. CI runs both evidence gates:
+`evidence:verify` inside the `verify` job, and `evidence:check` in an independent
+`evidence-freshness` job that nothing gates and that gates nothing, so a stale seal reddens that job
+alone and the conformance signal survives. `release.yml` runs both inline before publishing. A stale
+OpenCode seal therefore no longer passes CI silently — and CI cannot clear it either, because only
+the real `npm run smoke:opencode` can re-seal, so the reseal must land before the push.
 
-### Task 3 — choose the next vertical: P0-C or DeepEval writes
+### Task 3 — write the P0-C Slice 2 plan
 
-Two candidates, not to be started in parallel in the same worktree — they touch lifecycle, evidence
-and mutation contracts that need a clear ordering or isolated worktrees:
+The next vertical is P0-C Slice 2 (inter-process kernel-backed lock and the durable envelope). Write
+the plan with `superpowers:writing-plans` from the approved design in
+[`2026-07-25-post-cutover-p0-hardening-design.md`](superpowers/specs/2026-07-25-post-cutover-p0-hardening-design.md),
+then implement it TDD-first. The plan must carry these forward — they are requirements, not
+suggestions:
 
-- **P0-C — durable and correct first mutation** (the recommended next milestone): write the
-  implementation plan with `superpowers:writing-plans` from the approved design in
-  [`2026-07-25-post-cutover-p0-hardening-design.md`](superpowers/specs/2026-07-25-post-cutover-p0-hardening-design.md),
-  then implement it TDD-first.
-- **DeepEval write scenarios**: extend `evals/` with the reversible alias lifecycle under
-  deterministic MCP readback and the Elicitation-gated confirmation, per the written specification.
-  The read-surface suite and its recorded spec deviations in `evals/README.md` are the starting
-  point.
+- **Unsafe-ancestor validation: decide it.** `ensurePrivateDirectory` validates the canonical path
+  and the leaf's owner and mode, but never walks ancestor ownership or writability. Slice 1.1 raised
+  the stakes rather than lowering them: at the new `openResolvedStateRoot` entry a symlinked
+  **ancestor** converts from fail-closed to fail-open — the path now resolves and the code proceeds,
+  so `identity.key` can land wherever a same-uid ancestor redirect points. Slice 2 must either
+  implement the ancestor walk or record an explicit scope ruling that weighs exactly that delta.
+- **R1–R9, the kernel and types refactors from the 2026-08-17 review:**
+  - R1 — move lock release out of `finally` and give it a `LOCK_RELEASE_FAILED` outcome;
+  - R2 — have `LockHandle.release` report its result instead of swallowing it;
+  - R3 — enforce the terminal audit through a single helper;
+  - R4 — `BackupService.create(BackupRequest)` instead of positional arguments;
+  - R5 — bounded `acquire`/`exists`/`release` that accept abort signals;
+  - R6 — a durable backup root replacing the tmpdir store;
+  - R7 — lazy mutation-service construction so win32 stays read-only;
+  - R8 — an origin seam from the composed application;
+  - R9 — extend the audit `ALLOWED_KEYS`.
+- **A version-drift test.** The 0.1.1 bump hand-synced the version across 13 files; the task brief
+  listed 8 of them and grep plus control experiments found five more. Derive the literals from
+  `package.json` or add a drift assertion.
+- **`config-backup.ts` cleanup.** Its comment still refers to the module Slice 1.1 deleted, and the
+  repository's now-sole backup discipline has three unguarded legs — `nlink === 1`, checksum
+  mismatch and truncation — worth roughly a 15-line test addition.
+
+The two concurrent-first-start races that Slice 1 parked are **closed** by Slice 1.1 (ENOENT-tolerant
+sweep, bounded retry, and a real multi-process race test) and are no longer carried.
+
+**DeepEval write scenarios** remain the alternative vertical: extend `evals/` with the reversible
+alias lifecycle under deterministic MCP readback and the Elicitation-gated confirmation, per the
+written specification. Do not start both in the same worktree — they touch lifecycle, evidence and
+mutation contracts that need a clear ordering or isolated worktrees.
 
 The serial-bootstrap fix (`7ad2684`) and the credential-free bootstrap are proved by direct
 measurement and recorded in `.superpowers/sdd/progress.md`; the superseded password-path
@@ -455,7 +534,8 @@ instructions found in older handoffs must not be executed.
 ## Copy/paste prompt for a new session
 
 ```text
-Resume OPNSenseMCP from the public branch main.
+Resume OPNSenseMCP. main is the published branch; p0c/slice1.1-hardening carries the P0-C Slice 1.1
+hardening and the 0.1.1 version bump and has not landed yet.
 
 Start by reading, in full:
 1. AGENTS.md
@@ -476,17 +556,21 @@ npm run vm:prepare-image does that step alone.
 
 Before changing anything, report:
 - current branch, HEAD, upstream and worktree status;
-- npm run evidence:verify AND npm run evidence:check exit statuses (CI only runs the first);
+- npm run evidence:verify AND npm run evidence:check exit statuses (CI runs both: evidence:verify in
+  the verify job, evidence:check in its own independent evidence-freshness job);
 - which P0 increment is actually complete;
 - the exact provenance status of tests/agentic/**.
 
 The standing distribution task is publishing 0.1.1: npm 0.1.0 predates the b848501 listing fix and
-the --help/--version CLI flags. Follow "Immediate next-session objective / Task 1", using the Task 2
-evidence renewal sequence for the candidate: gates, real smoke:opencode, evidence:check 0, commit the
-candidate, real vm:product3, commit only docs/evidence/product3-vm.json, evidence:verify 0, push.
+the --help/--version CLI flags, and the tree is already bumped on p0c/slice1.1-hardening. Follow
+"Immediate next-session objective / Task 1", using the Task 2 evidence renewal sequence for the
+candidate: gates, real smoke:opencode, evidence:check 0, commit the candidate, real vm:product3,
+commit only docs/evidence/product3-vm.json, evidence:verify 0, push. On that branch npm run verify is
+expected RED on exactly one assertion (the sealed fixture still records 0.1.0) until the real
+smoke:opencode reseals; never hand-edit the fixture.
 
-After that, choose ONE of P0-C (durable mutation, recommended) or the DeepEval write scenarios —
-never both in the same worktree. A successful tool result without a changed VM must fail.
+After that, write the P0-C Slice 2 plan with its required carry-overs, or take the DeepEval write
+scenarios — never both in the same worktree. A successful tool result without a changed VM must fail.
 
 Do not restore legacy tests/agentic files, execute superseded plans, start implementation before
 written-spec approval, or claim a VM/agentic result without running its real producer and cleanup.

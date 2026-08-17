@@ -711,3 +711,90 @@ Branch: p0c/slice1-state-identity (2026-08-10)
     and leaf owner/mode but never walks ancestor ownership/writability. Unreachable in Slice 1 (defaults
     under $HOME); required decision in Slice 2 (implement the ancestor walk or record an explicit scope
     ruling).
+
+=== P0-C SLICE 1.1 (hardening of Slice 1 + 0.1.1 candidate) — COMPLETE, NOT YET LANDED ===
+Branch: p0c/slice1.1-hardening (2026-08-17/18), base fc3b100 from main, commits cc0d671..5d772b0.
+  - N1/N2 — the two concurrent-first-start races parked by Slice 1 are CLOSED
+    (src/state/identity-key.ts):
+    - cleanupCandidates now tolerates ENOENT: a peer sweeping our candidate is not a failure. Every
+      other unlink/link/read failure is classified persistent and throws the SAME static sentence, so
+      no raw errno and no absolute private path can escape ensureIdentityKey any more.
+    - Bounded retry: MAX_ATTEMPTS = 5 whole attempts (sweep -> exists -> publish -> validated read).
+      Transient = link ENOENT, post-publication unlink ENOENT, and nlink != 1 when it is the ONLY
+      failing predicate (the winner's link->unlink window). Everything else throws immediately.
+    - Evidence is a REAL multi-process race test (tests/state/identity-key-race.test.ts): 12 Node
+      children on a shared wall-clock barrier, 4 fresh rounds plus a planted-residue pass. Pre-fix
+      19-28% of starters failed per round at 12-way and 33-43% at 20-way (residue scenario 11/12);
+      post-fix a stress diagnostic saw 0 failures in 576 starters across 12- and 20-way, fresh roots
+      and planted residue, with one agreed key per race and no candidate residue.
+    - MAX_ATTEMPTS ruling: it STAYS 5. After the barrier was tightened (Atomics.wait sleep instead of
+      a busy spin — ~60 CPU-seconds saved per race-file run, and a measurably sharper reproducer), the
+      deepest observed chain was 4 of 5 attempts at 20-way with 0/960 exhaustions. Revisit only if
+      reconcile-era concurrency grows.
+    - Trap: the race children import a COMPILED build passed as an argument, and beforeAll compiles
+      src into a private scratch dir — never dist/, which five sibling tests in the same parallel
+      project read or execute. A hand-run pointed at dist/ tests whatever was last built there.
+  - N4 — canonical entry point (src/state/state-root.ts): openResolvedStateRoot resolves the state
+    root BEFORE validating it, so the macOS /var -> /private/var spelling that integration actually
+    hands the state layer is accepted instead of being refused with the opaque directory-integrity
+    error; a non-normalized or relative override is rejected with its own dedicated static message.
+    CARRY-OVER WORDING (do not write "unchanged"): at this entry a symlinked ANCESTOR converts from
+    fail-closed to fail-open — it now resolves and proceeds, so identity.key can land wherever a
+    same-uid ancestor redirect points. That is the real delta the Slice 2 unsafe-ancestor decision
+    must weigh.
+  - N5 — strict origin admission (src/state/target-identity.ts): trailing dot, empty label,
+    underscore and port 0 are rejected; IP literals are exempt from the label rules. new URL()
+    punycodes IDNs before the checks, so unicode hosts still pass. A trailing dot after an IPv4 is
+    folded into the address by WHATWG parsing and stays accepted (same identity) — the dispatch
+    premise that it would be rejected was wrong. PRODUCT NOTE: underscored internal hostnames
+    (a_b.example) are now rejected with only the opaque static error.
+  - Dead-module removal: src/capabilities/envelope/backup.ts (the synthetic duplicate) and its test
+    are deleted — zero importers in src/ and scripts/, and the live config-backup.ts test file was
+    verified assertion-by-assertion to be a strict superset of the deleted one. The live
+    config-backup.ts feature is byte-untouched (path-scoped diff empty), per the user's constraint.
+  - CI gate: `npm run evidence:check` now runs in its OWN independent evidence-freshness job in
+    ci.yml (no needs:, and nothing needs it) and inline in release.yml before publishing; both are
+    pinned by whole-line, comment-proof regexes in tests/foundation/documentation.test.ts. Rationale:
+    hanging the gate off `verify` would fail verify on every packed-content change and therefore SKIP
+    the `protocol` job, costing both conformance profiles for the whole window until the reseal.
+    Isolated, a stale seal reddens one job and every other signal survives.
+  - 0.1.1 bump: 13 files, 19 insertions / 19 deletions. The task brief listed 8 version sites; grep
+    plus control experiments found five more. The sealed fixture was NOT touched.
+  - Expected-RED state on this branch, by structural necessity: `npm run verify` fails EXACTLY ONE
+    assertion — tests/integration/installed-package.test.ts:234, sealed fixture package.version
+    0.1.0 vs package.json 0.1.1 (measured 2026-08-18: Test Files 1 failed | 60 passed (61), Tests
+    1 failed | 1209 passed (1210)). evidence:check (exit 1) and evidence:verify (exit 2) are stale by
+    design too. Only the landing sequence's real smoke:opencode and vm:product3 restore all three;
+    hand-editing either evidence document would fabricate evidence and is forbidden.
+  - Gate results for the docs commit (Node v22.23.1):
+    - `npm run license:check`: exit 0
+    - `npm run test:conformance`: exit 0 (13/13, both profiles)
+    - `git diff --check`: exit 0
+    - `npm run verify`: exit 1 on the single assertion above, everything else green
+  - Truth fixes shipped with this entry: vitest.config.ts and installed-package.test.ts no longer
+    call the sealed-digest equality a release-only concern; CONTRIBUTING.md and docs/project-status.md
+    no longer claim CI skips evidence:check; the accurate digest blast radius is now stated the same
+    way everywhere — the tarball digest moves with src/** (through dist/), README.md, LICENSE,
+    package.json and the two tsconfigs, and NOT with scripts/**, docs/**, tests/**, .github/** or
+    evals/**; a package-lock.json bump matters only when it moves the toolchain that produces dist/.
+  - Slice 2 carry-overs (UPDATED — the two Slice 1 races are CLOSED and no longer carried):
+    (a) Unsafe-ancestor validation: implement the ancestor walk or record an explicit scope ruling,
+        weighing the fail-open delta recorded under N4 above.
+    (b) R1-R9, the kernel/types refactors from the 2026-08-17 review:
+        R1 move lock release out of `finally` and give it a LOCK_RELEASE_FAILED outcome;
+        R2 have LockHandle.release report its result instead of swallowing it;
+        R3 enforce the terminal audit through a single helper;
+        R4 BackupService.create(BackupRequest) instead of positional arguments;
+        R5 bounded acquire/exists/release that accept abort signals;
+        R6 a durable backup root replacing the tmpdir store;
+        R7 lazy mutation-service construction so win32 stays read-only;
+        R8 an origin seam from the composed application;
+        R9 extend the audit ALLOWED_KEYS.
+    (c) Version-drift test: the version is hand-synced across 13 files with no drift assertion.
+        Derive the literals from package.json or add the assertion.
+    (d) config-backup.ts: its comment still references the module this slice deleted, and the
+        repository's now-sole backup discipline has 3 unguarded legs (nlink=1, checksum mismatch,
+        truncation) — roughly a 15-line test addition.
+  - Landing check to perform, not to assume: the first green `main` run must be confirmed to have
+    actually EXECUTED the evidence-freshness job, not reported green because an earlier step failed
+    and the job never ran.

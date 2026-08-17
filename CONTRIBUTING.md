@@ -102,13 +102,16 @@ npm run smoke:opencode
 ```
 
 The runner uses an isolated project, installed tarball, synthetic HTTPS target, and the free
-`opencode/north-mini-code-free` model. It writes sanitized evidence to
+`opencode/deepseek-v4-flash-free` model. It writes sanitized evidence to
 `tests/fixtures/opencode.product1a.json`: only versions, SHA-256 digests, narrow checks, and cleanup status.
 External model or capacity failure exits `3` and records `blocked`; it never becomes a false success.
 
 ## Release gate
 
-`npm run verify` is the per-commit gate. Two further checks belong to a release rather than to a commit:
+`npm run verify` remains the per-commit developer gate. Two further checks guard the packaged
+artifacts, and CI enforces both: `evidence:verify` runs inside the `verify` job, and `evidence:check`
+runs in a dedicated `evidence-freshness` job of its own, so a stale seal reddens that job alone
+instead of costing the repository its other signals.
 
 ```bash
 if test -x /opt/homebrew/opt/node@22/bin/node; then
@@ -119,14 +122,16 @@ npm run evidence:check &&
 npm run evidence:verify
 ```
 
-The first check compares the sealed OpenCode evidence against the package this tree builds. Anything that
-is packed changes that package — `src/` through `dist/`, and also `README.md`, `LICENSE` and
-`package.json` — so this check is expected to fail until the evidence is re-sealed by its real producer,
-`npm run smoke:opencode`, which needs the OpenCode client and a model. The second check requires the
-commit-bound Product 3 VM attestation to remain coherent with the release history. The VM verifier accepts
-either the exact pre-evidence commit and tree or one later commit whose sole change is
-`docs/evidence/product3-vm.json`. Never hand-edit either evidence document; renew each one only with its
-real producer.
+The first check compares the sealed OpenCode evidence against the package this tree builds. The tarball
+digest changes with `src/**` (through `dist/`), `README.md`, `LICENSE`, `package.json` and the two
+tsconfigs; it does not change with `scripts/**`, `docs/**`, `tests/**`, `.github/**` or `evals/**`, and a
+`package-lock.json` bump matters only when it moves the toolchain that produces `dist/`. A pull request
+touching anything in the first list therefore shows the `evidence-freshness` job red until a maintainer
+re-seals with the real producer, `npm run smoke:opencode`, which needs the OpenCode client and a model;
+that reseal cannot happen in CI. The second check requires the commit-bound Product 3 VM attestation to
+remain coherent with the release history. The VM verifier accepts either the exact pre-evidence commit
+and tree or one later commit whose sole change is `docs/evidence/product3-vm.json`. Never hand-edit
+either evidence document; renew each one only with its real producer.
 
 ## Publishing a release
 

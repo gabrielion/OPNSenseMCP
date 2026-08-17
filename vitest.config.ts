@@ -45,9 +45,11 @@ export default defineConfig({
       },
       {
         test: {
-          // Release gate only. The sealed OpenCode evidence can only be re-sealed by its real
-          // producer (an external client and model), so its digest equality must not block an
-          // ordinary commit. `npm run evidence:check` runs this project.
+          // Kept out of `npm run verify` because the sealed OpenCode evidence can only be
+          // re-sealed by its real producer (an external client and model). CI still enforces the
+          // digest equality: `ci.yml` gives it an independent `evidence-freshness` job, so a
+          // stale seal reddens that job alone, and `release.yml` runs it inline before publishing.
+          // The landing sequence reseals. `npm run evidence:check` runs this project.
           ...sharedTestOptions,
           name: 'evidence',
           include: ['tests/integration/sealed-evidence.test.ts'],

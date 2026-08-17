@@ -225,10 +225,11 @@ describe('installed npm executable', () => {
             consumerPath = consumerRoot;
             packageWorkRoot = workRoot;
             // Every commit must keep the sealed evidence STRUCTURALLY bound to this package: same
-            // name, same version, a well-formed portable digest. Whether that digest still equals
-            // the current build is a RELEASE question, not a per-commit one — re-sealing requires
-            // the real OpenCode producer and an external model, so `npm run evidence:check` owns
-            // the equality (see tests/integration/sealed-evidence.test.ts).
+            // name, same version, a well-formed portable digest. The digest EQUALITY belongs to
+            // `npm run evidence:check` (see tests/integration/sealed-evidence.test.ts), which CI
+            // enforces in its own independent `evidence-freshness` job and the release path runs
+            // inline — re-sealing needs the real OpenCode producer and an external model, so a
+            // stale seal reddens that gate alone until the landing sequence reseals it.
             expect(evidence.package?.name).toBe(packageName);
             expect(evidence.package?.version).toBe(packageVersion);
             expect(evidence.package?.tarSha256).toMatch(/^[a-f0-9]{64}$/u);
