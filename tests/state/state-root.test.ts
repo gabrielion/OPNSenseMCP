@@ -152,6 +152,29 @@ describe('openResolvedStateRoot', () => {
     }
   });
 
+  it('canonicalizes a symlinked spelling that the strict entry point keeps refusing', () => {
+    // The test above is vacuous wherever tmpdir() is already canonical (Linux, i.e. CI): a symlinked
+    // ancestor is the only way to make the canonicalization observable on every platform.
+    const base = scratch();
+    try {
+      const real = join(base, 'real');
+      mkdirSync(real, { mode: 0o700 });
+      const link = join(base, 'link');
+      symlinkSync(real, link);
+      const override = join(link, 'state');
+      const root = openResolvedStateRoot(override, {
+        platform: process.platform,
+        env: {},
+        homeDir: '/home/unused'
+      });
+      expect(root.path).not.toBe(override);
+      expect(root.path).toBe(realpathSync(override));
+      expect(() => openStateRoot(override)).toThrow('State directory failed its integrity checks');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it.each([['/tmp/state/'], ['/tmp//state'], ['/tmp/a/../state'], ['relative/state']])(
     'rejects the non-normalized or relative override %s',
     (override) => {
