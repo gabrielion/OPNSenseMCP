@@ -18,8 +18,14 @@ async function main() {
   }
   // Import before the barrier so module loading never eats a child's share of the start window.
   const { ensureIdentityKey, openStateRoot } = await import(pathToFileURL(modulePath).href);
+  // Sleep to just short of the barrier, then spin only over the last few milliseconds. A pure spin
+  // burns a core per child, which starves the timing-sensitive neighbours in the same Vitest
+  // project and, on a small runner, delays late children past the barrier they are meant to share.
+  const sleeper = new Int32Array(new SharedArrayBuffer(4));
+  const coarse = barrierMs - 5;
+  while (Date.now() < coarse) Atomics.wait(sleeper, 0, 0, coarse - Date.now());
   while (Date.now() < barrierMs) {
-    // busy-wait a few ms so all children cross the barrier as close together as possible
+    // final tightening only, so all children cross the barrier as close together as possible
   }
   try {
     const key = ensureIdentityKey(openStateRoot(rootPath));
