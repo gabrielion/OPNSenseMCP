@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -13,15 +13,33 @@ const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const STARTERS = 12;
 const ROUNDS = 4;
 
-// Always rebuild so the children exercise the CURRENT sources, never a stale dist.
+// The children need the CURRENT sources compiled, but `npm run build` would delete and re-emit
+// `dist/` under the sibling tests of the same Vitest project that read or execute it. Compile into
+// a private scratch directory instead; `dist/` is never touched by this file.
+let scratchDir = '';
+let modulePath = '';
+
 beforeAll(async () => {
-  await execFileAsync('npm', ['run', 'build'], { cwd: REPO_ROOT, timeout: 240_000 });
+  scratchDir = mkdtempSync(join(realpathSync(tmpdir()), 'opnsense-identity-race-build-'));
+  await execFileAsync('npx', ['tsc', '-p', 'tsconfig.build.json', '--outDir', scratchDir], {
+    cwd: REPO_ROOT,
+    timeout: 240_000
+  });
+  // The emit lands outside the package, so it must declare its own module format.
+  writeFileSync(join(scratchDir, 'package.json'), '{ "type": "module" }\n');
+  modulePath = join(scratchDir, 'state', 'index.js');
 }, 250_000);
 
+afterAll(() => {
+  if (scratchDir !== '') rmSync(scratchDir, { recursive: true, force: true });
+});
+
 async function raceOnce(rootPath: string): Promise<readonly string[]> {
-  const barrier = String(Date.now() + 300);
+  const barrier = String(Date.now() + 1000);
   const children = Array.from({ length: STARTERS }, () =>
-    execFileAsync(process.execPath, [CHILD, rootPath, barrier], { timeout: 30_000 }).then(
+    execFileAsync(process.execPath, [CHILD, rootPath, barrier, modulePath], {
+      timeout: 30_000
+    }).then(
       ({ stdout }) => stdout.trim(),
       (error: unknown) => {
         const stdout = (error as { stdout?: string }).stdout ?? '';
@@ -33,8 +51,7 @@ async function raceOnce(rootPath: string): Promise<readonly string[]> {
 }
 
 describe('ensureIdentityKey under real multi-process concurrency', () => {
-  // un-skipped by the Task 2 fix
-  it.skip(
+  it(
     'every concurrent starter succeeds and they all agree on one key',
     { timeout: 240_000 },
     async () => {
@@ -58,8 +75,7 @@ describe('ensureIdentityKey under real multi-process concurrency', () => {
     }
   );
 
-  // un-skipped by the Task 2 fix
-  it.skip(
+  it(
     'concurrent starters on an already-published root with crash residue all succeed',
     { timeout: 120_000 },
     async () => {
@@ -68,7 +84,7 @@ describe('ensureIdentityKey under real multi-process concurrency', () => {
         const rootPath = join(base, 'state');
         // Publish first, then plant residue candidates that every starter will try to sweep.
         const first = await raceOnce(rootPath);
-        expect(first.every((line) => line.startsWith('ok '))).toBe(true);
+        expect(first.filter((line) => !line.startsWith('ok '))).toEqual([]);
         for (const suffix of ['a'.repeat(16), 'b'.repeat(16), 'c'.repeat(16)]) {
           writeFileSync(join(rootPath, `identity.key.candidate-${suffix}`), Buffer.alloc(32), {
             mode: 0o600
@@ -77,6 +93,7 @@ describe('ensureIdentityKey under real multi-process concurrency', () => {
         const lines = await raceOnce(rootPath);
         expect(lines.filter((line) => !line.startsWith('ok '))).toEqual([]);
         expect(new Set(lines.map((line) => line.slice(3))).size).toBe(1);
+        expect(readdirSync(rootPath).filter((name) => name.includes('candidate'))).toEqual([]);
       } finally {
         rmSync(base, { recursive: true, force: true });
       }

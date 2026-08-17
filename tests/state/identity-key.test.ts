@@ -4,11 +4,13 @@ import {
   chmodSync,
   linkSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -126,6 +128,76 @@ describe('ensureIdentityKey recovery', () => {
       expect(statsAfter.ino).toBe(statsBefore.ino);
       expect(statsAfter.mtimeMs).toBe(statsBefore.mtimeMs);
     } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('ensureIdentityKey error hygiene', () => {
+  it('reports a static message when the published key is a symlink', () => {
+    const { base, rootPath } = scratchRoot();
+    try {
+      const root = openStateRoot(rootPath);
+      const target = join(base, 'outside');
+      writeFileSync(target, Buffer.alloc(32), { mode: 0o600 });
+      symlinkSync(target, join(rootPath, 'identity.key'));
+      expect(() => ensureIdentityKey(root)).toThrow('Identity key failed its integrity checks');
+      try {
+        ensureIdentityKey(root);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        expect(message).not.toMatch(/\//u);
+      }
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a directory where the key should be, with the same static message', () => {
+    const { base, rootPath } = scratchRoot();
+    try {
+      const root = openStateRoot(rootPath);
+      mkdirSync(join(rootPath, 'identity.key'), { mode: 0o700 });
+      expect(() => ensureIdentityKey(root)).toThrow('Identity key failed its integrity checks');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('persistently rejects a key with a foreign extra hard link and no candidate', () => {
+    const { base, rootPath } = scratchRoot();
+    try {
+      const root = openStateRoot(rootPath);
+      ensureIdentityKey(root);
+      // A hard link OUTSIDE the candidate pattern is not crash residue the sweep may remove:
+      // nlink stays 2 on every retry, so this must throw, not loop forever.
+      linkSync(join(rootPath, 'identity.key'), join(rootPath, 'stray-link'));
+      expect(() => ensureIdentityKey(root)).toThrow('Identity key failed its integrity checks');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a static message when a candidate cannot be swept', () => {
+    const { base, rootPath } = scratchRoot();
+    try {
+      const root = openStateRoot(rootPath);
+      writeFileSync(join(rootPath, `identity.key.candidate-${'e'.repeat(16)}`), Buffer.alloc(32), {
+        mode: 0o600
+      });
+      // A read-only state root fails the sweep's unlink with EACCES rather than ENOENT: that is a
+      // real failure, and it must surface without the errno text or the private state-root path.
+      chmodSync(rootPath, 0o500);
+      expect(() => ensureIdentityKey(root)).toThrow('Identity key failed its integrity checks');
+      let message = '';
+      try {
+        ensureIdentityKey(root);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toBe('Identity key failed its integrity checks');
+    } finally {
+      chmodSync(rootPath, 0o700);
       rmSync(base, { recursive: true, force: true });
     }
   });
