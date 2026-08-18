@@ -104,8 +104,14 @@ export function openResolvedStateRoot(
   // A configured or defaulted root may be spelled through a symlinked ancestor that the operator
   // cannot control (macOS resolves tmpdir() and /var through /private), and realpathSync needs the
   // directory to exist, so create first with the same 0700 discipline, then canonicalize. Every
-  // integrity check still runs, unchanged, against the canonical path: this widens the accepted
-  // spelling, not the accepted directory.
+  // integrity check still runs, unchanged, against the canonical path — but those checks are checks
+  // of the leaf: `ensurePrivateDirectory` validates the resolved directory's own type, owner and
+  // mode and never walks ancestor ownership or writability. So canonicalizing here does move the
+  // accepted directory, in one direction: a symlinked ancestor used to fail closed on the
+  // `canonicalPathOf(path) !== path` check, and now it resolves and the run proceeds, which puts
+  // durable state wherever a same-uid ancestor redirect points. That delta is undecided on
+  // purpose — Slice 2 owes it either the ancestor walk or an explicit scope ruling that weighs it
+  // (docs/project-status.md, "Unsafe-ancestor validation: decide it").
   createPrivateDirectory(resolved);
   return openStateRoot(canonicalPathOf(resolved));
 }

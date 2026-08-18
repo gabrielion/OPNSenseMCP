@@ -1,5 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
+import {
+  linkSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  truncateSync,
+  writeFileSync
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -82,5 +93,48 @@ describe('OPNsense configuration backup service', () => {
     const linkId = 'f'.repeat(32);
     symlinkSync(realFile, join(store, `${linkId}.xml`));
     expect(await service.exists(linkId, signal)).toBe(false);
+  });
+
+  // A second hard link is how a same-uid attacker keeps a handle on the snapshot after the
+  // envelope believes it owns the only one, so the link count is part of the discipline and not
+  // an implementation detail. The link is planted outside the store so nothing but `nlink` moves.
+  it('refuses a stored backup that was given a second hard link', async () => {
+    const store = join(root, 'store');
+    const service = createOPNsenseConfigBackupService(source(), store);
+    const created = await service.create(REQUEST, signal);
+    linkSync(join(store, `${created.backupId}.xml`), join(root, 'second-link.xml'));
+    expect(await service.exists(created.backupId, signal)).toBe(false);
+  });
+
+  // The other two legs of the discipline — truncation and a flipped byte — are checked only on the
+  // write path, where `create` re-reads exactly what it just wrote (config-backup.ts:53 and :95).
+  // `exists` stats without reading, and `create` persists neither the length nor the digest, so an
+  // edit made after that verification is invisible to every later caller. Asserting the discipline
+  // the way it deserves needs a stored digest, i.e. a change to the module this slice froze, so it
+  // rides with the durable backup root. Until then these two record what the module actually
+  // promises — and they go red the first time it promises more, which is the point of writing them.
+  it('does not notice a stored backup truncated after the write verification', async () => {
+    const store = join(root, 'store');
+    const service = createOPNsenseConfigBackupService(source(), store);
+    const created = await service.create(REQUEST, signal);
+    const path = join(store, `${created.backupId}.xml`);
+    truncateSync(path, statSync(path).size - 1);
+
+    expect(readFileSync(path, 'utf8')).not.toBe(CONFIG_XML);
+    expect(await service.exists(created.backupId, signal)).toBe(true);
+  });
+
+  it('does not notice a byte flipped in a stored backup after the write verification', async () => {
+    const store = join(root, 'store');
+    const service = createOPNsenseConfigBackupService(source(), store);
+    const created = await service.create(REQUEST, signal);
+    const path = join(store, `${created.backupId}.xml`);
+    const bytes = readFileSync(path);
+    bytes.writeUInt8(bytes.readUInt8(0) ^ 0xff, 0);
+    writeFileSync(path, bytes);
+
+    expect(readFileSync(path).byteLength).toBe(CONFIG_XML.length);
+    expect(readFileSync(path, 'utf8')).not.toBe(CONFIG_XML);
+    expect(await service.exists(created.backupId, signal)).toBe(true);
   });
 });

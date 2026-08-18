@@ -20,9 +20,12 @@ const MAX_CONFIG_BACKUP_BYTES = 2 * 1024 * 1024;
 const NOFOLLOW = (constants.O_NOFOLLOW as number | undefined) ?? 0;
 
 // The envelope's strict backup snapshots the running OPNsense configuration before the first write. It is
-// fetched over the closed HTTPS client and stored with the same private-file discipline as the synthetic
-// Product 2 backup (directory 0700, file 0600, no symlink, single hard link, checksum verified on write and
-// re-read). The stored bytes and the backupId never cross the MCP boundary.
+// fetched over the closed HTTPS client and stored under a private-file discipline of its own: directory
+// 0700, file 0600 created O_EXCL and only ever opened O_NOFOLLOW, a single hard link, and a sha256 that has
+// to match when the bytes just written are read straight back. That verification is a write-path one.
+// Nothing persists the digest or the length, and `exists` stats without reading, so an edit to the stored
+// bytes after the write is invisible to every later caller; closing that needs a stored digest and rides
+// with the durable backup root. The stored bytes and the backupId never cross the MCP boundary.
 export interface ConfigBackupSource {
   downloadConfigBackup(signal: AbortSignal): Promise<Uint8Array>;
 }
