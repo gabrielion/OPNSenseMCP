@@ -12,7 +12,7 @@ import {
 import { createHash, randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { Buffer } from 'node:buffer';
-import type { BackupService } from '../types.js';
+import type { BackupRequest, BackupService } from '../types.js';
 
 const BACKUP_ID_BYTES = 16;
 const BACKUP_ID_PATTERN = /^[0-9a-f]{32}$/u;
@@ -62,7 +62,14 @@ export function createOPNsenseConfigBackupService(
   rootDir: string
 ): BackupService {
   return Object.freeze({
-    async create(_scope: string, signal: AbortSignal): Promise<{ readonly backupId: string }> {
+    // The request names what a restore would be judged against, but this store is still the
+    // shutdown-scoped one: it records nothing beside the configuration bytes, so the stored
+    // artifact is exactly what it was before the request existed. The durable metadata that
+    // consumes the rest of the request lands with the durable root.
+    async create(
+      _request: BackupRequest,
+      signal: AbortSignal
+    ): Promise<{ readonly backupId: string }> {
       const downloaded = await source.downloadConfigBackup(signal);
       if (downloaded.byteLength === 0 || downloaded.byteLength > MAX_CONFIG_BACKUP_BYTES) {
         throw new Error('Invalid OPNsense configuration backup');
@@ -90,7 +97,10 @@ export function createOPNsenseConfigBackupService(
       }
       return { backupId };
     },
-    exists(backupId: string): Promise<boolean> {
+    // The existence check is a synchronous local stat with nothing to abort, so the signal is
+    // accepted for the interface's sake and deliberately unread (the repo's `void` idiom).
+    exists(backupId: string, _signal: AbortSignal): Promise<boolean> {
+      void _signal;
       if (!BACKUP_ID_PATTERN.test(backupId)) return Promise.resolve(false);
       try {
         const fd = openSync(backupPath(rootDir, backupId), constants.O_RDONLY | NOFOLLOW);

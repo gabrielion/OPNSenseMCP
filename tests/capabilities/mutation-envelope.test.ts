@@ -7,6 +7,7 @@ import {
   defineWriteCapability
 } from '../../src/capabilities/kernel.js';
 import type {
+  BackupRequest,
   CapabilityDefinition,
   CapabilityResult,
   MutationEnvelopeServices
@@ -86,11 +87,16 @@ interface Harness {
   readonly events: string[];
   readonly services: MutationEnvelopeServices;
   readonly createdBackups: Set<string>;
+  // What the envelope actually ASKED the backup service for, in order — the fake captures the
+  // request instead of discarding it, so a test can assert the fields the spec's durable backup
+  // metadata needs rather than only that a backup happened.
+  readonly backupRequests: BackupRequest[];
 }
 
 function makeHarness(opts: HarnessOptions = {}): Harness {
   const events: string[] = [];
   const createdBackups = new Set<string>();
+  const backupRequests: BackupRequest[] = [];
   let backupCounter = 0;
   const services: MutationEnvelopeServices = {
     lock: {
@@ -106,8 +112,9 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
       }
     },
     backup: {
-      create: () => {
+      create: (request) => {
         events.push('backup.create');
+        backupRequests.push(request);
         if (opts.backupThrow === true) return Promise.reject(new Error('backup'));
         backupCounter += 1;
         const backupId = `backup-${String(backupCounter)}`;
@@ -128,7 +135,7 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
       }
     }
   };
-  return { events, services, createdBackups };
+  return { events, services, createdBackups, backupRequests };
 }
 
 function dispatch(
@@ -172,6 +179,19 @@ describe('mutation envelope lifecycle', () => {
       'lock.release'
     ]);
     expect(harness.createdBackups.size).toBe(1);
+    // The backup is what a failed write would be restored FROM, so the request has to name what a
+    // restore needs: the locked target, the capability and arguments that asked for it, and the
+    // sealed digests the write was authorized against. 'plan'/'state' are the harness preflight's
+    // own digests, so a request built from anything but the sealed preflight would not match.
+    expect(harness.backupRequests).toHaveLength(1);
+    const request = harness.backupRequests[0];
+    expect(request?.targetKey).toBe('opnsense-config');
+    expect(request?.capabilityId).toBe('test.envelope');
+    expect(request?.mcpName).toBe('test_envelope');
+    expect(request?.effectiveResourceScopes).toEqual(['test.envelope']);
+    expect(request?.observedStateDigest).toBe('state');
+    expect(request?.effectPlanDigest).toBe('plan');
+    expect(request?.argumentsSha256).toMatch(/^[0-9a-f]{64}$/u);
   });
 
   it('awaits the lock release after the terminal audit and tolerates its report', async () => {

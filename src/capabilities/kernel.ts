@@ -12,6 +12,7 @@ import type {
   ChangeSummary,
   AuditPhase,
   AuditRecord,
+  BackupRequest,
   CapabilityDefinition,
   CapabilityDispatcher,
   CapabilityEffect,
@@ -1719,13 +1720,22 @@ async function executeMutationEnvelope(
       // Step 4: strict verified backup precedes the first write.
       let backupId: string | undefined;
       if (capability.policy.backup === 'strict') {
+        // Built outside the try on purpose: reading the sealed digests is not a backup failure, so
+        // a hostile preflight object still propagates here exactly as it does at step 5.
+        const backupRequest: BackupRequest = Object.freeze({
+          targetKey: MUTATION_TARGET_KEY,
+          capabilityId: capability.id,
+          mcpName: capability.mcpName,
+          argumentsSha256: authorization.argumentsSha256,
+          effectiveResourceScopes: authorization.effectiveResourceScopes,
+          observedStateDigest: sealed.observedStateDigest,
+          effectPlanDigest: sealed.effectPlanDigest
+        });
+        const backupSignal = context.signal ?? new AbortController().signal;
         try {
-          const created = await services.backup.create(
-            MUTATION_TARGET_KEY,
-            context.signal ?? new AbortController().signal
-          );
+          const created = await services.backup.create(backupRequest, backupSignal);
           backupId = created.backupId;
-          if (backupId.length === 0 || !(await services.backup.exists(backupId))) {
+          if (backupId.length === 0 || !(await services.backup.exists(backupId, backupSignal))) {
             terminalAuditRecorded = finishWith('BACKUP_FAILED', backupId);
             result = refusal('BACKUP_FAILED');
             break envelope;

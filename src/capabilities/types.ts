@@ -194,9 +194,23 @@ export interface MutationLockManager {
   acquire(targetKey: string, signal: AbortSignal): Promise<LockHandle | null>;
 }
 
+// What the envelope ASKS a backup for. A backup exists to be restored from, so the request names
+// everything a restore has to be judged against: the locked target, the capability and the exact
+// arguments that asked for the write, and the sealed digests it was authorized against. All of it
+// is kernel-supplied and already canonicalized; none of it is caller text.
+export interface BackupRequest {
+  readonly targetKey: string;
+  readonly capabilityId: string;
+  readonly mcpName: string;
+  readonly argumentsSha256: string;
+  readonly effectiveResourceScopes: readonly string[];
+  readonly observedStateDigest: string;
+  readonly effectPlanDigest: string;
+}
+
 export interface BackupService {
-  create(scope: string, signal: AbortSignal): Promise<{ readonly backupId: string }>;
-  exists(backupId: string): Promise<boolean>;
+  create(request: BackupRequest, signal: AbortSignal): Promise<{ readonly backupId: string }>;
+  exists(backupId: string, signal: AbortSignal): Promise<boolean>;
 }
 
 export type AuditPhase = 'intent' | 'result';
