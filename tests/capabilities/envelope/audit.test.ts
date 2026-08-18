@@ -12,6 +12,7 @@ function record(overrides: Partial<AuditRecord> = {}): AuditRecord {
     effectiveResourceScopes: ['test.scope'],
     phase: 'intent',
     outcome: 'intent',
+    transactionId: 'd'.repeat(32),
     ...overrides
   };
 }

@@ -7,6 +7,7 @@ import {
   defineWriteCapability
 } from '../../src/capabilities/kernel.js';
 import type {
+  AuditRecord,
   BackupRequest,
   CapabilityDefinition,
   CapabilityResult,
@@ -116,12 +117,16 @@ interface Harness {
   // request instead of discarding it, so a test can assert the fields the spec's durable backup
   // metadata needs rather than only that a backup happened.
   readonly backupRequests: BackupRequest[];
+  // Every record the envelope wrote, in order — captured so a test can assert on record fields
+  // (the transactionId) and not only on the phase event string.
+  readonly auditRecords: AuditRecord[];
 }
 
 function makeHarness(opts: HarnessOptions = {}): Harness {
   const events: string[] = [];
   const createdBackups = new Set<string>();
   const backupRequests: BackupRequest[] = [];
+  const auditRecords: AuditRecord[] = [];
   let backupCounter = 0;
   const services: MutationEnvelopeServices = {
     lock: {
@@ -160,16 +165,13 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
     audit: {
       record: (record) => {
         events.push(`audit.${record.phase}`);
-        if (opts.auditIntentThrow === true && record.phase === 'intent') {
-          throw new Error('audit');
-        }
-        if (opts.auditResultThrow === true && record.phase === 'result') {
-          throw new Error('audit');
-        }
+        auditRecords.push(record);
+        if (opts.auditIntentThrow === true && record.phase === 'intent') throw new Error('audit');
+        if (opts.auditResultThrow === true && record.phase === 'result') throw new Error('audit');
       }
     }
   };
-  return { events, services, createdBackups, backupRequests };
+  return { events, services, createdBackups, backupRequests, auditRecords };
 }
 
 function dispatch(
@@ -227,6 +229,15 @@ describe('mutation envelope lifecycle', () => {
     expect(request?.observedStateDigest).toBe('state');
     expect(request?.effectPlanDigest).toBe('plan');
     expect(request?.argumentsSha256).toMatch(/^[0-9a-f]{64}$/u);
+  });
+
+  it('threads one transactionId through both audits and the backup request', async () => {
+    const harness = makeHarness();
+    await dispatch(makeCapability(harness.events), harness.services);
+    const txids = harness.auditRecords.map((r) => r.transactionId);
+    expect(txids[0]).toMatch(/^[0-9a-f]{32}$/u);
+    expect(new Set(txids).size).toBe(1);
+    expect(harness.backupRequests[0]?.transactionId).toBe(txids[0]);
   });
 
   it('awaits the lock release after the terminal audit and tolerates its report', async () => {

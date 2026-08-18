@@ -14,6 +14,7 @@ const ALLOWED_KEYS = Object.freeze([
   'effectiveResourceScopes',
   'phase',
   'outcome',
+  'transactionId',
   'backupId'
 ]);
 const EFFECTS: ReadonlySet<CapabilityEffect> = new Set(['read', 'local-write', 'firewall-write']);
@@ -47,6 +48,7 @@ export function createBoundedAuditSink(capacity: number = DEFAULT_CAPACITY): Bou
         scopes.some((scope) => typeof scope !== 'string') ||
         (value.phase !== 'intent' && value.phase !== 'result') ||
         !isBoundedString(value.outcome) ||
+        !isBoundedString(value.transactionId) ||
         (value.backupId !== undefined && !isBoundedString(value.backupId))
       ) {
         throw new Error('Audit record is malformed');
@@ -59,6 +61,7 @@ export function createBoundedAuditSink(capacity: number = DEFAULT_CAPACITY): Bou
         effectiveResourceScopes: Object.freeze([...(scopes as string[])]),
         phase: value.phase,
         outcome: value.outcome,
+        transactionId: value.transactionId,
         ...(value.backupId === undefined ? {} : { backupId: value.backupId })
       });
       records.push(frozen);

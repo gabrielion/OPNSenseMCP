@@ -40,6 +40,9 @@ const DEFAULT_LEDGER_CAPACITY = 1024;
 const MAX_TIMEOUT_MS = 300_000;
 const CONFIRMATION_ID_BYTES = 32;
 const CONFIRMATION_ID_ATTEMPTS = 4;
+// One id per envelope run, threaded through both audit records and the backup request so the
+// durable stores can be joined on a value no service can synthesize. 128-bit, matching backupId.
+const TRANSACTION_ID_BYTES = 16;
 const INVALID_CAPABILITY_DEFINITION_MESSAGE = 'Invalid capability definition';
 // Capability declarations are startup metadata, never an unbounded data channel.
 const MAX_CAPABILITY_METADATA_ARRAY_LENGTH = 128;
@@ -1634,6 +1637,9 @@ async function executeMutationEnvelope(
   if (preflightCallback === undefined || verifyCallback === undefined) {
     return refusal('EXECUTION_FAILED');
   }
+  // One kernel-generated id per envelope run: the intent audit, the result audit and the backup
+  // request all carry the same value, which is what lets the durable stores be joined later.
+  const transactionId = secureRandomBytes(TRANSACTION_ID_BYTES).toString('hex');
   const { timeoutMs, effect } = capability.policy;
 
   const makeContext = (signal: AbortSignal): CapabilityExecutionContext =>
@@ -1657,6 +1663,7 @@ async function executeMutationEnvelope(
         effectiveResourceScopes: authorization.effectiveResourceScopes,
         phase,
         outcome,
+        transactionId,
         ...(backupId === undefined ? {} : { backupId })
       });
       services.audit.record(record);
@@ -1732,7 +1739,8 @@ async function executeMutationEnvelope(
           argumentsSha256: authorization.argumentsSha256,
           effectiveResourceScopes: authorization.effectiveResourceScopes,
           observedStateDigest: sealed.observedStateDigest,
-          effectPlanDigest: sealed.effectPlanDigest
+          effectPlanDigest: sealed.effectPlanDigest,
+          transactionId
         });
         try {
           // Each call is bounded by its OWN runner, and so runs on its own signal: sharing one

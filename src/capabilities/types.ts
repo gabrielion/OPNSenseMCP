@@ -206,6 +206,7 @@ export interface BackupRequest {
   readonly effectiveResourceScopes: readonly string[];
   readonly observedStateDigest: string;
   readonly effectPlanDigest: string;
+  readonly transactionId: string;
 }
 
 export interface BackupService {
@@ -223,6 +224,7 @@ export interface AuditRecord {
   readonly effectiveResourceScopes: readonly string[];
   readonly phase: AuditPhase;
   readonly outcome: string;
+  readonly transactionId: string;
   readonly backupId?: string;
 }
 

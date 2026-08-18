@@ -29,7 +29,8 @@ const REQUEST: BackupRequest = Object.freeze({
   argumentsSha256: 'a'.repeat(64),
   effectiveResourceScopes: Object.freeze(['firewall.alias']),
   observedStateDigest: 'b'.repeat(64),
-  effectPlanDigest: 'c'.repeat(64)
+  effectPlanDigest: 'c'.repeat(64),
+  transactionId: 'd'.repeat(32)
 });
 
 let root: string;
