@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ensureIdentityKey } from '../../src/state/identity-key.js';
+import { ensureIdentityKey, identityKeyRetryDelayMs } from '../../src/state/identity-key.js';
 import { openStateRoot } from '../../src/state/state-root.js';
 
 function scratchRoot(): { base: string; rootPath: string } {
@@ -127,6 +127,125 @@ describe('ensureIdentityKey recovery', () => {
       expect(loser.equals(winner)).toBe(true);
       expect(statsAfter.ino).toBe(statsBefore.ino);
       expect(statsAfter.mtimeMs).toBe(statsBefore.mtimeMs);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+// The retry budget is what a starter has left when its peers keep sweeping the candidate it is
+// about to publish. On a few-core runner with a journalling filesystem the whole budget used to be
+// spent inside one scheduling quantum, so the numbers below are load-bearing, not decoration.
+describe('ensureIdentityKey retry schedule', () => {
+  // Attempt n is the pause AFTER the n-th failed attempt, so index 0 is the first retry.
+  const BASE_SCHEDULE = [0, 5, 10, 20, 40, 50, 50, 50, 50];
+  const PIDS = [1, 2, 3, 7, 999, 4242, 32_768, 4_194_304];
+
+  it('does not pause before the first retry, so the usual one-retry case stays immediate', () => {
+    for (const pid of PIDS) expect(identityKeyRetryDelayMs(1, pid)).toBe(0);
+  });
+
+  it.each(BASE_SCHEDULE.map((base, index) => [index + 1, base] as const))(
+    'pauses within half and one and a half of %ims before retry %i',
+    (attempt, base) => {
+      for (const pid of PIDS) {
+        const delay = identityKeyRetryDelayMs(attempt, pid);
+        expect(delay).toBeGreaterThanOrEqual(Math.floor(base * 0.5));
+        expect(delay).toBeLessThanOrEqual(Math.ceil(base * 1.5));
+      }
+    }
+  );
+
+  it('holds the cap for every attempt past the schedule instead of growing without bound', () => {
+    for (const pid of PIDS) {
+      for (const attempt of [10, 11, 50, 1000]) {
+        expect(identityKeyRetryDelayMs(attempt, pid)).toBeLessThanOrEqual(75);
+      }
+    }
+  });
+
+  it('gives one process the same schedule every time: the jitter is derived, never random', () => {
+    const schedule = (): readonly number[] =>
+      BASE_SCHEDULE.map((_base, index) => identityKeyRetryDelayMs(index + 1, 4242));
+    expect(schedule()).toEqual(schedule());
+  });
+
+  it('spreads neighbouring pids across the window so peers leave lockstep', () => {
+    const delays = new Set(
+      Array.from({ length: 500 }, (_value, index) => identityKeyRetryDelayMs(5, index + 1))
+    );
+    // Attempt 5 has a 40ms base, so jitter may land on any of 41 values from 20 to 60. A hash that
+    // merely reshuffled a handful of buckets would leave concurrent starters colliding.
+    expect(delays.size).toBeGreaterThanOrEqual(25);
+  });
+
+  it('bounds the whole budget: real margin, but never a visible startup stall', () => {
+    for (const pid of PIDS) {
+      const total = BASE_SCHEDULE.reduce(
+        (sum, _base, index) => sum + identityKeyRetryDelayMs(index + 1, pid),
+        0
+      );
+      expect(total).toBeGreaterThan(100);
+      expect(total).toBeLessThan(500);
+    }
+  });
+});
+
+describe('ensureIdentityKey retry loop', () => {
+  function recordWaits(): { readonly waits: number[]; readonly wait: (ms: number) => void } {
+    const waits: number[] = [];
+    return {
+      waits,
+      wait: (ms: number) => {
+        waits.push(ms);
+      }
+    };
+  }
+
+  it('spends ten attempts, pausing on the schedule, before it gives up on a stuck key', () => {
+    const { base, rootPath } = scratchRoot();
+    try {
+      const root = openStateRoot(rootPath);
+      ensureIdentityKey(root);
+      // A hard link outside the candidate pattern keeps every attempt transient forever: the sweep
+      // may not remove it, so nlink stays 2 and the loop runs its full budget.
+      linkSync(join(rootPath, 'identity.key'), join(rootPath, 'stray-link'));
+      const recorder = recordWaits();
+      expect(() => ensureIdentityKey(root, { wait: recorder.wait })).toThrow(
+        'Identity key failed its integrity checks'
+      );
+      expect(recorder.waits).toEqual(
+        Array.from({ length: 9 }, (_value, index) =>
+          identityKeyRetryDelayMs(index + 1, process.pid)
+        )
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('never pauses when publication succeeds outright', () => {
+    const { base, rootPath } = scratchRoot();
+    try {
+      const recorder = recordWaits();
+      const key = ensureIdentityKey(openStateRoot(rootPath), { wait: recorder.wait });
+      expect(key).toHaveLength(32);
+      expect(recorder.waits).toEqual([]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('never pauses on a persistent fault: a corrupt key fails on the first attempt', () => {
+    const { base, rootPath } = scratchRoot();
+    try {
+      const root = openStateRoot(rootPath);
+      writeFileSync(join(rootPath, 'identity.key'), Buffer.alloc(31), { mode: 0o600 });
+      const recorder = recordWaits();
+      expect(() => ensureIdentityKey(root, { wait: recorder.wait })).toThrow(
+        'Identity key failed its integrity checks'
+      );
+      expect(recorder.waits).toEqual([]);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
