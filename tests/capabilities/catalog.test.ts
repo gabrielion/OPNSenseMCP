@@ -276,7 +276,7 @@ describe('product catalog write surface', () => {
     deleteHostAlias: () => Promise.reject(new Error('unused'))
   };
   const services: MutationEnvelopeServices = {
-    lock: { acquire: () => Promise.resolve({ release: () => Promise.resolve() }) },
+    lock: { acquire: () => Promise.resolve({ release: () => Promise.resolve('released') }) },
     backup: {
       create: () => Promise.resolve({ backupId: 'b' }),
       exists: () => Promise.resolve(true)

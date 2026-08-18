@@ -75,6 +75,7 @@ function makeCapability(events: string[], opts: CapOptions = {}): CapabilityDefi
 
 interface HarnessOptions {
   readonly lockNull?: boolean;
+  readonly lockReleaseReport?: 'released' | 'unconfirmed';
   readonly backupThrow?: boolean;
   readonly backupMissing?: boolean;
   readonly auditIntentThrow?: boolean;
@@ -98,7 +99,7 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
         return Promise.resolve({
           release: () => {
             events.push('lock.release');
-            return Promise.resolve();
+            return Promise.resolve(opts.lockReleaseReport ?? 'released');
           }
         });
       }
@@ -167,6 +168,15 @@ describe('mutation envelope lifecycle', () => {
       'lock.release'
     ]);
     expect(harness.createdBackups.size).toBe(1);
+  });
+
+  it('awaits the lock release after the terminal audit and tolerates its report', async () => {
+    // The release is reported, not obeyed, this slice: an unconfirmed release changes neither the
+    // verified success nor the step order. Making it a refusal is a later, deliberate change.
+    const harness = makeHarness({ lockReleaseReport: 'unconfirmed' });
+    const result = await dispatch(makeCapability(harness.events), harness.services);
+    expect(result).toEqual({ kind: 'success', output: { applied: 'x' } });
+    expect(harness.events.slice(-2)).toEqual(['audit.result', 'lock.release']);
   });
 
   it('fails closed when the target lock is unavailable, before preflight or audit', async () => {

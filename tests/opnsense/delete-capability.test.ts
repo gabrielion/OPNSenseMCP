@@ -22,7 +22,7 @@ function makeServices(): MutationEnvelopeServices {
   const createdBackups = new Set<string>();
   let backupCounter = 0;
   return {
-    lock: { acquire: () => Promise.resolve({ release: () => Promise.resolve() }) },
+    lock: { acquire: () => Promise.resolve({ release: () => Promise.resolve('released') }) },
     backup: {
       create: () => {
         backupCounter += 1;

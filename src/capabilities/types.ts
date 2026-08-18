@@ -183,8 +183,11 @@ export interface PreflightResult {
   readonly observedStateDigest: string;
 }
 
+// A release REPORTS what it could establish: 'released' means the target is provably free again,
+// 'unconfirmed' means the holder could not confirm it. The envelope records the report without acting
+// on it; a durable lock is what makes an unconfirmed release worth refusing over.
 export interface LockHandle {
-  release(): Promise<void>;
+  release(): Promise<'released' | 'unconfirmed'>;
 }
 
 export interface MutationLockManager {

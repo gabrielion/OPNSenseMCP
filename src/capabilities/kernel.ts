@@ -1679,24 +1679,32 @@ async function executeMutationEnvelope(
   }
   if (lock === null) return refusal('LOCK_UNAVAILABLE');
 
-  try {
+  // Steps 2-8 leave through this block instead of returning, so that step 9 runs sequentially after
+  // the result is decided rather than inside a `finally`. Every exit still releases the lock exactly
+  // once, and a release that reports a problem is a result the envelope can eventually act on.
+  let result: CapabilityResult;
+  envelope: {
     // Step 2: sealed, side-effect-free, bounded preflight.
     const preflight = await runBounded(timeoutMs, context.signal, (signal) =>
       preflightCallback(authorization.input, makeContext(signal))
     );
     if (preflight.kind !== 'value' || !isPreflightResult(preflight.value)) {
-      return refusal(
+      result = refusal(
         preflight.kind === 'aborted'
           ? preflight.cause === 'caller'
             ? 'CANCELLED'
             : 'TIMEOUT'
           : 'PREFLIGHT_FAILED'
       );
+      break envelope;
     }
     const sealed = preflight.value;
 
     // Step 3: redacted audit intent (a failure here is itself fail-closed).
-    if (!recordAudit('intent', 'intent')) return refusal('EXECUTION_FAILED');
+    if (!recordAudit('intent', 'intent')) {
+      result = refusal('EXECUTION_FAILED');
+      break envelope;
+    }
 
     // Step 4: strict verified backup precedes the first write.
     let backupId: string | undefined;
@@ -1709,11 +1717,13 @@ async function executeMutationEnvelope(
         backupId = created.backupId;
         if (backupId.length === 0 || !(await services.backup.exists(backupId))) {
           recordAudit('result', 'BACKUP_FAILED', backupId);
-          return refusal('BACKUP_FAILED');
+          result = refusal('BACKUP_FAILED');
+          break envelope;
         }
       } catch {
         recordAudit('result', 'BACKUP_FAILED');
-        return refusal('BACKUP_FAILED');
+        result = refusal('BACKUP_FAILED');
+        break envelope;
       }
     }
 
@@ -1728,7 +1738,8 @@ async function executeMutationEnvelope(
       revalidation.value.effectPlanDigest !== sealed.effectPlanDigest
     ) {
       recordAudit('result', 'STATE_REVALIDATION_FAILED', backupId);
-      return refusal('STATE_REVALIDATION_FAILED');
+      result = refusal('STATE_REVALIDATION_FAILED');
+      break envelope;
     }
 
     // Step 6: bounded execution of the sealed apply phase.
@@ -1737,11 +1748,13 @@ async function executeMutationEnvelope(
     );
     if (applied.kind === 'aborted') {
       recordAudit('result', 'OUTCOME_INDETERMINATE', backupId);
-      return refusal('OUTCOME_INDETERMINATE');
+      result = refusal('OUTCOME_INDETERMINATE');
+      break envelope;
     }
     if (applied.kind === 'rejected') {
       recordAudit('result', 'EXECUTION_FAILED', backupId);
-      return refusal('EXECUTION_FAILED');
+      result = refusal('EXECUTION_FAILED');
+      break envelope;
     }
 
     // Step 7: verify the declared outcome; an unverifiable result is never a success.
@@ -1750,7 +1763,8 @@ async function executeMutationEnvelope(
     );
     if (verified.kind !== 'value' || !verified.value) {
       recordAudit('result', 'OUTCOME_UNVERIFIED', backupId);
-      return refusal('OUTCOME_UNVERIFIED');
+      result = refusal('OUTCOME_UNVERIFIED');
+      break envelope;
     }
 
     let parsedOutput: unknown;
@@ -1759,23 +1773,29 @@ async function executeMutationEnvelope(
       const snapshot = createCanonicalJsonSnapshot(parsedOutput).value;
       if (!isRecord(snapshot)) {
         recordAudit('result', 'INVALID_OUTPUT', backupId);
-        return refusal('INVALID_OUTPUT');
+        result = refusal('INVALID_OUTPUT');
+        break envelope;
       }
-      // Step 8: final audit, then step 9 (lock release) runs in finally.
+      // Step 8: final audit, then step 9 (lock release) below.
       recordAudit('result', 'success', backupId);
-      return Object.freeze({ kind: 'success', output: snapshot });
+      result = Object.freeze({ kind: 'success', output: snapshot });
     } catch {
       recordAudit('result', 'INVALID_OUTPUT', backupId);
-      return refusal('INVALID_OUTPUT');
-    }
-  } finally {
-    // Step 9: release the lock on every path.
-    try {
-      await lock.release();
-    } catch {
-      // A synthetic release cannot fail; a real release failure is a later reconciliation concern.
+      result = refusal('INVALID_OUTPUT');
     }
   }
+
+  // Step 9: release the lock on every path above, and keep what the release reported.
+  let releaseReport: 'released' | 'unconfirmed' = 'unconfirmed';
+  try {
+    releaseReport = await lock.release();
+  } catch {
+    // A synthetic release cannot fail; a real release failure is a later reconciliation concern.
+  }
+  // Nothing reads the report yet: a later increment turns an 'unconfirmed' release after a verified
+  // success into a LOCK_RELEASE_FAILED refusal, which is a deliberate behaviour change of its own.
+  void releaseReport;
+  return result;
 }
 
 async function executeAuthorized(

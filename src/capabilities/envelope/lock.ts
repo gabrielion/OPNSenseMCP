@@ -12,12 +12,14 @@ export function createInProcessMutationLockManager(): MutationLockManager {
       held.add(targetKey);
       let released = false;
       const handle: LockHandle = Object.freeze({
-        release(): Promise<void> {
+        release(): Promise<'released' | 'unconfirmed'> {
           if (!released) {
             released = true;
             held.delete(targetKey);
           }
-          return Promise.resolve();
+          // Dropping a process-local token cannot fail, and a repeated release is still a release,
+          // so this handle never has anything to report but success.
+          return Promise.resolve('released');
         }
       });
       return Promise.resolve(handle);

@@ -20,7 +20,7 @@ function recordingServices(touched: string[]): MutationEnvelopeServices {
         return Promise.resolve({
           release: () => {
             touched.push('lock.release');
-            return Promise.resolve();
+            return Promise.resolve('released');
           }
         });
       }

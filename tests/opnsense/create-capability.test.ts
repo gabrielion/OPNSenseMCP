@@ -31,7 +31,7 @@ function makeServices(options: ServiceOptions = {}): {
     lock: {
       acquire: () =>
         Promise.resolve({
-          release: () => Promise.resolve()
+          release: () => Promise.resolve('released')
         })
     },
     backup: {

@@ -30,7 +30,7 @@ function makeHarness(): Harness {
         return Promise.resolve({
           release: () => {
             events.push('lock.release');
-            return Promise.resolve();
+            return Promise.resolve('released');
           }
         });
       }
