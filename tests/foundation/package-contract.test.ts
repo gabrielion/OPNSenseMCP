@@ -44,6 +44,22 @@ describe('package contract', () => {
     expect(emitted.subarray(0, prefix.length)).toEqual(prefix);
   });
 
+  // The kernel mutation lock executes a bundled waiter as a process of its own, and the build
+  // compiles `src/**/*.ts` — nothing else. An emitted tree without the waiter still passes every
+  // in-repo test, because those resolve it from `src/`, while the installed server fails closed on
+  // every mutation. So the emitted copy is checked here, byte for byte, and again in the installed
+  // tarball (tests/integration/installed-package.test.ts).
+  it('emits the bundled lock waiter the compiler never sees', async () => {
+    const [source, emitted] = await Promise.all([
+      readFile('src/capabilities/envelope/lock-waiter.mjs'),
+      readFile('dist/capabilities/envelope/lock-waiter.mjs')
+    ]);
+
+    expect(emitted).toEqual(source);
+    const document = JSON.parse(await readFile('package.json', 'utf8')) as PackageDocument;
+    expect(document.scripts.build).toContain('node scripts/copy-runtime-assets.mjs');
+  });
+
   it('contains no Error.name-derived runtime diagnostic', async () => {
     for (const file of [
       'src/main.ts',

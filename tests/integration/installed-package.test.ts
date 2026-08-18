@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { access, readFile, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { runBoundedCommand, type CommandResult } from '../support/installed-package-harness.js';
 import { startSyntheticOPNsenseTarget } from '../support/https-opnsense-mock.js';
@@ -78,7 +78,16 @@ function runInstalledCommand(
         PATH: process.env.PATH ?? '',
         READ_ONLY: readOnly,
         MCP_REQUEST_STATE_SECRET: 'INSTALLED_PACKAGE_SENTINEL_0123456789',
-        ...(opnsenseConfigFile === undefined ? {} : { OPNSENSE_CONFIG_FILE: opnsenseConfigFile })
+        // A configured target makes the installed server open its durable state root, and this
+        // child has no HOME to default to safely. It is given one inside the private fixture
+        // directory the configuration already lives in, so the run writes nothing outside the
+        // fixture the test removes.
+        ...(opnsenseConfigFile === undefined
+          ? {}
+          : {
+              OPNSENSE_CONFIG_FILE: opnsenseConfigFile,
+              OPNSENSE_MCP_STATE_DIR: join(dirname(opnsenseConfigFile), 'state')
+            })
       },
       input,
       timeoutMs: MCP_COMMAND_TIMEOUT_MS,
@@ -159,6 +168,16 @@ describe('installed npm executable', () => {
           'utf8'
         );
         expect(emitted.subarray(0, prefix.length)).toEqual(prefix);
+        // The kernel mutation lock spawns this waiter by a path relative to its own compiled
+        // module, and the compiler only ever sees `src/**/*.ts`. A tarball without it installs a
+        // server that refuses every mutation — silently, since the lock's whole contract is to
+        // fail closed — while the in-repo suite, which resolves the waiter from `src/`, stays
+        // green. Byte equality, so a placeholder of the right name cannot satisfy it either.
+        expect(
+          await readFile(
+            join(dirname(installedTarget), 'capabilities', 'envelope', 'lock-waiter.mjs')
+          )
+        ).toEqual(await readFile('src/capabilities/envelope/lock-waiter.mjs'));
       }),
     PACKAGE_TEST_TIMEOUT_MS
   );

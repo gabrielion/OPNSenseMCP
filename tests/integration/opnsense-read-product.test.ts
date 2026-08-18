@@ -147,6 +147,9 @@ describe.each(MCP_ERAS)('$label Product 1A secure read composition', ({ connect 
     );
     vi.stubEnv('OPNSENSE_CONFIG_FILE', configFile);
     vi.stubEnv('READ_ONLY', 'true');
+    // A configured target makes the composition root open its durable state root, read-only run or
+    // not. It belongs to this fixture, so the cleanup below takes it with the rest.
+    vi.stubEnv('OPNSENSE_MCP_STATE_DIR', join(directory, 'state'));
 
     const runtime = createDefaultApplicationRuntime();
     const connection = await connect(runtime.application);

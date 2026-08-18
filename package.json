@@ -45,7 +45,7 @@
     "clean": "node scripts/clean.mjs",
     "start": "node dist/main.js",
     "start:http": "node dist/entrypoints/http.js",
-    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "build": "npm run clean && tsc -p tsconfig.build.json && node scripts/copy-runtime-assets.mjs",
     "prepare": "npm run build",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",

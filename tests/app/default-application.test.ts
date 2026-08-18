@@ -32,6 +32,10 @@ beforeEach(() => {
   vi.stubEnv('HOME', '');
   vi.stubEnv('XDG_CONFIG_HOME', '');
   vi.stubEnv('APPDATA', '');
+  // No ambient state root either: a test that does not name one must not reach the operator's own
+  // durable state, and with no home to default to the composition root degrades instead of
+  // guessing a directory.
+  vi.stubEnv('OPNSENSE_MCP_STATE_DIR', undefined);
 });
 
 afterEach(() => {
@@ -504,6 +508,11 @@ describe('default application composition seam', () => {
       return { statusCode: 404, body: '{}' };
     });
     const directory = await writeTargetConfig(target);
+    // The durable state root, pointed at a private scratch directory: `OPNSENSE_MCP_STATE_DIR` is
+    // the only override the resolver accepts, and it is what keeps this test off the operator's
+    // real state.
+    const stateDir = await mkdtemp(join(tmpdir(), 'opnsense-composed-state-'));
+    vi.stubEnv('OPNSENSE_MCP_STATE_DIR', stateDir);
     stubWriteGates();
     const runtime = createDefaultApplicationRuntime();
     const connection = await connectLegacy(runtime.application, {
@@ -548,11 +557,107 @@ describe('default application composition seam', () => {
       expect(paths.indexOf('/api/core/backup/download/this')).toBeLessThan(
         paths.indexOf('/api/firewall/alias/addItem')
       );
+
+      // The snapshot is a real pair of files under the resolved state root, filed against the
+      // target the configured origin derives — not a per-process scratch directory.
+      const targetsDir = join(stateDir, 'targets');
+      const targetIds = await readdir(targetsDir);
+      expect(targetIds).toHaveLength(1);
+      expect(targetIds[0]).toMatch(/^[a-z2-7]{52}$/u);
+      const targetDir = join(targetsDir, targetIds[0] ?? '');
+      // The spec's fixed layout, all three of it. The lock file is the tell that the kernel lock
+      // is the one wired: an in-process manager would have left nothing on disk.
+      expect((await readdir(targetDir)).sort()).toEqual(['audit', 'backups', 'lock']);
+      const backupIds = await readdir(join(targetDir, 'backups'));
+      expect(backupIds).toHaveLength(1);
+      expect(backupIds[0]).toMatch(/^[0-9a-f]{32}$/u);
+      const backupDir = join(targetDir, 'backups', backupIds[0] ?? '');
+      expect(await readFile(join(backupDir, 'config.xml'), 'utf8')).toContain(
+        '<hostname>lab</hostname>'
+      );
+      expect(
+        JSON.parse(await readFile(join(backupDir, 'metadata.json'), 'utf8')) as Record<
+          string,
+          unknown
+        >
+      ).toMatchObject({ schemaVersion: 1, backupId: backupIds[0], mcpName: 'opn_create' });
+
+      // Both audit lines of the run are on disk, in this month's segment, under one transaction.
+      const auditDir = join(targetDir, 'audit');
+      const segments = await readdir(auditDir);
+      expect(segments).toHaveLength(1);
+      expect(segments[0]).toMatch(/^\d{4}-\d{2}\.jsonl$/u);
+      const records = (await readFile(join(auditDir, segments[0] ?? ''), 'utf8'))
+        .split('\n')
+        .filter((line) => line !== '')
+        .map((line) => JSON.parse(line) as { phase: string; transactionId: string });
+      expect(records.map(({ phase }) => phase)).toEqual(['intent', 'result']);
+      expect(new Set(records.map(({ transactionId }) => transactionId)).size).toBe(1);
+
+      // Durable across a restart: shutting the server down must leave the state where it is, and
+      // the next start must derive the same target from the same published identity key.
+      await connection.close();
+      await runtime.close();
+      const restarted = createDefaultApplicationRuntime();
+      try {
+        expect(await readdir(targetsDir)).toEqual(targetIds);
+        expect(await readdir(join(targetDir, 'backups'))).toEqual(backupIds);
+        expect(await readFile(join(backupDir, 'config.xml'), 'utf8')).toContain(
+          '<hostname>lab</hostname>'
+        );
+      } finally {
+        await restarted.close();
+      }
     } finally {
       await connection.close();
       await runtime.close();
       await target.close();
       await rm(directory, { recursive: true, force: true });
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it('derives a durable target for a firewall reached on the default HTTPS port', async () => {
+    // The private configuration carries a URL ORIGIN, and an origin drops :443 — which is the
+    // spelling of every firewall reachable at `https://<host>`. A target id is derived from the
+    // canonical origin, and deriving one from `https://host` verbatim throws, so the
+    // canonicalization at the seam is the whole difference between that deployment and a server
+    // with no writes at all. Composing touches no network, so an unreachable host proves it.
+    const directory = await mkdtemp(join(tmpdir(), 'opnsense-default-port-'));
+    const stateDir = await mkdtemp(join(tmpdir(), 'opnsense-default-port-state-'));
+    const configFile = join(directory, 'config.json');
+    await writeFile(
+      configFile,
+      JSON.stringify({
+        url: 'https://firewall.invalid',
+        apiKey: 'test-key',
+        apiSecret: 'test-secret'
+      }),
+      { mode: 0o600 }
+    );
+    vi.stubEnv('OPNSENSE_CONFIG_FILE', configFile);
+    vi.stubEnv('OPNSENSE_MCP_STATE_DIR', stateDir);
+    stubWriteGates();
+
+    const runtime = createDefaultApplicationRuntime();
+    try {
+      expect(
+        listApplicationCapabilities(runtime.application, 'stdio').map(({ mcpName }) => mcpName)
+      ).toEqual([
+        'server_status',
+        'opn_describe',
+        'opn_get',
+        'opn_list',
+        'opn_create',
+        'opn_delete'
+      ]);
+      const targetIds = await readdir(join(stateDir, 'targets'));
+      expect(targetIds).toHaveLength(1);
+      expect(targetIds[0]).toMatch(/^[a-z2-7]{52}$/u);
+    } finally {
+      await runtime.close();
+      await rm(directory, { recursive: true, force: true });
+      await rm(stateDir, { recursive: true, force: true });
     }
   });
 
@@ -573,10 +678,13 @@ describe('default application composition seam', () => {
     });
     const directory = await writeTargetConfig(target);
     stubWriteGates();
-    // The real seam, not an injected one: the backup store is created under the process temporary
-    // directory, so an unusable TMPDIR is exactly the failure Slice 2b's resolved state root will
-    // raise on a locked-down host.
-    vi.stubEnv('TMPDIR', join(directory, 'absent'));
+    // The real seam, not an injected one: the resolved state root is created before it is
+    // validated, and a regular file can never become the parent of a directory. So this is the
+    // locked-down host — a root the server may not create — reproduced without depending on the
+    // permissions of the account running the tests.
+    const blocker = join(directory, 'blocker');
+    await writeFile(blocker, '', { mode: 0o600 });
+    vi.stubEnv('OPNSENSE_MCP_STATE_DIR', join(blocker, 'state'));
 
     const runtime = createDefaultApplicationRuntime();
     const connection = await connectLegacy(runtime.application);

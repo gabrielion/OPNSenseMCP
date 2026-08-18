@@ -104,6 +104,9 @@ async function withTarget(
   );
   vi.stubEnv('OPNSENSE_CONFIG_FILE', configFile);
   vi.stubEnv('READ_ONLY', 'false');
+  // Every mutation below now writes a real backup, a real audit line and a real lock file. They
+  // belong to this fixture's own state root, which the cleanup below removes with the rest.
+  vi.stubEnv('OPNSENSE_MCP_STATE_DIR', join(directory, 'state'));
   // Alias writes are experimental: they require the exact flag and an explicitly named scope, the
   // same triple the disposable-VM runner uses.
   vi.stubEnv('ENABLED_FEATURE_FLAGS', 'experimental-alias-write');
