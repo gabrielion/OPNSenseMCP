@@ -277,7 +277,11 @@ function publishBackup(
   content: Buffer,
   metadataBytes: Buffer
 ): void {
+  // What this call must undo if it fails, and never more than that: the staging directory until the
+  // rename lands, the published directory from that instant on. They are never both set, because a
+  // rename is exactly the moment one becomes the other.
   let stagingDir: string | undefined;
+  let publishedDir: string | undefined;
   try {
     mkdirSync(rootDir, { recursive: true, mode: 0o700 });
     const candidate = join(
@@ -298,12 +302,17 @@ function publishBackup(
     }
     fsyncDirectory(stagingDir);
     renameSync(stagingDir, join(rootDir, backupId));
-    // Inside the same guard as the rename, and for two reasons: the spec has `create` succeed only
-    // once the store itself is durable, and an fs errno raised here would otherwise leave this
-    // module carrying the private path in its message.
+    publishedDir = join(rootDir, backupId);
+    stagingDir = undefined;
+    // Inside the same guard as the rename, and for three reasons: the spec has `create` succeed
+    // only once the store itself is durable; an fs errno raised here would otherwise leave this
+    // module carrying the private path in its message; and a failure reported after the snapshot
+    // is in the store must take the snapshot back out, or the kernel refuses the write while an
+    // untracked copy of the configuration stays behind with nothing that will ever claim it.
     fsyncDirectory(rootDir);
   } catch (error) {
     if (stagingDir !== undefined) discardQuietly(stagingDir);
+    if (publishedDir !== undefined) discardQuietly(publishedDir);
     throw error instanceof BackupError ? error : backupError(PUBLICATION_FAILED);
   }
 }

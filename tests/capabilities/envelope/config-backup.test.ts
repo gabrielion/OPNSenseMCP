@@ -126,6 +126,31 @@ describe('OPNsense configuration backup service', () => {
     await expect(service.create(REQUEST, signal)).rejects.toThrow();
   });
 
+  // The one failure that lands AFTER the rename, reached without a seam: every step up to and
+  // including the rename needs only write and execute on the store, and the closing fsync needs
+  // read, so a write-only store fails exactly once the snapshot is already published. A `create`
+  // that reports failure must not leave that snapshot behind — the kernel refuses the write on
+  // BACKUP_FAILED, and nothing would ever claim the orphan. The message is checked too: an fs
+  // errno would carry the private store path, and this module's contract is that it never does.
+  it('leaves no published backup behind when the store cannot be made durable', async () => {
+    const store = join(root, 'store');
+    mkdirSync(store, { recursive: true, mode: 0o700 });
+    const service = createOPNsenseConfigBackupService(source(), store);
+    let message = '';
+    try {
+      chmodSync(store, 0o300);
+      await service.create(REQUEST, signal);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    } finally {
+      chmodSync(store, 0o700);
+    }
+
+    expect(message).toBe('Backup publication failed');
+    expect(message).not.toMatch(/\//u);
+    expect(readdirSync(store)).toEqual([]);
+  });
+
   // The planted backup is complete and self-consistent — its metadata names the planted id and
   // describes the very bytes the link points at — so the symlink is the only fault left, and a
   // service that followed it would answer `true`.
@@ -195,6 +220,53 @@ describe('OPNsense configuration backup service', () => {
     const created = await service.create(REQUEST, signal);
     chmodSync(join(store, created.backupId, 'config.xml'), 0o644);
 
+    expect(await service.exists(created.backupId, signal)).toBe(false);
+  });
+
+  // The directory answers for itself: its mode is what governs who may replace an entry inside it,
+  // so a widened backup directory is the same class of fault as a widened file and not a detail of
+  // how the files happen to be reached.
+  it('rejects a stored backup whose directory mode was widened after the write', async () => {
+    const store = join(root, 'store');
+    const service = createOPNsenseConfigBackupService(source(), store);
+    const created = await service.create(REQUEST, signal);
+    chmodSync(join(store, created.backupId), 0o755);
+
+    expect(await service.exists(created.backupId, signal)).toBe(false);
+  });
+
+  // A copy is intact in every respect a stat or a checksum can see — same bytes, same digest, same
+  // modes, one link each — so the only thing that separates it from the original is the id its
+  // metadata names. Without that binding a snapshot could be presented as the snapshot of another
+  // transaction, which is precisely the confusion an audit trail exists to prevent.
+  it('refuses a published backup copied under a different id', async () => {
+    const store = join(root, 'store');
+    const service = createOPNsenseConfigBackupService(source(), store);
+    const created = await service.create(REQUEST, signal);
+    const copyId = 'e'.repeat(32);
+    const copy = join(store, copyId);
+    mkdirSync(copy, { mode: 0o700 });
+    for (const name of ['config.xml', 'metadata.json']) {
+      writeFileSync(join(copy, name), readFileSync(join(store, created.backupId, name)), {
+        mode: 0o600
+      });
+    }
+
+    expect(await service.exists(created.backupId, signal)).toBe(true);
+    expect(await service.exists(copyId, signal)).toBe(false);
+  });
+
+  // The read side rejects an unexpected field for the same reason the audit ring does: a file that
+  // is allowed to carry one more key than its shape names is a file that can be made to carry
+  // configuration bytes. The mode is asserted unchanged so the refusal can only be the shape.
+  it('rejects stored metadata that carries a field outside the fixed shape', async () => {
+    const store = join(root, 'store');
+    const service = createOPNsenseConfigBackupService(source(), store);
+    const created = await service.create(REQUEST, signal);
+    const path = join(store, created.backupId, 'metadata.json');
+    writeFileSync(path, JSON.stringify({ ...readMetadata(path), note: 'smuggled' }));
+
+    expect(lstatSync(path).mode & 0o777).toBe(0o600);
     expect(await service.exists(created.backupId, signal)).toBe(false);
   });
 });
