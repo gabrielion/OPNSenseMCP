@@ -30,9 +30,14 @@ const KEY_INTEGRITY = 'Identity key failed its integrity checks';
 // an extra hard link that no sweep may remove, say — from spinning forever.
 const MAX_ATTEMPTS = 10;
 // Pause before retry n, in milliseconds, by 1-based attempt; every retry past the ramp holds the
-// cap. The first retry stays immediate because the commonest transient — a peer caught between its
-// link and its unlink — closes in microseconds, and the cap keeps the whole budget inside a few
-// hundred milliseconds of a startup path that a human is waiting on.
+// cap, so nine retries cost at most 412ms even at the top of the jitter — a bound worth keeping on
+// a startup path a human is waiting on. The first retry is free because a transient often means the
+// race is already decided: the sweep that removed our candidate belongs to a peer that is about to
+// publish, or has published, or we published first and lost only our own leftover candidate — and
+// the retry then finds a key and short-circuits on it. Measured at twelve-way concurrency on two
+// vCPUs, 30% of the starters that took the free pause succeeded on the very next attempt. Pausing
+// there would buy nothing. The ramp exists for the other case, where nobody has published yet and
+// the starters are still sweeping each other.
 const RETRY_DELAYS_MS: readonly number[] = [0, 5, 10, 20, 40];
 const RETRY_CAP_MS = 50;
 const NOFOLLOW = (constants.O_NOFOLLOW as number | undefined) ?? 0;
@@ -244,7 +249,9 @@ const RETRY_PARK = new Int32Array(new SharedArrayBuffer(4));
 
 const DEFAULT_RETRY_DEPENDENCIES: IdentityKeyRetryDependencies = Object.freeze({
   wait: (milliseconds: number): void => {
-    if (milliseconds <= 0) return;
+    // Finite and positive or nothing: Atomics.wait treats Infinity as no timeout and NaN as zero,
+    // and a startup path must never be able to park forever on an arithmetic slip.
+    if (!Number.isFinite(milliseconds) || milliseconds <= 0) return;
     Atomics.wait(RETRY_PARK, 0, 0, milliseconds);
   }
 });
@@ -259,7 +266,14 @@ export function ensureIdentityKey(
     } catch (error) {
       if (!(error instanceof TransientIdentityKeyError)) throw error;
       if (attempt >= MAX_ATTEMPTS) throw integrityError();
-      dependencies.wait(identityKeyRetryDelayMs(attempt, process.pid));
+      try {
+        dependencies.wait(identityKeyRetryDelayMs(attempt, process.pid));
+      } catch {
+        // The contract is that one static sentence leaves this module, whatever failed. An injected
+        // wait is the one step here that a caller supplies, so it is the one step that could throw
+        // something else, and it must not become the exception the caller sees.
+        throw integrityError();
+      }
     }
   }
 }

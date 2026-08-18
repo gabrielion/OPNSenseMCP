@@ -798,3 +798,70 @@ Branch: p0c/slice1.1-hardening (2026-08-17/18), base fc3b100 from main, commits 
   - Landing check to perform, not to assume: the first green `main` run must be confirmed to have
     actually EXECUTED the evidence-freshness job, not reported green because an earlier step failed
     and the job never ran.
+
+=== P0-C IDENTITY-KEY RETRY MARGIN (CI-observed flake) — COMPLETE, NOT YET LANDED ===
+Branch: p0c/identity-key-retry-margin (2026-08-18), base fbecc85 from main, commits 980ccea and the
+commit carrying this entry. Touches src/state/identity-key.ts, tests/state/identity-key.test.ts,
+docs/project-status.md, this ledger. Not pushed.
+  - Trigger: GitHub Actions run 32084653665 (release workflow, ubuntu-24.04, 2-4 vCPU,
+    `npm run verify`) — tests/state/identity-key-race.test.ts test 1, ONE starter of twelve printed
+    `fail Identity key failed its integrity checks`. Two other CI executions of the SAME commit
+    passed, as had hundreds of local macOS runs (576-starter stress: 0 failures, deepest chain 4/5).
+  - Method: reproduce, do not argue. A disposable 2-vCPU Ubuntu 24.04.4 / kernel 6.8 VM (colima,
+    deleted afterwards) with TMPDIR on an ext4 docker volume — NOT overlayfs, NOT tmpfs — running the
+    repository's own child harness. Pristine code fails 100 of 280 starters there (35.7 %).
+  - VERDICT: transient-retry exhaustion, and nothing else. With the classifier instrumented, the
+    PERSISTENT bucket was hit ZERO times in 280 Linux starters. There is no Linux-specific errno
+    misclassification to fix: unlink/link/open of a just-removed entry return ENOENT on Linux exactly
+    as on darwin, and the darwin/Linux differences in this area (unlink of a directory: EPERM vs
+    EISDIR) are persistent on both platforms, so no classification moves.
+  - THE MECHANISM IS NOT WHAT THE CODE'S COMMENTS CLAIMED, and the old comments have been rewritten.
+    The nlink window (a winner caught between its link and its unlink) occurred ZERO times. The
+    dominant transient is link->ENOENT, 897 occurrences: `cleanupCandidates` unlinks EVERY
+    candidate-patterned entry including live peers' in-flight candidates, and `writeCandidate` makes
+    its candidate's NAME visible before it fsyncs the contents. Measured in-container: open+write of
+    32 bytes 0.011 ms, fsync 0.388 ms median (0.573 max) — the vulnerable window is ~35x the work it
+    protects. On APFS that step is cheap, which is precisely why macOS cannot reproduce this class
+    at all: 0 failures at 20-way even under 96 competing spinner processes. DO NOT accept a green
+    macOS stress as evidence about identity-key concurrency; use a few-vCPU Linux box on a
+    journalling filesystem.
+  - Fix (src/state/identity-key.ts): MAX_ATTEMPTS 5 -> 10, plus a bounded jittered pause between
+    attempts — 0, 5, 10, 20, 40 then 50 ms cap, each multiplied by 0.5 + f where f in [0,1) comes
+    from a splitmix32 avalanche over (pid, attempt). Derived, never Math.random and never
+    randomBytes: reproducible under test, and mixing the attempt as well as the pid stops two
+    starters that collide on one rung from staying correlated on the next. Nine retries cost at most
+    412 ms (155-391 ms swept over 200 000 pids). The first rung is 0 ms on purpose: ~30 % of the
+    starters that take it succeed on the very next attempt, because a swept candidate usually means
+    a peer has already published and the retry short-circuits on the existing key. Blocking uses
+    Atomics.wait on a module-level SharedArrayBuffer nobody notifies — startup is synchronous, and a
+    spin loop would burn the core the peer needs in order to finish publishing.
+  - ABLATION, the reason the pause is in this commit and not just the bigger number: 10 attempts with
+    the backoff DISABLED still failed 29 % and 8 % of starters across two 2-vCPU runs, with the depth
+    histogram piled against the new ceiling. The desynchronising pause is the fix; the extra attempts
+    are headroom. After both: 724 Linux starters, 0 failures, deepest chain 4 of 10.
+  - Seam: `ensureIdentityKey(root, dependencies?)` takes an injectable `wait`, in the style of
+    runCommandLine's dependencies parameter, so the schedule is pinned by a unit test with no real
+    sleeping and no fake timers. The pure `identityKeyRetryDelayMs(attempt, pid)` is exported for the
+    same test. NEITHER is re-exported from src/state/index.ts — the package's public surface is
+    unchanged and `ensureIdentityKey(root)` still works.
+  - Review follow-ups folded in (second commit): the injected wait is called inside a try/catch that
+    converts anything it throws into the static sentence — proven RED first, since a throwing wait
+    previously leaked `clock unavailable at /private/var/folders/...` straight to the caller; the
+    default wait refuses non-finite and non-positive values (Atomics.wait reads Infinity as "no
+    timeout"); the budget assertion tightened from < 500 to < 425 against the schedule's own 412 ms
+    worst case; two swapped it.each title placeholders fixed.
+  - Gate results (Node v22.23.1):
+    - `npx vitest run tests/state/`: 4 files / 76 tests, green (run 3x on the first commit's tree),
+      then 77 tests green on the second
+    - `npm run verify`: exit 0 (61 files / 1227 tests)
+    - `npm run test:conformance`: exit 0 (2025-11-25 and 2026-07-28 profiles)
+    - `npm run license:check`: exit 0 — `git diff --check`: exit 0
+    - eslint / prettier / tsc on the touched files: clean
+  - CARRY-OVER (real fix, deliberately not bundled into a robustness patch): stop sweeping LIVE
+    peers' candidates. `cleanupCandidates` currently deletes any candidate-patterned entry on every
+    attempt, which is what creates the race the backoff now out-waits. Sweep once per process start
+    (crash residue cannot appear mid-run) or age-gate the sweep to candidates older than a second or
+    two; either removes the race class instead of tolerating it, and would leave the retry budget
+    nearly unused. Related: `writeCandidate` could fsync before the name is linkable at all.
+  - Trap for a future session: if that race test flakes again, instrument RETRY DEPTH, not the
+    classifier. The classifier was correct on both platforms the whole time; the budget was not.

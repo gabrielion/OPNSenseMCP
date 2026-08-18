@@ -411,9 +411,15 @@ Those facts guide the clean-room design; they do not authorize copying implement
   the children at `dist/` instead exercises whatever was last built there, so a stale `dist/` can make a
   fixed race look broken or a broken one look fixed.
 - That race test runs 12 starters across 4 fresh rounds plus a residue pass. If it ever flakes, suspect the
-  5-attempt retry bound in `src/state/identity-key.ts`, not the harness: measured pre-fix failure was
-  19–28 % of starters per round at 12 concurrent starters and 33–43 % at 20; post-fix a stress diagnostic
-  saw 0 failures in 576 starters, but the deepest retry chain observed at 20-way used 4 of the 5 attempts.
+  retry margin in `src/state/identity-key.ts`, not the harness: measured pre-fix failure was
+  19–28 % of starters per round at 12 concurrent starters and 33–43 % at 20. The 5-attempt bound that
+  followed still exhausted on real CI — one starter in twelve on `ubuntu-24.04` in release run
+  32084653665 — because macOS cannot reproduce the failure at all: the vulnerable window is the fsync
+  inside `writeCandidate` (0.388 ms on ext4 against 0.011 ms of work), during which every peer's sweep
+  can remove the candidate. The bound is now 10 attempts with a jittered backoff between them; on a
+  2-vCPU Ubuntu 24.04 emulation that is 0 failures in 724 starters with the deepest chain 4 of 10 at
+  both 12-way and 20-way. Diagnose a future flake by retry depth, not by the classifier: the persistent
+  bucket was hit zero times in 280 pre-fix Linux starters.
 - `canonicalizeOrigin` now rejects underscored hostnames (`https://a_b.example`), a common internal
   spelling, and every rejection returns the same opaque static sentence that never says which rule fired.
   Expect that report from users of underscored internal names.
@@ -428,9 +434,12 @@ the CLI and refreshed the public documentation. P0-C Slice 1 landed on `main` th
 The 2026-08-17/18 Slice 1.1 hardened that module on `p0c/slice1.1-hardening`:
 
 - concurrent first starts no longer kill each other. The identity-key publication tolerates a swept
-  candidate, classifies transient failures and repeats the whole attempt up to 5 times; every error
-  that escapes is one static sentence carrying no path. A real multi-process race test (12 starters
-  on a shared barrier, fresh roots and planted residue) is the proof.
+  candidate, classifies transient failures and repeats the whole attempt up to 10 times, pausing on a
+  jittered backoff between attempts (0, 5, 10, 20, 40 then 50 ms, ±50 % derived from the pid and the
+  attempt, ≤ 412 ms in all); every error that escapes is one static sentence carrying no path. A real
+  multi-process race test (12 starters on a shared barrier, fresh roots and planted residue) is the
+  proof. The backoff, not the raised bound, is what fixes it: 10 attempts without a pause still failed
+  29 % and 8 % of starters across two 2-vCPU Linux runs.
 - the state root is canonicalized before it is validated, through a new `openResolvedStateRoot`
   entry point, so the macOS `/var` → `/private/var` spelling is accepted; a non-normalized override
   is rejected with its own static message.

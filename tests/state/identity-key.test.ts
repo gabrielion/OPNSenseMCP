@@ -146,7 +146,7 @@ describe('ensureIdentityKey retry schedule', () => {
   });
 
   it.each(BASE_SCHEDULE.map((base, index) => [index + 1, base] as const))(
-    'pauses within half and one and a half of %ims before retry %i',
+    'retry %i pauses within half and one and a half of its %ims base',
     (attempt, base) => {
       for (const pid of PIDS) {
         const delay = identityKeyRetryDelayMs(attempt, pid);
@@ -185,8 +185,10 @@ describe('ensureIdentityKey retry schedule', () => {
         (sum, _base, index) => sum + identityKeyRetryDelayMs(index + 1, pid),
         0
       );
+      // The ceiling is the schedule's own worst case — 412ms, every rung at the top of its jitter —
+      // so a widened rung or a lifted cap trips this rather than sliding under a round number.
       expect(total).toBeGreaterThan(100);
-      expect(total).toBeLessThan(500);
+      expect(total).toBeLessThan(425);
     }
   });
 });
@@ -231,6 +233,30 @@ describe('ensureIdentityKey retry loop', () => {
       const key = ensureIdentityKey(openStateRoot(rootPath), { wait: recorder.wait });
       expect(key).toHaveLength(32);
       expect(recorder.waits).toEqual([]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the static message even when the injected wait throws its own error', () => {
+    const { base, rootPath } = scratchRoot();
+    try {
+      const root = openStateRoot(rootPath);
+      ensureIdentityKey(root);
+      linkSync(join(rootPath, 'identity.key'), join(rootPath, 'stray-link'));
+      let message = '';
+      try {
+        ensureIdentityKey(root, {
+          wait: () => {
+            throw new Error(`clock unavailable at ${rootPath}`);
+          }
+        });
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      // The wait is the one step a caller supplies, so it is the one step that could smuggle a path
+      // out of this module. It must not.
+      expect(message).toBe('Identity key failed its integrity checks');
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
