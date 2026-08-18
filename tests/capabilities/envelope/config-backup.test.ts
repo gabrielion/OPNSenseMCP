@@ -107,7 +107,7 @@ describe('OPNsense configuration backup service', () => {
   });
 
   // The other two legs of the discipline — truncation and a flipped byte — are checked only on the
-  // write path, where `create` re-reads exactly what it just wrote (config-backup.ts:53 and :95).
+  // write path, where `create` re-reads exactly what it just wrote (config-backup.ts:56 and :98).
   // `exists` stats without reading, and `create` persists neither the length nor the digest, so an
   // edit made after that verification is invisible to every later caller. Asserting the discipline
   // the way it deserves needs a stored digest, i.e. a change to the module this slice froze, so it
