@@ -865,3 +865,154 @@ docs/project-status.md, this ledger. Not pushed.
     nearly unused. Related: `writeCandidate` could fsync before the name is linkable at all.
   - Trap for a future session: if that race test flakes again, instrument RETRY DEPTH, not the
     classifier. The classifier was correct on both platforms the whole time; the budget was not.
+
+=== P0-C SLICE 2A (envelope prep refactors) — COMPLETE, NOT YET LANDED ===
+Branch: p0c/slice2a-envelope-prep (2026-08-18), base 98c33f5 from main, commits 98c33f5..92c275b
+plus the two commits carrying this entry. Plan:
+docs/superpowers/plans/2026-08-18-p0c-slice2a-envelope-prep-refactors.md (8 tasks, one commit each;
+implementers and task reviewers on opus effort max, per the user mandate). Goal: reshape the
+mutation-envelope interfaces and the composition root so Slice 2b can drop in durable
+backup/audit/lock as pure service swaps — R1-R5, R7, R8 from the 2026-08-17 review plus four
+carry-overs — with ZERO observable behaviour change.
+  - CANARY, the slice's most load-bearing assertion, re-run by every task: the envelope's step-order
+    event list must not change. IT DID NOT. The "runs the fixed order and returns the verified output
+    on success" block in tests/capabilities/mutation-envelope.test.ts is BYTE-IDENTICAL to main's
+    (extracted-block diff empty at the final tree) and still asserts, in order: lock.acquire,
+    preflight, audit.intent, backup.create, preflight, handler, verify, audit.result, lock.release.
+    No refusal code, result shape or event order moved anywhere this slice.
+  - R2 + R1 (56d0362, 71c8f72): LockHandle.release() now returns Promise<'released' | 'unconfirmed'>
+    and the in-process handle always reports 'released' (a process-local token cannot fail to drop).
+    executeMutationEnvelope's try/finally became a labeled block — every former `return X` is
+    `result = X; break envelope;` — so ONE sequential release runs after the terminal audit, its
+    report captured into a deliberately unused local (Slice 3 turns 'unconfirmed'-after-verified-
+    success into LOCK_RELEASE_FAILED). Review round 1 restored the exception safety net the
+    restructure had deleted: a catch/release/rethrow guard, RED-reproduced with a throwing getter,
+    because one leak of the process-wide lock is a restart-only write outage. Slice 3 must know there
+    are now TWO release sites and that the catch deliberately never converts to LOCK_RELEASE_FAILED.
+  - R3 (a50b9e7): one `finishWith(outcome, backupId?)` helper carries all NINE terminal audit sites,
+    so a new branch cannot skip the result record. `terminalAuditRecorded` is captured and discarded
+    exactly where Slice 3's AUDIT_RESULT_FAILED precedence will read it.
+  - R4 (0a6288b): BackupService.create(BackupRequest, signal) — targetKey, capabilityId, mcpName,
+    argumentsSha256, effectiveResourceScopes, observedStateDigest, effectPlanDigest, all
+    kernel-supplied and already canonicalized — replaces the positional scope string. The request is
+    built OUTSIDE the try on purpose: reading the sealed digests is not a backup failure.
+  - R5 (9f171c2): no unbounded service call is left. acquire, create, exists and both release sites
+    run under runBounded with the capability's timeout, and create/exists each take their OWN
+    runner's signal (sharing one silently hands the second call the first's leftover budget).
+    Release is bounded with an undefined caller signal on purpose — an already-aborted signal would
+    skip the thunk and leak the process-wide lock — and that choice is pinned.
+  - R7 + R8 (850635b, 3603290): mutation services are built by one lazy fail-closed helper; if
+    construction throws, the runtime serves a READ-ONLY catalogue instead of failing to start. The
+    composition root now holds the parsed connection config and hands the builder the real origin
+    (parsed.url), returned and ignored this slice. Discovery: `services: undefined` alone crashes
+    dispatch because the catalogue still holds the envelope capability; the guard at kernel:1870 is
+    UNTESTED and catalog.test.ts:385-390 is the real coverage.
+  - Sweep-once (53994c6, 33545b6): cleanupCandidates is hoisted out of the retry loop into
+    sweepCandidatesOnce(), called once per ensureIdentityKey call before attempt 1, so a retry can no
+    longer remove a live peer's in-flight candidate. The wrapper exists because the sweep left the
+    one place that enforced the module's static-error contract: with the guard deleted, a readdirSync
+    EACCES reached the caller WITH the private state-root path in it (RED-proven by a 0o300 root
+    test). Retry/backoff machinery byte-untouched. The trade is named in the module: a peer that dies
+    between its own link and its own unlink WHILE we are retrying leaves residue this call will not
+    sweep, holding nlink at 2 until the budget runs out, where the old per-attempt sweep recovered it
+    on attempt 2 — accepted because that residue is indistinguishable by name from the live candidate
+    we must not touch, needs a microsecond crash window inside our ~400 ms retry window, and the next
+    start sweeps it.
+  - Sweep-once stress (darwin, scratch harness only, 3 interleaved repetitions per side to cancel
+    machine drift, 20 starters x 20 rounds = 400 starters each). Retry-depth histograms:
+      barrier,   before: 1:245/2:145/3:10 | 1:273/2:115/3:12 | 1:272/2:125/3:3
+      barrier,   after:  1:298/2:93/3:9   | 1:265/2:123/3:12 | 1:295/2:95/3:10
+      staggered, before: 1:235/2:102/3:53/4:10 | 1:234/2:105/3:52/4:9 | 1:227/2:111/3:52/4:10
+      staggered, after:  1:332/2:44/3:16/4:8 | 1:320/2:48/3:25/4:7 | 1:323/2:41/3:29/4:6/5:1
+    Swept-candidate transients (link->ENOENT, the class this change targets): staggered 220 -> 97
+    (-56 %), retried 42 % -> 19 %; barrier 111 -> 99, inside the noise band. 0 failures, 0 key
+    disagreements, 0 residue on both sides in every run.
+  - DARWIN CAVEAT, mandatory alongside those numbers: macOS numbers CHARACTERIZE THE MECHANISM, they
+    are NOT fix verification. darwin/APFS cannot reproduce this failure class at all (0 failures with
+    and without the change), exactly as the retry-margin entry above warns. The load-bearing evidence
+    is the 2-vCPU Linux/ext4 procedure re-run against the sweep-once tree — a candidate for the
+    Slice 2b exit gate. The retry budget was deliberately NOT shrunk before that evidence exists.
+    Also: the plan's "deepest <= 2" expectation was WRONG, and the anomaly was reported rather than
+    tuned away — sweep-once bounds each PEER to one sweep, not each starter to one loss, so depth is
+    bounded by peer count (19 independent startup sweeps at 20-way), and the barrier configuration
+    cannot show the effect at all because every peer is inside its first attempt there anyway.
+  - Task 7 (92c275b): version-drift test (tests/foundation/version-drift.test.ts — 6 files,
+    7 literals, derived from package.json; server-status.ts additionally gets an occurrence count,
+    since one `includes` cannot see one of its two literals drift), the backup-discipline legs, and
+    the two stale comments (config-backup.ts's reference to the module Slice 1.1 deleted;
+    state-root.ts's falsified "widens the accepted spelling, not the accepted directory").
+  - Task 7 DISCOVERY, which reshaped the 2b list: the plan's premise for backup legs (b)/(c) was
+    FALSE. The nlink/mode/truncation guards live in readRegularPrivateFile, reached ONLY from
+    create's write-path re-read, and create computes its sha256 and DISCARDS it — nothing persists
+    the digest or the length. exists() therefore proves presence and privacy only (id pattern,
+    O_RDONLY|O_NOFOLLOW open, fstat, nlink === 1) and never reads a byte, while kernel.ts:1751 treats
+    exists === true as "backup verified" (L1760-1764 turn a false into the BACKUP_FAILED refusal).
+    No implementation of exists ALONE can close this. Per the brief's own fallback the module was not
+    patched (path-scoped diff empty after every mutation experiment); legs (b)/(c) landed INVERTED as
+    red-if-fixed pins of current behaviour (the idiom of 3603290), leg (a) is a true pin (mutation M1
+    reddens it alone; M3 — a stand-in content guard — reddens exactly the two pins).
+  - Gate results on the final tree (Node v22.23.1, PATH=/opt/homebrew/opt/node@22/bin:$PATH):
+    - `npm run license:check`: exit 0
+    - `npm run verify`: exit 0 — 62 test files / 1244 tests passed, format/lint/typecheck/license/
+      build all green. No expected-RED this slice: nothing here touches the sealed fixture's version
+      claim, which already records 0.1.1.
+    - `npm run test:conformance`: exit 0 on both pinned profiles (2025-11-25 and 2026-07-28),
+      0 failed and 0 warnings in every scenario.
+    - `git diff --check`: exit 0
+    - evidence:check / evidence:verify are stale ON PURPOSE on this branch (the slice changed src/**,
+      which moves the tarball digest, and non-evidence commits follow the attestation). They were NOT
+      run and NOT resealed; only the real smoke:opencode and vm:product3 producers clear them, in the
+      landing sequence.
+  - Slice 2b/3 carry-overs (the full list, with reasons, is docs/project-status.md "Immediate
+    next-session objective / Task 3"):
+    (a) Unsafe-ancestor validation: still undecided, wording unchanged. It is now stated at the code
+        site too (state-root.ts cites the docs heading by name — do not rename that heading).
+    (b) R6 durable backup root + the durable backup/audit/lock implementations behind the reshaped
+        interfaces.
+    (c) NEW 2b PREREQUISITE, belongs with R6: persist the create-time digest and make exists() (or a
+        verify) check content; also close the mode gap, since exists() skips the 0600 check and a
+        post-write chmod is invisible. Two red-if-fixed pins in config-backup.test.ts flip when it
+        lands.
+    (d) R9 audit ALLOWED_KEYS extension, deferred to 2b with its durable consumer (widening the
+        allow-list without one adds dead surface; BackupRequest is the prepared extension point).
+    (e) transactionId is missing from BOTH BackupRequest and AuditRecord — the one spec field a
+        service cannot synthesize. Symmetric 2b addition.
+    (f) Separate target-reachability from write-availability in the catalogue: catalog.ts (exposes
+        writes) and opnsense/list.ts (reads) both key off the single aliasAdapter.available flag, so
+        the R7 degrade kills alias READS. openResolvedStateRoot throws unconditionally on win32, so
+        in 2b that degrade IS the win32 path — shipping it unsplit is a win32 read regression against
+        R7's own goal. Red-if-fixed pin in the default-application degrade test.
+    (g) The origin seam carries parsed.url VERBATIM; 2b must canonicalize before deriving a target id.
+    (h) Make catalog.listAll REQUIRED: its optionality weakens two guards that fall back to an empty
+        list — the holdings evidence at kernel:1989 and the sealUnavailableCapabilities dedup.
+    (i) Lock contract: an acquire aborted after the manager granted the handle leaks it (the runner
+        discards the value) — use runOperation's retain-hook precedent; release() needs a signal to
+        be truly bounded; 2b's service contracts must REQUIRE signal honouring, because runBounded
+        bounds the WAIT, not the operation.
+    (j) Sweep-once verification on 2-vCPU Linux (see the darwin caveat) and, unimplemented, the
+        inode-scoped retry sweep: a retry-time sweep restricted to candidates sharing the published
+        key's inode would recover peer-crash-mid-publication residue without touching a live
+        candidate, which holds a distinct inode until the instant it links. Still open from the
+        retry-margin entry: writeCandidate could fsync before the name is linkable at all.
+    (k) Drift-test scope: 6 files / 7 literals; the 0.1.1 bump touched 13 sites and the rest are
+        sealed-evidence and client-identity pins, excluded on purpose. The assertion is SUBSTRING
+        containment (brief-mandated), so a site reading 0.1.11 would satisfy version 0.1.1.
+    (l) SLICE 3: AUDIT_RESULT_FAILED / LOCK_RELEASE_FAILED semantics (both hooks already sit as
+        discarded locals at the points Slice 3 will read them); hoist finishWith('success') out of
+        the parse try, or a throwing success-audit re-enters finishWith('INVALID_OUTPUT') = double
+        record under the wrong code; terminalAuditRecorded=false conflates "audit failed" with "never
+        reached step 8" (gate on verified success); kernel:1870 untested; EXECUTION_FAILED is
+        indistinguishable from an upstream 403 (UX backlog) — a candidate for the Slice 3 refusal
+        vocabulary.
+  - Minor deferrals recorded by the task reviews and NOT fixed here: envelope paths 9/10
+    (INVALID_OUTPUT) have no test at all (pre-existing); a throwing envelope rejects dispatch()
+    instead of fail-closing to a refusal (deliberate, Slice 4 question); the terminal-audit pin is
+    one-directional (stimulus deletion undetected); the step-4 comment overstates its equivalence
+    with step 5; the value-false sentinel at the exists short-circuit is unexplained in code; the R7
+    degrade is silent (no logging seam — graduates to needed in 2b) and leaks a temp root on double
+    failure; two identity-key comment looseness items; the 0o300 and 0o500 sweep tests fail-not-
+    false-pass under uid 0.
+  - Landing sequence for this branch (controller): merge ff -> real smoke:opencode (src/** changed)
+    -> full gates green -> candidate fixture commit -> vm:product3 -> attestation commit ->
+    evidence:verify 0 + evidence:check 0 -> push -> confirm all four CI jobs executed. No release
+    this slice.
