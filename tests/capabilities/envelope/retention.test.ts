@@ -76,11 +76,17 @@ function isoAgo(days: number): string {
   return new Date(Date.now() - days * DAY_MS).toISOString();
 }
 
-// The UTC month `n` months back, in the sink's segment spelling.
+// A UTC month in the sink's segment spelling. The index is normalized by `Date.UTC`, so a negative
+// one or one past December rolls the year exactly as the sink's own arithmetic would.
+function monthName(year: number, monthIndex: number): string {
+  const month = new Date(Date.UTC(year, monthIndex, 1));
+  return `${String(month.getUTCFullYear())}-${String(month.getUTCMonth() + 1).padStart(2, '0')}`;
+}
+
+// The UTC month `n` months back.
 function segmentMonth(monthsAgo: number): string {
   const now = new Date();
-  const month = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - monthsAgo, 1));
-  return `${String(month.getUTCFullYear())}-${String(month.getUTCMonth() + 1).padStart(2, '0')}`;
+  return monthName(now.getUTCFullYear(), now.getUTCMonth() - monthsAgo);
 }
 
 // The whole of what `config-backup.ts` publishes, so a fixture cannot pass by being thinner than the
@@ -138,12 +144,16 @@ function auditLine(index: number, phase: 'intent' | 'result'): string {
   })}\n`;
 }
 
-function seedSegment(monthsAgo: number, lines: readonly string[]): string {
+function seedSegmentNamed(month: string, lines: readonly string[]): string {
   mkdirSync(auditDir, { recursive: true, mode: 0o700 });
-  const name = `${segmentMonth(monthsAgo)}.jsonl`;
+  const name = `${month}.jsonl`;
   appendFileSync(join(auditDir, name), lines.join(''));
   chmodSync(join(auditDir, name), 0o600);
   return name;
+}
+
+function seedSegment(monthsAgo: number, lines: readonly string[]): string {
+  return seedSegmentNamed(segmentMonth(monthsAgo), lines);
 }
 
 // Seeds `count` backups whose ages come from `ageOf`, each with the intent and result lines that
@@ -304,6 +314,28 @@ describe('durable state retention', () => {
     expect(remaining.sort()).toEqual([oldUnresolved, recent].sort());
   });
 
+  // Where the 365-day line actually falls. A segment name states a month, and what it bounds is the
+  // first instant of the month AFTER it — the newest record the file could possibly hold — so the
+  // whole month the cutoff lands in is still inside the window. Dating a segment from the start of
+  // the month it names instead would drop a trail up to four weeks early, and would leave every
+  // other leg here green: the two months are computed from the cutoff itself, so the pair always
+  // straddles the boundary whatever day of whatever year this runs on.
+  it('dates a segment from the month after the one its name states', () => {
+    const cutoff = new Date(Date.now() - 365 * DAY_MS);
+    const inside = seedSegmentNamed(monthName(cutoff.getUTCFullYear(), cutoff.getUTCMonth()), [
+      auditLine(1, 'intent'),
+      auditLine(1, 'result')
+    ]);
+    seedSegmentNamed(monthName(cutoff.getUTCFullYear(), cutoff.getUTCMonth() - 1), [
+      auditLine(2, 'intent'),
+      auditLine(2, 'result')
+    ]);
+
+    maintainRetention(root);
+
+    expect(readdirSync(auditDir)).toEqual([inside]);
+  });
+
   // The terminal line may land in a later segment than the intent, which is the ordinary case for a
   // mutation that spans a month boundary: resolution is a property of the whole trail, not a file.
   it('resolves a transaction whose terminal line landed in a later segment', () => {
@@ -383,7 +415,9 @@ describe('durable state retention', () => {
 
   // Publication renames a complete staging directory into place, so a published backup always has
   // both files. Configuration bytes with no metadata beside them are therefore not residue this
-  // module produced, and it refuses rather than deleting a file it was never able to read.
+  // module produced, and it refuses rather than deleting a file it was never able to read. The
+  // refusal also has to stay a refusal: a second pass must reach the same conclusion instead of
+  // quietly adopting the directory as something it may skip.
   it('refuses a backup directory holding a configuration it cannot date', () => {
     const orphan = seedBackupDirectory(500);
     writePrivateFile(join(orphan, 'config.xml'), CONFIG_XML);
@@ -393,7 +427,47 @@ describe('durable state retention', () => {
     });
 
     expect(message).toBe(STATE_CORRUPT);
+    expect(
+      messageOf(() => {
+        maintainRetention(root);
+      })
+    ).toBe(STATE_CORRUPT);
     expect(readdirSync(join(backupsDir, backupIdOf(500)))).toEqual(['config.xml']);
+  });
+
+  // A refusal this module cannot clear is a refusal that seals every future mutation on the target,
+  // so the one file it must never trip over is one it did not write. A purge here would unlink both
+  // of its own files and then find the rmdir refused, leaving a snapshot half-destroyed and a
+  // directory no later pass could date — which is why the entry set is settled during the scan and
+  // a directory that holds a stranger never becomes a candidate at all.
+  it('never half-destroys a purgeable backup a stray file has made unremovable', () => {
+    seedResolvedBackups(101, (index) => 40 + index);
+    const strayed = join(backupsDir, backupIdOf(100));
+    writePrivateFile(join(strayed, '.DS_Store'), 'stray');
+
+    maintainRetention(root);
+    maintainRetention(root);
+    maintainRetention(root);
+
+    // Whole, and still whole two passes later: retention is the safe direction, and the stray costs
+    // no other snapshot its place in the count either.
+    expect(readdirSync(backupsDir)).toHaveLength(101);
+    expect(readdirSync(strayed).sort()).toEqual(['.DS_Store', 'config.xml', 'metadata.json']);
+    expect(fsync.calls).toBe(0);
+  });
+
+  // The state the old purge order could strand: no metadata to date it by, and something inside it
+  // that rmdir would refuse. It is skipped — permanently, and without ever refusing a mutation over
+  // it — rather than deleted on a guess or turned into a fault nothing can clear.
+  it('leaves a metadata-less directory holding a stranger exactly where it is', () => {
+    const strayed = seedBackupDirectory(500);
+    writePrivateFile(join(strayed, '.DS_Store'), 'stray');
+
+    maintainRetention(root);
+    maintainRetention(root);
+
+    expect(readdirSync(strayed)).toEqual(['.DS_Store']);
+    expect(fsync.calls).toBe(0);
   });
 
   // Residue of a crashed publication is named so that it cannot be mistaken for a backup, and an

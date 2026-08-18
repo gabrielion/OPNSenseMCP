@@ -18,6 +18,8 @@ const BACKUPS_DIRECTORY = 'backups';
 const AUDIT_DIRECTORY = 'audit';
 const CONFIG_FILE = 'config.xml';
 const METADATA_FILE = 'metadata.json';
+// Everything a published backup directory is ever allowed to hold.
+const PUBLISHED_ENTRIES: readonly string[] = Object.freeze([CONFIG_FILE, METADATA_FILE]);
 // The published names of the store, and only those: a staging directory left by a crashed
 // publication is deliberately spelled so that it does not match.
 const BACKUP_ID_PATTERN = /^[0-9a-f]{32}$/u;
@@ -81,6 +83,7 @@ interface BackupFacts {
 interface PurgeCandidate {
   readonly name: string;
   readonly createdAtMs: number;
+  readonly purgeable: boolean;
 }
 
 function hasCode(error: unknown, code: string): boolean {
@@ -323,29 +326,50 @@ function purgeBackups(backupsDir: string, index: AuditIndex, now: number): void 
   const resolvedBackups: PurgeCandidate[] = [];
   const residue: string[] = [];
   // The scan runs to completion before the first unlink: a store this module cannot read in full is
-  // a store it must not start taking snapshots out of.
+  // a store it must not start taking snapshots out of. It also settles, for every directory, whether
+  // a purge of it could complete — before anything is removed from any of them.
   for (const name of listStore(backupsDir)) {
     if (!BACKUP_ID_PATTERN.test(name)) continue;
     const directory = join(backupsDir, name);
-    const facts = readBackupFacts(directory);
-    if (facts === undefined) {
+    const entries = readDirectoryEntries(directory);
+    if (!entries.includes(METADATA_FILE)) {
       // Publication renames a complete staging directory into place, so a published backup always
-      // carries both files. Without metadata the entry is the tail of a crashed purge — and only an
-      // empty one is finished here, because a directory that still holds something is state this
-      // module never produced and will not delete on a guess.
-      if (readDirectoryEntries(directory).length !== 0) throw retentionError(STATE_CORRUPT);
-      residue.push(name);
-    } else if (index.resolved.has(facts.transactionId)) {
-      // A transaction with no terminal result is one whose outcome nobody has established yet, so
-      // its snapshot is the one thing a reconciliation still needs. It is never a candidate, and it
-      // never spends the count budget the resolved ones share.
-      resolvedBackups.push({ name, createdAtMs: facts.createdAtMs });
+      // carries both files, and a purge unlinks the configuration before the metadata that dates
+      // it. Configuration bytes with no metadata beside them come from neither, and this module
+      // refuses rather than delete a snapshot it was never able to date.
+      if (entries.includes(CONFIG_FILE)) throw retentionError(STATE_CORRUPT);
+      // An empty directory is the tail of a crashed purge, and finishing it with an rmdir is
+      // provably lossless. A directory holding anything else holds something this module did not
+      // write: it is left exactly as it is, for good. Refusing instead would seal every future
+      // mutation on the target over a file the envelope has no opinion about, and deleting would
+      // take a file it cannot read.
+      if (entries.length === 0) residue.push(name);
+      continue;
     }
+    const facts = readBackupFacts(directory);
+    // Only reachable if the metadata went away between the listing and the open, which is a race
+    // rather than a fault: one more pass over the same directory settles it.
+    if (facts === undefined) continue;
+    // A transaction with no terminal result is one whose outcome nobody has established yet, so its
+    // snapshot is the one thing a reconciliation still needs. It is never a candidate, and it never
+    // spends the count budget the resolved ones share.
+    if (!index.resolved.has(facts.transactionId)) continue;
+    resolvedBackups.push({
+      name,
+      createdAtMs: facts.createdAtMs,
+      // A snapshot sharing its directory with an entry this module did not write cannot be taken
+      // apart cleanly: both unlinks would succeed and the rmdir would then strand what is left,
+      // half-destroying the snapshot and leaving a directory no later pass could date. So it is
+      // never removed — and it keeps its rank, so its presence costs no other snapshot its place.
+      purgeable: entries.every((entry) => PUBLISHED_ENTRIES.includes(entry))
+    });
   }
   resolvedBackups.sort(newestFirst);
   const doomed = resolvedBackups
     .slice(RETAINED_BACKUP_COUNT)
-    .filter((candidate) => now - candidate.createdAtMs > BACKUP_RETENTION_MS);
+    .filter(
+      (candidate) => candidate.purgeable && now - candidate.createdAtMs > BACKUP_RETENTION_MS
+    );
   if (doomed.length === 0 && residue.length === 0) return;
   for (const candidate of doomed) removeBackup(join(backupsDir, candidate.name));
   for (const name of residue) removeDirectory(join(backupsDir, name));
@@ -385,13 +409,22 @@ function purgeAuditSegments(auditDir: string, index: AuditIndex, now: number): v
  * alone retains. Audit segments are kept for 365 days, dated from the month in their own name, and
  * a segment holding an unresolved transaction is kept however old it is.
  *
- * How it fails. Loudly and closed: a metadata file or an audit line this module cannot read, an
- * unexpected file where a purge should have left an empty directory, a failed unlink or a failed
- * fsync all throw one of two fixed sentences carrying no path, no id and no configuration byte.
- * The scan of the store completes before the first unlink, so a refusal deletes nothing. Deletions
- * are durable: the parent directory is fsynced once the last entry has been removed from it, and
- * because the configuration is unlinked before the metadata that dates it, a purge interrupted by a
- * crash leaves only residue the next pass recognises and finishes.
+ * How it fails. Loudly and closed: a metadata file or an audit line this module cannot read, a
+ * configuration with no metadata beside it to date it, a failed unlink or a failed fsync all throw
+ * one of two fixed sentences carrying no path, no id and no configuration byte. The scan of the
+ * store completes before the first unlink, so a refusal deletes nothing.
+ *
+ * What it will not do is brick a target. A refusal that can never be cleared refuses every future
+ * mutation on that target, so the only state this module refuses over is state that cannot exist
+ * unless the store was tampered with. Everything else it does not understand — a stray file inside a
+ * backup directory, an entry in the store that is not a backup id, a name in the trail the sink
+ * could not have written — is skipped, permanently and in the retain direction. A backup sharing its
+ * directory with a stray file is decided during the scan and never entered as a candidate, precisely
+ * so that no purge can begin on a directory whose rmdir would then strand what is left of it.
+ *
+ * Deletions are durable: the parent directory is fsynced once the last entry has been removed from
+ * it, and because the configuration is unlinked before the metadata that dates it, a purge
+ * interrupted by a crash leaves only residue the next pass recognises and finishes.
  *
  * Insufficient space is refused before the first write too, but by the caller rather than here: a
  * store with no room left fails the very publication this maintenance precedes, and that failure is
