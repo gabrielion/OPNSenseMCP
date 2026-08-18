@@ -1673,17 +1673,15 @@ async function executeMutationEnvelope(
 
   if (context.signal?.aborted === true) return refusal('CANCELLED');
 
-  // Step 1: acquire the target's exclusive mutation lock.
-  let lock: Awaited<ReturnType<typeof services.lock.acquire>>;
-  try {
-    lock = await services.lock.acquire(
-      MUTATION_TARGET_KEY,
-      context.signal ?? new AbortController().signal
-    );
-  } catch {
-    return refusal('LOCK_UNAVAILABLE');
-  }
-  if (lock === null) return refusal('LOCK_UNAVAILABLE');
+  // Step 1: acquire the target's exclusive mutation lock, bounded by the capability's own timeout.
+  // A lock manager that stalls used to stall the dispatch itself: the acquire was handed a signal
+  // that could never fire, so there was no answer for the caller and nothing yet to release. Timing
+  // out or being cancelled reports the same LOCK_UNAVAILABLE as a null or a throwing acquire.
+  const acquired = await runBounded(timeoutMs, context.signal, (signal) =>
+    services.lock.acquire(MUTATION_TARGET_KEY, signal)
+  );
+  if (acquired.kind !== 'value' || acquired.value === null) return refusal('LOCK_UNAVAILABLE');
+  const lock = acquired.value;
 
   // Steps 2-8 leave through this block instead of returning, so that step 9 runs sequentially after
   // the result is decided rather than inside a `finally` — a release whose report the envelope can
@@ -1731,12 +1729,36 @@ async function executeMutationEnvelope(
           observedStateDigest: sealed.observedStateDigest,
           effectPlanDigest: sealed.effectPlanDigest
         });
-        const backupSignal = context.signal ?? new AbortController().signal;
         try {
-          const created = await services.backup.create(backupRequest, backupSignal);
-          backupId = created.backupId;
-          if (backupId.length === 0 || !(await services.backup.exists(backupId, backupSignal))) {
-            terminalAuditRecorded = finishWith('BACKUP_FAILED', backupId);
+          // Each call is bounded by its OWN runner, and so runs on its own signal: sharing one
+          // would hand the verification a budget the creation already spent. This is the envelope's
+          // only pre-write network call and it runs with the target lock held, so an unbounded
+          // stall here would hold the lock for the life of the process.
+          const created = await runBounded(timeoutMs, context.signal, (signal) =>
+            services.backup.create(backupRequest, signal)
+          );
+          if (created.kind !== 'value') {
+            terminalAuditRecorded = finishWith('BACKUP_FAILED');
+            result = refusal('BACKUP_FAILED');
+            break envelope;
+          }
+          const createdId = created.value.backupId;
+          backupId = createdId;
+          const present =
+            createdId.length === 0
+              ? { kind: 'value' as const, value: false }
+              : await runBounded(timeoutMs, context.signal, (signal) =>
+                  services.backup.exists(createdId, signal)
+                );
+          if (present.kind !== 'value') {
+            // A verification that cannot answer is not a verified backup. It reports exactly what a
+            // throwing `exists` reports: BACKUP_FAILED, without the id it could not confirm.
+            terminalAuditRecorded = finishWith('BACKUP_FAILED');
+            result = refusal('BACKUP_FAILED');
+            break envelope;
+          }
+          if (!present.value) {
+            terminalAuditRecorded = finishWith('BACKUP_FAILED', createdId);
             result = refusal('BACKUP_FAILED');
             break envelope;
           }
@@ -1808,11 +1830,10 @@ async function executeMutationEnvelope(
     // No step above is expected to throw, but the target key is process-wide: one leaked lock makes
     // every later write refuse LOCK_UNAVAILABLE until the process restarts. So an unexpected failure
     // still releases, and is still reported to the caller unchanged.
-    try {
-      await lock.release();
-    } catch {
-      // A release that fails while unwinding leaves nothing better to try.
-    }
+    // Bounded and caller-signal-free for the same reasons as step 9 below; the report is discarded
+    // because a release that fails while unwinding leaves nothing better to try. The runner returns
+    // that failure as a value, so nothing here can displace the error being rethrown.
+    await runBounded(timeoutMs, undefined, () => lock.release());
     throw error;
   }
 
@@ -1821,13 +1842,17 @@ async function executeMutationEnvelope(
   // then a lost result record changes nothing, exactly as before.
   void terminalAuditRecorded;
 
-  // Step 9: release the lock on every path above, and keep what the release reported.
-  let releaseReport: 'released' | 'unconfirmed' = 'unconfirmed';
-  try {
-    releaseReport = await lock.release();
-  } catch {
-    // A synthetic release cannot fail; a real release failure is a later reconciliation concern.
-  }
+  // Step 9: release the lock on every path above, and keep what the release reported. Bounded like
+  // every other service call, but deliberately NOT against the caller's signal: the runner returns
+  // on an already-aborted caller signal without invoking its thunk, and a release that is skipped
+  // leaks the process-wide target lock until the process restarts — precisely on the cancelled
+  // paths that need it most. `release()` takes no signal this slice, so the bound is a timeout the
+  // release cannot yet cooperate with; it becomes a real one when the handle accepts a signal. A
+  // release that fails, times out, or reports nothing is 'unconfirmed', which is how a throwing
+  // release already read.
+  const released = await runBounded(timeoutMs, undefined, () => lock.release());
+  const releaseReport: 'released' | 'unconfirmed' =
+    released.kind === 'value' ? released.value : 'unconfirmed';
   // Nothing reads the report yet: a later increment turns an 'unconfirmed' release after a verified
   // success into a LOCK_RELEASE_FAILED refusal, which is a deliberate behaviour change of its own.
   void releaseReport;

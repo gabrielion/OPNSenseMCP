@@ -10,6 +10,7 @@ import type {
   BackupRequest,
   CapabilityDefinition,
   CapabilityResult,
+  LockHandle,
   MutationEnvelopeServices
 } from '../../src/capabilities/types.js';
 
@@ -74,11 +75,35 @@ function makeCapability(events: string[], opts: CapOptions = {}): CapabilityDefi
   });
 }
 
+// A service call that answers nothing of its own accord: the only way out is the signal the envelope
+// hands it. That is what "bounded" can mean in JavaScript — a pending promise cannot be cancelled, so
+// a runner bounds a call by giving it a signal that actually fires and by refusing to keep waiting on
+// one that does not. A fake that ignored its signal as well would be unboundable by construction and
+// would prove nothing about the envelope.
+function neverAnswers<T>(signal: AbortSignal): Promise<T> {
+  return new Promise<T>((_resolve, reject) => {
+    const abandon = () => {
+      reject(new Error('aborted'));
+    };
+    if (signal.aborted) {
+      abandon();
+      return;
+    }
+    signal.addEventListener('abort', abandon, { once: true });
+  });
+}
+
 interface HarnessOptions {
   readonly lockNull?: boolean;
+  readonly lockThrow?: boolean;
+  readonly lockNeverAnswers?: boolean;
   readonly lockReleaseReport?: 'released' | 'unconfirmed';
   readonly backupThrow?: boolean;
   readonly backupMissing?: boolean;
+  readonly backupCreateNeverAnswers?: boolean;
+  readonly backupExistsNeverAnswers?: boolean;
+  // Fires inside `backup.create`, i.e. mid-envelope with the lock held and the backup in flight.
+  readonly cancelDuringBackup?: () => void;
   readonly auditIntentThrow?: boolean;
   readonly auditResultThrow?: boolean;
 }
@@ -100,8 +125,10 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
   let backupCounter = 0;
   const services: MutationEnvelopeServices = {
     lock: {
-      acquire: () => {
+      acquire: (_targetKey, signal) => {
         events.push('lock.acquire');
+        if (opts.lockNeverAnswers === true) return neverAnswers<LockHandle | null>(signal);
+        if (opts.lockThrow === true) return Promise.reject(new Error('lock'));
         if (opts.lockNull === true) return Promise.resolve(null);
         return Promise.resolve({
           release: () => {
@@ -112,16 +139,23 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
       }
     },
     backup: {
-      create: (request) => {
+      create: (request, signal) => {
         events.push('backup.create');
         backupRequests.push(request);
+        opts.cancelDuringBackup?.();
+        if (opts.backupCreateNeverAnswers === true) {
+          return neverAnswers<{ readonly backupId: string }>(signal);
+        }
         if (opts.backupThrow === true) return Promise.reject(new Error('backup'));
         backupCounter += 1;
         const backupId = `backup-${String(backupCounter)}`;
         if (opts.backupMissing !== true) createdBackups.add(backupId);
         return Promise.resolve({ backupId });
       },
-      exists: (backupId: string) => Promise.resolve(createdBackups.has(backupId))
+      exists: (backupId, signal) => {
+        if (opts.backupExistsNeverAnswers === true) return neverAnswers<boolean>(signal);
+        return Promise.resolve(createdBackups.has(backupId));
+      }
     },
     audit: {
       record: (record) => {
@@ -140,7 +174,8 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
 
 function dispatch(
   capability: CapabilityDefinition,
-  services: MutationEnvelopeServices
+  services: MutationEnvelopeServices,
+  signal?: AbortSignal
 ): Promise<CapabilityResult> {
   const dispatcher = createCapabilityDispatcher(
     new CapabilityCatalog([capability]),
@@ -158,7 +193,7 @@ function dispatch(
   );
   return dispatcher.dispatch(
     { name: 'test_envelope', arguments: { value: 'x' } },
-    { transport: 'stdio' }
+    { transport: 'stdio', ...(signal === undefined ? {} : { signal }) }
   );
 }
 
@@ -223,10 +258,14 @@ describe('mutation envelope lifecycle', () => {
   });
 
   it('fails closed when the target lock is unavailable, before preflight or audit', async () => {
-    const harness = makeHarness({ lockNull: true });
-    const result = await dispatch(makeCapability(harness.events), harness.services);
-    expect(result).toMatchObject({ kind: 'refused', code: 'LOCK_UNAVAILABLE' });
-    expect(harness.events).toEqual(['lock.acquire']);
+    // Refused and throwing acquisitions are one refusal: nothing is held, so nothing is released,
+    // and no audit intent is written for a write that never started.
+    for (const opts of [{ lockNull: true }, { lockThrow: true }]) {
+      const harness = makeHarness(opts);
+      const result = await dispatch(makeCapability(harness.events), harness.services);
+      expect(result).toMatchObject({ kind: 'refused', code: 'LOCK_UNAVAILABLE' });
+      expect(harness.events).toEqual(['lock.acquire']);
+    }
   });
 
   it('fails closed on preflight failure without recording an audit intent', async () => {
@@ -331,6 +370,83 @@ describe('mutation envelope lifecycle', () => {
     }
     expect(harness.events.at(-1)).toBe('lock.release');
     expect(harness.createdBackups.size).toBe(1);
+  });
+
+  it('refuses LOCK_UNAVAILABLE instead of hanging when the lock never answers', async () => {
+    // Every envelope service call is bounded by the capability's own timeout. A lock manager that
+    // stalls used to stall the whole dispatch — the acquire was handed a signal that could never
+    // fire — with nothing acquired, nothing to release, and no answer for the caller. The bound maps
+    // to the same LOCK_UNAVAILABLE the null and the throwing acquire already report.
+    const harness = makeHarness({ lockNeverAnswers: true });
+    const result = await dispatch(
+      makeCapability(harness.events, { timeoutMs: 20 }),
+      harness.services
+    );
+    expect(result).toMatchObject({ kind: 'refused', code: 'LOCK_UNAVAILABLE' });
+    expect(harness.events).toEqual(['lock.acquire']);
+  }, 2000);
+
+  it('refuses BACKUP_FAILED instead of hanging when the backup never answers', async () => {
+    // The backup is the one envelope call that does real network I/O before the first write, and it
+    // runs with the target lock held: an unbounded stall here holds the lock for the life of the
+    // process. Timing out reports exactly what a throwing create reports.
+    const harness = makeHarness({ backupCreateNeverAnswers: true });
+    const result = await dispatch(
+      makeCapability(harness.events, { timeoutMs: 20 }),
+      harness.services
+    );
+    expect(result).toMatchObject({ kind: 'refused', code: 'BACKUP_FAILED' });
+    expect(harness.events).toEqual([
+      'lock.acquire',
+      'preflight',
+      'audit.intent',
+      'backup.create',
+      'audit.result',
+      'lock.release'
+    ]);
+  }, 2000);
+
+  it('refuses BACKUP_FAILED instead of hanging when the backup check never answers', async () => {
+    // `exists` gets its OWN bounded runner rather than sharing the create call's signal: a shared
+    // signal would hand the second call a budget the first one already spent, which is the same
+    // unbounded step under a new name. A verification that cannot answer is not a verified backup.
+    const harness = makeHarness({ backupExistsNeverAnswers: true });
+    const result = await dispatch(
+      makeCapability(harness.events, { timeoutMs: 20 }),
+      harness.services
+    );
+    expect(result).toMatchObject({ kind: 'refused', code: 'BACKUP_FAILED' });
+    expect(harness.events).toEqual([
+      'lock.acquire',
+      'preflight',
+      'audit.intent',
+      'backup.create',
+      'audit.result',
+      'lock.release'
+    ]);
+  }, 2000);
+
+  it('still releases the lock when the caller cancels mid-envelope', async () => {
+    // Step 9's release is bounded like every other service call but deliberately NOT against the
+    // caller's signal: the bounded runner returns on an already-aborted caller signal WITHOUT
+    // invoking its thunk, so binding the release to it would skip the release exactly when the
+    // envelope unwinds a cancelled write — leaking the process-wide target lock until restart.
+    // The refusal CODE is deliberately not pinned here: a fake that ignores its abort and succeeds
+    // anyway moves which step first notices the cancellation, and this test's subject is the
+    // release, not the verdict.
+    const controller = new AbortController();
+    const harness = makeHarness({
+      cancelDuringBackup: () => {
+        controller.abort();
+      }
+    });
+    const result = await dispatch(
+      makeCapability(harness.events),
+      harness.services,
+      controller.signal
+    );
+    expect(result).toMatchObject({ kind: 'refused' });
+    expect(harness.events.at(-1)).toBe('lock.release');
   });
 
   it('refuses as unverified when outcome verification returns false or throws', async () => {
