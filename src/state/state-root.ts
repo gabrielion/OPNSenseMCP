@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { closeSync, constants, fstatSync, mkdirSync, openSync, realpathSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  realpathSync,
+  type Stats
+} from 'node:fs';
+import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { targetDirectoryPath } from './target-identity.js';
 
 export interface StateRootEnvironment {
@@ -84,6 +93,62 @@ export function ensurePrivateDirectory(path: string): void {
   }
 }
 
+function directoryComponents(path: string): readonly string[] {
+  const root = parse(path).root;
+  const suffix = relative(root, path);
+  if (suffix === '') return [root];
+  return [
+    root,
+    ...suffix.split(sep).map((_part, index, parts) => join(root, ...parts.slice(0, index + 1)))
+  ];
+}
+
+function isMissing(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
+}
+
+function requireSafeComponent(stats: Stats, userId: number): void {
+  if (stats.isSymbolicLink()) {
+    // lstat, so this is the link itself and not what it points at. A root-owned one is the
+    // platform's own layout — macOS spells tmpdir() and /tmp through /var and /private — and only
+    // root could have planted it, which is a privilege that already outranks everything here. Any
+    // other owner is a redirect of exactly the kind this walk exists to refuse.
+    if (stats.uid !== 0) throw new Error(DIRECTORY_INTEGRITY);
+    return;
+  }
+  if (!stats.isDirectory() || (stats.uid !== 0 && stats.uid !== userId)) {
+    throw new Error(DIRECTORY_INTEGRITY);
+  }
+  // Group- or other-writable means somebody else can plant the next component. The one exception
+  // is a root-owned sticky directory — /tmp, /var/tmp, /dev/shm — where the kernel already forbids
+  // renaming or removing an entry you do not own, and where anything an outsider could still
+  // create is caught by the ownership check every component of this walk carries.
+  const writableByOthers = (stats.mode & 0o022) !== 0;
+  const stickyPublicDirectory = stats.uid === 0 && (stats.mode & 0o1000) !== 0;
+  if (writableByOthers && !stickyPublicDirectory) throw new Error(DIRECTORY_INTEGRITY);
+}
+
+/**
+ * Refuses a state root whose path runs through a directory this account does not control. Walks
+ * from the filesystem root down and stops at the first component that does not exist yet: a path
+ * cannot have an existing child under a missing parent, and `createPrivateDirectory` is about to
+ * create the rest 0700 under a parent this walk has already accepted.
+ */
+function requireSafeAncestry(path: string): void {
+  const userId = process.getuid?.();
+  if (userId === undefined) throw new Error(DIRECTORY_INTEGRITY);
+  for (const component of directoryComponents(path)) {
+    let stats: Stats;
+    try {
+      stats = lstatSync(component);
+    } catch (error) {
+      if (isMissing(error)) return;
+      throw new Error(DIRECTORY_INTEGRITY);
+    }
+    requireSafeComponent(stats, userId);
+  }
+}
+
 export interface StateRoot {
   readonly path: string;
   readonly targetsPath: string;
@@ -103,17 +168,25 @@ export function openResolvedStateRoot(
   const resolved = resolveStateRootPath(override, environment);
   // A configured or defaulted root may be spelled through a symlinked ancestor that the operator
   // cannot control (macOS resolves tmpdir() and /var through /private), and realpathSync needs the
-  // directory to exist, so create first with the same 0700 discipline, then canonicalize. Every
-  // integrity check still runs, unchanged, against the canonical path — but those checks are checks
-  // of the leaf: `ensurePrivateDirectory` validates the resolved directory's own type, owner and
-  // mode and never walks ancestor ownership or writability. So canonicalizing here does move the
-  // accepted directory, in one direction: a symlinked ancestor used to fail closed on the
-  // `canonicalPathOf(path) !== path` check, and now it resolves and the run proceeds, which puts
-  // durable state wherever a same-uid ancestor redirect points. That delta is undecided on
-  // purpose — Slice 2 owes it either the ancestor walk or an explicit scope ruling that weighs it
-  // (docs/project-status.md, "Unsafe-ancestor validation: decide it").
+  // directory to exist, so create first with the same 0700 discipline, then canonicalize. The
+  // checks in `ensurePrivateDirectory` are checks of the leaf — the resolved directory's own type,
+  // owner and mode — so canonicalizing moved the accepted directory in one direction: a symlinked
+  // ancestor used to fail closed on `canonicalPathOf(path) !== path`, then resolved instead, which
+  // put durable state wherever a same-uid ancestor redirect pointed. Slice 2b decided that delta
+  // rather than accepting it: the walk below refuses it (docs/project-status.md, "Unsafe-ancestor
+  // validation"). It runs twice because the two runs answer different questions. Over the SPELLED
+  // path a symlink is still visible, and a same-uid one — the redirect — is refused there and
+  // nowhere else. Over the CANONICAL path the components are the ones the writes actually land in,
+  // which is the only place the far side of a tolerated root-owned symlink gets checked. That
+  // second run has no test of its own and cannot get one: the two paths differ only when a
+  // tolerated symlink sits between them, and planting a root-owned symlink needs root. Neither run
+  // makes this atomic either — a redirect planted between a check and the use that follows it is
+  // out of reach from here, and the leaf's own `O_NOFOLLOW` open is what answers for that.
+  requireSafeAncestry(resolved);
   createPrivateDirectory(resolved);
-  return openStateRoot(canonicalPathOf(resolved));
+  const canonical = canonicalPathOf(resolved);
+  requireSafeAncestry(canonical);
+  return openStateRoot(canonical);
 }
 
 export function ensureTargetDirectory(root: StateRoot, targetId: string): string {
