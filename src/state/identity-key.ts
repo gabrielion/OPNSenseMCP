@@ -21,17 +21,19 @@ const CANDIDATE_PATTERN = /^identity\.key\.candidate-[0-9a-f]{16}$/u;
 const KEY_INTEGRITY = 'Identity key failed its integrity checks';
 // Concurrent starters settle within a handful of filesystem operations, but one can still lose an
 // attempt to a peer that is only just starting. The sweep runs once per call, at the start, so a
-// candidate is exposed for the window between its own creation and its link — as wide as an fsync,
-// hundreds of microseconds on a journalling filesystem — and only to the startup sweeps of the
-// peers that cross that window with it. On a two-core runner with a dozen starters the owner is
-// regularly descheduled across it. Two transients therefore survive: that first-sweep collision,
-// and the nlink window, where a winner is read between its link and its unlink. The measurements
-// behind the numbers here predate sweep-once, when the sweep recurred on every attempt and a
-// candidate was exposed to the whole of every peer's run: retries with no pause between them all
-// landed inside the same contended window, which is how a whole budget used to be spent inside one
-// scheduling quantum. The margin is therefore both more attempts and, below, a jittered pause
-// between them. The bound is still what stops a permanently faulty key — an extra hard link that no
-// sweep may remove, say — from spinning forever.
+// candidate is exposed from the moment its name appears until we unlink it ourselves after
+// publishing — the fsync before the link is the wide part, hundreds of microseconds on a
+// journalling filesystem, and a sweep landing after the link costs the attempt just as surely,
+// through the unlink below — and only to the startup sweeps of the peers that cross that window
+// with it. On a two-core runner with a dozen starters the owner is regularly descheduled across
+// it. Two transients therefore survive: that first-sweep collision, and the nlink window, where a
+// winner is read between its link and its unlink. The measurements behind the numbers here predate
+// sweep-once, when the sweep recurred on every attempt and a candidate was exposed to the whole of
+// every peer's run: retries with no pause between them all landed inside the same contended
+// window, which is how a whole budget used to be spent inside one scheduling quantum. The margin
+// is therefore both more attempts and, below, a jittered pause between them. The bound is still
+// what stops a permanently faulty key — an extra hard link that no sweep may remove, say — from
+// spinning forever.
 const MAX_ATTEMPTS = 10;
 // Pause before retry n, in milliseconds, by 1-based attempt; every retry past the ramp holds the
 // cap, so nine retries cost at most 412ms even at the top of the jitter — a bound worth keeping on
@@ -117,11 +119,15 @@ function readValidatedKey(path: string): Uint8Array {
 // Startup recovery, and only that: a fixed-pattern candidate that is already there when a call
 // begins is either the residue of a crash between link and cleanup (it shares the published key's
 // inode) or an unpublished private candidate of a dead process. Both are safe to unlink; the
-// published name itself is never touched. Residue is a fact about the past — it cannot appear while
-// this process runs — so the caller sweeps once per call and never again from a retry, which is
-// what keeps a live peer's in-flight candidate out of reach. Concurrent starters still cross each
-// other's sweeps, so this stays idempotent: an entry that has already disappeared is exactly the
-// outcome we wanted, not a failure.
+// published name itself is never touched. The caller sweeps once per call and never again from a
+// retry, which is what keeps a live peer's in-flight candidate out of reach — and that is a trade,
+// not a free win: a peer that dies between its own link and its own unlink WHILE we are retrying
+// leaves residue we will not sweep, holding nlink at 2 until our budget runs out, where the old
+// per-attempt sweep would have recovered it. We accept it because by name alone that residue is
+// indistinguishable from the live candidate we must not touch, because it needs a crash inside a
+// microsecond-wide window that happens to fall inside our retry window, and because the next start
+// sweeps it. Concurrent starters still cross each other's sweeps, so this stays idempotent: an
+// entry that has already disappeared is exactly the outcome we wanted, not a failure.
 function cleanupCandidates(rootPath: string): void {
   const candidates = readdirSync(rootPath).filter((name) => CANDIDATE_PATTERN.test(name));
   let removed = 0;

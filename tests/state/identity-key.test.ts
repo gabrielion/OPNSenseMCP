@@ -135,9 +135,11 @@ describe('ensureIdentityKey recovery', () => {
   });
 });
 
-// The retry budget is what a starter has left when its peers keep sweeping the candidate it is
-// about to publish. On a few-core runner with a journalling filesystem the whole budget used to be
-// spent inside one scheduling quantum, so the numbers below are load-bearing, not decoration.
+// The retry budget is what a starter has left when a peer sweeps the candidate it is about to
+// publish. These numbers were measured when every peer re-swept on every attempt; a peer now
+// sweeps only as it starts, so the budget is under far less pressure than it was sized for. On a
+// few-core runner with a journalling filesystem the whole budget used to be spent inside one
+// scheduling quantum, so the numbers below are load-bearing, not decoration.
 describe('ensureIdentityKey retry schedule', () => {
   // Attempt n is the pause AFTER the n-th failed attempt, so index 0 is the first retry.
   const BASE_SCHEDULE = [0, 5, 10, 20, 40, 50, 50, 50, 50];
@@ -385,6 +387,29 @@ describe('ensureIdentityKey error hygiene', () => {
         message = error instanceof Error ? error.message : String(error);
       }
       expect(message).toBe('Identity key failed its integrity checks');
+    } finally {
+      chmodSync(rootPath, 0o700);
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a static message when the sweep cannot even list the root', () => {
+    const { base, rootPath } = scratchRoot();
+    try {
+      const root = openStateRoot(rootPath);
+      // The sibling above fails the sweep's per-entry unlink, which the sweep itself already maps.
+      // A write-only root fails the readdir that precedes it — outside that mapping, and outside
+      // the attempt loop, which is why the sweep has to carry the module's error contract on its
+      // own. Without that guard the raw EACCES reaches the caller with the private root path in it.
+      chmodSync(rootPath, 0o300);
+      let message = '';
+      try {
+        ensureIdentityKey(root);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toBe('Identity key failed its integrity checks');
+      expect(message).not.toMatch(/\//u);
     } finally {
       chmodSync(rootPath, 0o700);
       rmSync(base, { recursive: true, force: true });
