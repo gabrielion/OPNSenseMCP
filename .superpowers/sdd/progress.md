@@ -1055,9 +1055,11 @@ is unchanged, which is what the canary below pins.
     npm-publish environment; the registry state was verified the same day with
     `npx -y @gabrielion/opnsense-mcp@0.1.1 --version` -> 0.1.1, run OUTSIDE the repository (inside
     it, npx resolves the local package by name and never queries the registry — the self-name trap).
-    The release tag lives on GitHub; a local clone has only v0.1.0, so absence of a v0.1.1 tag is NOT
-    evidence of an unpublished version. docs/project-status.md asserted publication as an open task
-    in three places until this entry; all three are corrected.
+    The release tag lives on GitHub; when this entry was written the local clone had only v0.1.0
+    (the landing `git pull` then fetched v0.1.1, and a fresh clone gets it too) — either way, the
+    presence or absence of a local tag is NOT evidence about publication state; the registry is.
+    docs/project-status.md asserted publication as an open task in three places until this entry;
+    all three are corrected.
   - Landing sequence for this branch (controller): merge ff -> real smoke:opencode (src/** changed)
     -> full gates green -> candidate fixture commit -> vm:product3 -> attestation commit ->
     evidence:verify 0 + evidence:check 0 -> push -> confirm all four CI jobs executed. No release
