@@ -131,14 +131,34 @@ function exitOf(child: ChildProcess): Promise<void> {
   });
 }
 
-function settledWithin(settled: Promise<void>, ms: number): Promise<boolean> {
+// The caller's bound and this module's own, whichever ends first. The signal ends the WAIT and not
+// the release: by the time this is called the socket is already closed, so an abort means only that
+// nobody is left to watch for the proof.
+function settledWithin(settled: Promise<void>, ms: number, signal: AbortSignal): Promise<boolean> {
   return new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => {
+    // A signal that has already fired leaves no budget to wait on. Reporting the exit unobserved is
+    // the conservative direction: 'unconfirmed' overstates a risk, where a false 'released' would
+    // hide one.
+    if (signal.aborted) {
       resolve(false);
+      return;
+    }
+    // Armed before the handlers it calls, as in waitForReadiness: a timer cannot fire until this
+    // executor has returned.
+    const timer = setTimeout(() => {
+      finish(false);
     }, ms);
-    void settled.then(() => {
+    const finish = (exited: boolean): void => {
       clearTimeout(timer);
-      resolve(true);
+      signal.removeEventListener('abort', onAbort);
+      resolve(exited);
+    };
+    const onAbort = (): void => {
+      finish(false);
+    };
+    signal.addEventListener('abort', onAbort);
+    void settled.then(() => {
+      finish(true);
     });
   });
 }
@@ -195,14 +215,20 @@ function waitForReadiness(
 
 async function releaseHolder(
   child: ChildProcess,
-  pipe: Duplex
+  pipe: Duplex,
+  signal: AbortSignal
 ): Promise<'released' | 'unconfirmed'> {
   const gone = exitOf(child);
   // Closing our end IS the release: the waiter reads EOF, exits, and the helper holding the kernel
   // lock exits with it. Nothing here writes a file or clears a flag, so there is no state left to
-  // go stale — and the identical close happens by itself if this process dies.
+  // go stale — and the identical close happens by itself if this process dies. It happens before
+  // the signal is consulted for the same reason: an abort must never leave the socket open.
   pipe.destroy();
-  if (await settledWithin(gone, RELEASE_TIMEOUT_MS)) return 'released';
+  if (await settledWithin(gone, RELEASE_TIMEOUT_MS, signal)) return 'released';
+  // An abort is not evidence of a wedged helper, only of a caller out of budget, and the escalation
+  // below is a remedy for wedging. The socket is already closed, so the helper frees the lock as
+  // soon as it notices; what cannot be claimed is that it already has.
+  if (signal.aborted) return 'unconfirmed';
   try {
     child.kill('SIGKILL');
   } catch {
@@ -210,15 +236,17 @@ async function releaseHolder(
   }
   // A helper that is provably dead has provably dropped the lock, however it died. Only a helper we
   // cannot account for is reported unconfirmed.
-  return (await settledWithin(gone, KILL_GRACE_MS)) ? 'released' : 'unconfirmed';
+  return (await settledWithin(gone, KILL_GRACE_MS, signal)) ? 'released' : 'unconfirmed';
 }
 
 function createHandle(child: ChildProcess, pipe: Duplex): LockHandle {
   let outcome: Promise<'released' | 'unconfirmed'> | undefined;
   return Object.freeze({
-    release(): Promise<'released' | 'unconfirmed'> {
+    release(signal: AbortSignal): Promise<'released' | 'unconfirmed'> {
       // Memoized: a second release must report what the first established, not poke a dead child.
-      outcome ??= releaseHolder(child, pipe);
+      // The first caller's signal is therefore the one that bounds the wait, and its answer is the
+      // answer — which is the point of memoizing, not a limitation of it.
+      outcome ??= releaseHolder(child, pipe, signal);
       return outcome;
     }
   });

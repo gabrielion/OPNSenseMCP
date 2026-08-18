@@ -186,8 +186,19 @@ export interface PreflightResult {
 // A release REPORTS what it could establish: 'released' means the target is provably free again,
 // 'unconfirmed' means the holder could not confirm it. The envelope records the report without acting
 // on it; a durable lock is what makes an unconfirmed release worth refusing over.
+//
+// The signal bounds the release like every other envelope service call. It bounds the WAIT for proof,
+// never the release itself: a holder drops what it holds and then reports what it could observe, so a
+// holder that runs out of budget answers 'unconfirmed' rather than pinning the envelope to its own
+// patience. A handle that cannot fail may accept the signal and ignore it.
+//
+// What this contract deliberately does NOT have is a liveness channel. There is no way for a holder to
+// tell the envelope that it lost the lock between `acquire` and `release`, so an out-of-process holder
+// that dies mid-hold drops the lock silently while the envelope keeps mutating, and nothing here
+// notices. That is a known limitation of this slice, not an oversight: detecting it needs a heartbeat
+// the envelope does not have, and adding one is a change of its own.
 export interface LockHandle {
-  release(): Promise<'released' | 'unconfirmed'>;
+  release(signal: AbortSignal): Promise<'released' | 'unconfirmed'>;
 }
 
 export interface MutationLockManager {

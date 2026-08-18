@@ -1562,7 +1562,12 @@ type BoundedOutcome<T> =
 async function runBounded<T>(
   timeoutMs: number,
   callerSignal: AbortSignal | undefined,
-  thunk: (signal: AbortSignal) => Promise<T>
+  thunk: (signal: AbortSignal) => Promise<T>,
+  // What to do with a value that arrived too late to be used, mirroring runOperation's retain.
+  // Dropping it is right for a call whose value is only information; it is wrong for one that hands
+  // back a RESOURCE, because the abort does not un-acquire what the thunk acquired. Only the aborted
+  // branch consults it, so a caller that passes one changes nothing about the settled path.
+  retain?: (value: T) => void
 ): Promise<BoundedOutcome<T>> {
   if (callerSignal?.aborted === true) return { kind: 'aborted', cause: 'caller' };
   const controller = new AbortController();
@@ -1608,8 +1613,19 @@ async function runBounded<T>(
     cleanup();
     return first.value.ok ? { kind: 'value', value: first.value.value } : { kind: 'rejected' };
   }
-  await settled;
+  // The abort is already decided; this only settles what the thunk left behind. The two earlier
+  // aborted returns need no such handover — there the thunk either never ran or threw, so it
+  // produced nothing to hand back.
+  const late = await settled;
   cleanup();
+  if (late.ok && retain !== undefined) {
+    try {
+      retain(late.value);
+    } catch {
+      // A retain that fails has nothing better to try, and must not displace the abort it is
+      // reported alongside.
+    }
+  }
   return { kind: 'aborted', cause: first.cause };
 }
 
@@ -1684,8 +1700,22 @@ async function executeMutationEnvelope(
   // A lock manager that stalls used to stall the dispatch itself: the acquire was handed a signal
   // that could never fire, so there was no answer for the caller and nothing yet to release. Timing
   // out or being cancelled reports the same LOCK_UNAVAILABLE as a null or a throwing acquire.
-  const acquired = await runBounded(timeoutMs, context.signal, (signal) =>
-    services.lock.acquire(MUTATION_TARGET_KEY, signal)
+  //
+  // One interleaving survives that bound: an acquire that grants the lock at the instant the runner
+  // stops waiting. The refusal stands — no step below was ever told the lock is held — but the
+  // handle is real and this process is now the holder, so it is released rather than dropped. A
+  // dropped handle is the same process-wide leak the bound was added to prevent, arriving one tick
+  // later, and it would refuse every subsequent write until the process restarts.
+  const acquired = await runBounded(
+    timeoutMs,
+    context.signal,
+    (signal) => services.lock.acquire(MUTATION_TARGET_KEY, signal),
+    (late) => {
+      if (late === null) return;
+      // Bounded and caller-signal-free for the same reasons as step 9's release, and deliberately
+      // not awaited: the verdict below is already decided and this cannot improve it.
+      void runBounded(timeoutMs, undefined, (signal) => late.release(signal));
+    }
   );
   if (acquired.kind !== 'value' || acquired.value === null) return refusal('LOCK_UNAVAILABLE');
   const lock = acquired.value;
@@ -1846,7 +1876,7 @@ async function executeMutationEnvelope(
     // Bounded and caller-signal-free for the same reasons as step 9 below; the report is discarded
     // because a release that fails while unwinding leaves nothing better to try. The runner returns
     // that failure as a value, so nothing here can displace the error being rethrown.
-    await runBounded(timeoutMs, undefined, () => lock.release());
+    await runBounded(timeoutMs, undefined, (signal) => lock.release(signal));
     throw error;
   }
 
@@ -1859,11 +1889,11 @@ async function executeMutationEnvelope(
   // every other service call, but deliberately NOT against the caller's signal: the runner returns
   // on an already-aborted caller signal without invoking its thunk, and a release that is skipped
   // leaks the process-wide target lock until the process restarts — precisely on the cancelled
-  // paths that need it most. `release()` takes no signal this slice, so the bound is a timeout the
-  // release cannot yet cooperate with; it becomes a real one when the handle accepts a signal. A
-  // release that fails, times out, or reports nothing is 'unconfirmed', which is how a throwing
-  // release already read.
-  const released = await runBounded(timeoutMs, undefined, () => lock.release());
+  // paths that need it most. The bound is a real one now that the handle takes the runner's signal:
+  // a holder that cannot confirm within it stops waiting and says so, instead of leaving a promise
+  // pending that nobody can cancel. A release that fails, times out, or reports nothing is
+  // 'unconfirmed', which is how a throwing release already read.
+  const released = await runBounded(timeoutMs, undefined, (signal) => lock.release(signal));
   const releaseReport: 'released' | 'unconfirmed' =
     released.kind === 'value' ? released.value : 'unconfirmed';
   // Nothing reads the report yet: a later increment turns an 'unconfirmed' release after a verified

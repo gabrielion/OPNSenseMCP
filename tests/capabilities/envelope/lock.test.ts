@@ -11,10 +11,10 @@ describe('in-process mutation lock manager', () => {
     expect(first).not.toBeNull();
     expect(await manager.acquire('target', signal)).toBeNull();
     // An in-process token cannot fail to be released, so the handle always reports it released.
-    expect(await first?.release()).toBe('released');
+    expect(await first?.release(signal)).toBe('released');
     const second = await manager.acquire('target', signal);
     expect(second).not.toBeNull();
-    await second?.release();
+    await second?.release(signal);
   });
 
   it('locks targets independently and tolerates a double release', async () => {
@@ -23,8 +23,8 @@ describe('in-process mutation lock manager', () => {
     const b = await manager.acquire('b', signal);
     expect(a).not.toBeNull();
     expect(b).not.toBeNull();
-    expect(await a?.release()).toBe('released');
-    expect(await a?.release()).toBe('released');
+    expect(await a?.release(signal)).toBe('released');
+    expect(await a?.release(signal)).toBe('released');
     expect(await manager.acquire('a', signal)).not.toBeNull();
     expect(await manager.acquire('b', signal)).toBeNull();
   });

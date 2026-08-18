@@ -12,13 +12,16 @@ export function createInProcessMutationLockManager(): MutationLockManager {
       held.add(targetKey);
       let released = false;
       const handle: LockHandle = Object.freeze({
-        release(): Promise<'released' | 'unconfirmed'> {
+        release(signal: AbortSignal): Promise<'released' | 'unconfirmed'> {
           if (!released) {
             released = true;
             held.delete(targetKey);
           }
           // Dropping a process-local token cannot fail, and a repeated release is still a release,
-          // so this handle never has anything to report but success.
+          // so this handle never has anything to report but success. There is likewise nothing for
+          // the bound to cut short: the whole release is the `delete` above, already done by the
+          // time the signal could fire. Accepted to honour the contract, and discarded here.
+          void signal;
           return Promise.resolve('released');
         }
       });

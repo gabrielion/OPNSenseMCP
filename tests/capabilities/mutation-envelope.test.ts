@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import * as z from 'zod/v4';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { CapabilityCatalog } from '../../src/capabilities/catalog.js';
 import {
   createCapabilityDispatcher,
@@ -94,10 +94,37 @@ function neverAnswers<T>(signal: AbortSignal): Promise<T> {
   });
 }
 
+// The losing side of the acquire race: a manager that answers, with a REAL handle, at the instant
+// the runner stops waiting for it. Resolving on the abort rather than on a timer makes that
+// interleaving exact instead of merely likely, and the handle it grants is a genuine one — this
+// process is the holder from that moment on, whether or not anything is still listening.
+function grantedOnAbort(events: string[], signal: AbortSignal): Promise<LockHandle | null> {
+  const handle: LockHandle = {
+    release: (releaseSignal) => {
+      events.push('leak-release');
+      void releaseSignal;
+      return Promise.resolve('released');
+    }
+  };
+  if (signal.aborted) return Promise.resolve(handle);
+  return new Promise<LockHandle | null>((resolve) => {
+    signal.addEventListener(
+      'abort',
+      () => {
+        resolve(handle);
+      },
+      { once: true }
+    );
+  });
+}
+
 interface HarnessOptions {
   readonly lockNull?: boolean;
   readonly lockThrow?: boolean;
   readonly lockNeverAnswers?: boolean;
+  // Grants the lock at the instant the acquire's bound fires — the one interleaving where the
+  // envelope holds the process-wide target lock without ever having been told it does.
+  readonly lockGrantedAfterBound?: boolean;
   readonly lockReleaseReport?: 'released' | 'unconfirmed';
   readonly backupThrow?: boolean;
   readonly backupMissing?: boolean;
@@ -135,9 +162,13 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
         if (opts.lockNeverAnswers === true) return neverAnswers<LockHandle | null>(signal);
         if (opts.lockThrow === true) return Promise.reject(new Error('lock'));
         if (opts.lockNull === true) return Promise.resolve(null);
+        if (opts.lockGrantedAfterBound === true) return grantedOnAbort(events, signal);
         return Promise.resolve({
-          release: () => {
+          release: (signal) => {
             events.push('lock.release');
+            // A fake that cannot fail has nothing to do with the bound it is given; the parameter is
+            // named so the contract's shape is exercised, and discarded so nothing depends on it.
+            void signal;
             return Promise.resolve(opts.lockReleaseReport ?? 'released');
           }
         });
@@ -411,6 +442,26 @@ describe('mutation envelope lifecycle', () => {
     );
     expect(result).toMatchObject({ kind: 'refused', code: 'LOCK_UNAVAILABLE' });
     expect(harness.events).toEqual(['lock.acquire']);
+  }, 2000);
+
+  it('releases a lock granted as the acquire bound fired rather than leaking it', async () => {
+    // The interleaving the bound above cannot rule out: the manager grants the lock at the instant
+    // the runner gives up on it. The dispatch must still refuse — nothing downstream was ever told
+    // it holds the lock — but the handle is not the runner's to discard. A dropped handle holds the
+    // process-wide target lock until the process restarts, which is the same leak the bound was
+    // added to prevent, arriving one tick later. The release is fire-and-forget: it cannot change a
+    // verdict that is already decided, so it is awaited here instead of ordered before the answer.
+    const harness = makeHarness({ lockGrantedAfterBound: true });
+    const result = await dispatch(
+      makeCapability(harness.events, { timeoutMs: 20 }),
+      harness.services
+    );
+    expect(result).toMatchObject({ kind: 'refused', code: 'LOCK_UNAVAILABLE' });
+    await vi.waitFor(() => {
+      expect(harness.events).toContain('leak-release');
+    });
+    // And nothing else ran: no preflight, no audit and no backup for a write that never started.
+    expect(harness.events).toEqual(['lock.acquire', 'leak-release']);
   }, 2000);
 
   it('refuses BACKUP_FAILED instead of hanging when the backup never answers', async () => {

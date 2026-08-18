@@ -53,6 +53,9 @@ const noThirdPartyExecutable = ((): boolean => {
 // Generous on purpose: the assertion that matters is that a contended acquire RETURNS rather than
 // hangs. A tight ceiling would only measure how loaded the machine is.
 const BOUNDED_MS = 10_000;
+// This one has to be tight enough to MEAN something: it must sit well below the module's own
+// five-second release bound, or an implementation that ignored the signal would pass it too.
+const ABORTED_RELEASE_MS = 1_000;
 
 const signal = new AbortController().signal;
 
@@ -69,7 +72,7 @@ beforeEach(() => {
 afterEach(async () => {
   // Every handle owns a live helper process, so a leaked one would keep the worker's event loop
   // alive and hold the lock for the next test.
-  for (const handle of held) await handle.release();
+  for (const handle of held) await handle.release(signal);
   vi.unstubAllEnvs();
   rmSync(root, { force: true, recursive: true });
 });
@@ -126,7 +129,7 @@ describe('kernel-backed mutation lock manager', () => {
       expect(await second.acquire('target', signal)).toBeNull();
       expect(Date.now() - startedAt).toBeLessThan(BOUNDED_MS);
 
-      expect(await holder?.release()).toBe('released');
+      expect(await holder?.release(signal)).toBe('released');
       expect(await acquire(second)).not.toBeNull();
     }
   );
@@ -136,12 +139,65 @@ describe('kernel-backed mutation lock manager', () => {
 
     const first = await acquire(manager);
     expect(first).not.toBeNull();
-    expect(await first?.release()).toBe('released');
+    expect(await first?.release(signal)).toBe('released');
     // A release that already happened is still a release, and must not resurrect the helper.
-    expect(await first?.release()).toBe('released');
+    expect(await first?.release(signal)).toBe('released');
 
     expect(await acquire(manager)).not.toBeNull();
   });
+
+  it.skipIf(noKernelHelper)(
+    'stops waiting for a deaf helper when the release is aborted',
+    async () => {
+      // The five-second bound above exists for a helper that will not go. The signal is what lets the
+      // CALLER's bound be shorter than that: without it, one wedged helper pins the whole envelope to
+      // this module's patience. Proving that takes a helper that really is deaf to the release's EOF
+      // — a merely slow one would exit on its own and hide the difference.
+      const waiterPath = join(root, 'deaf-waiter.mjs');
+      // It signals readiness so the acquire succeeds, never reads the socket so the EOF goes
+      // unnoticed, and exits by itself so the leg strands nothing behind it.
+      writeFileSync(
+        waiterPath,
+        [
+          'import { writeSync } from "node:fs";',
+          'writeSync(4, Buffer.of(1));',
+          'setTimeout(() => { process.exit(0); }, 3000);',
+          ''
+        ].join('\n')
+      );
+      // Explicitly, for the same reason as the helper wrapper: writeFileSync's mode is umask-masked.
+      chmodSync(waiterPath, 0o600);
+
+      const spawned: ChildProcess[] = [];
+      const manager = createKernelMutationLockManager(lockPath, {
+        waiterPath,
+        spawn: (command: string, args: readonly string[], options: SpawnOptions): ChildProcess => {
+          const child = realSpawn(command, args, options);
+          spawned.push(child);
+          return child;
+        }
+      });
+      const handle = await manager.acquire('target', signal);
+      expect(handle).not.toBeNull();
+
+      const controller = new AbortController();
+      const startedAt = Date.now();
+      const abort = setTimeout(() => {
+        controller.abort();
+      }, 50);
+      // Honest rather than optimistic: the socket is closed, so the lock will go, but this helper has
+      // not been SEEN to go and only a helper we can account for is reported released.
+      expect(await handle?.release(controller.signal)).toBe('unconfirmed');
+      expect(Date.now() - startedAt).toBeLessThan(ABORTED_RELEASE_MS);
+      clearTimeout(abort);
+
+      const child = spawned[0];
+      if (child === undefined) throw new Error('the manager spawned no helper');
+      const exit = once(child, 'exit');
+      child.kill('SIGKILL');
+      await exit;
+    }
+  );
 
   it.skipIf(noKernelHelper)('frees the lock when the helper process is killed', async () => {
     const spawned: ChildProcess[] = [];
@@ -167,7 +223,7 @@ describe('kernel-backed mutation lock manager', () => {
 
     expect(await acquire(createKernelMutationLockManager(lockPath))).not.toBeNull();
     // The handle's helper is already gone, so the release has nothing left to confirm but that.
-    expect(await handle?.release()).toBe('released');
+    expect(await handle?.release(signal)).toBe('released');
   });
 
   it.skipIf(noKernelHelper)(
