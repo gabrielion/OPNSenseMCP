@@ -107,7 +107,20 @@ function isMissing(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
 }
 
-function requireSafeComponent(stats: Stats, userId: number): void {
+/** The `lstat` result the walk reads. Narrower than `Stats`, which satisfies it structurally. */
+export interface ComponentStats {
+  readonly uid: number;
+  readonly mode: number;
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+}
+
+/**
+ * Exported for its own tests, not for callers. Two of its clauses are unreachable from a real
+ * filesystem without root — see `tests/state/state-root.test.ts` — so they are asserted here
+ * instead of through `openResolvedStateRoot`.
+ */
+export function requireSafeComponent(stats: ComponentStats, userId: number): void {
   if (stats.isSymbolicLink()) {
     // lstat, so this is the link itself and not what it points at. A root-owned one is the
     // platform's own layout — macOS spells tmpdir() and /tmp through /var and /private — and only
@@ -176,12 +189,16 @@ export function openResolvedStateRoot(
   // rather than accepting it: the walk below refuses it (docs/project-status.md, "Unsafe-ancestor
   // validation"). It runs twice because the two runs answer different questions. Over the SPELLED
   // path a symlink is still visible, and a same-uid one — the redirect — is refused there and
-  // nowhere else. Over the CANONICAL path the components are the ones the writes actually land in,
-  // which is the only place the far side of a tolerated root-owned symlink gets checked. That
-  // second run has no test of its own and cannot get one: the two paths differ only when a
-  // tolerated symlink sits between them, and planting a root-owned symlink needs root. Neither run
-  // makes this atomic either — a redirect planted between a check and the use that follows it is
-  // out of reach from here, and the leaf's own `O_NOFOLLOW` open is what answers for that.
+  // nowhere else. Over the CANONICAL path the components are the ones the writes actually land in:
+  // it is the only place the far side of a tolerated root-owned symlink gets checked, and the only
+  // place a redirect planted between the two runs is answered for — `realpathSync` follows it, and
+  // an attacker-owned destination is a third-uid component this run refuses. That second run has no
+  // test of its own and cannot get one: the two paths differ only when a symlink sits between them,
+  // and planting one this walk tolerates needs root. Neither run makes the sequence atomic — a
+  // redirect planted between the last check and the use that follows it is out of reach from here,
+  // and the leaf's own `O_NOFOLLOW` open is what answers for that. `configure.ts` is stricter still
+  // on all of this, and deliberately: it refuses every symlink and revalidates held descriptors,
+  // which the credential file it writes is worth and a state directory is not.
   requireSafeAncestry(resolved);
   createPrivateDirectory(resolved);
   const canonical = canonicalPathOf(resolved);

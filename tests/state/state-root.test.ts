@@ -18,6 +18,7 @@ import {
   ensureTargetDirectory,
   openResolvedStateRoot,
   openStateRoot,
+  requireSafeComponent,
   resolveStateRootPath
 } from '../../src/state/state-root.js';
 import { deriveTargetId } from '../../src/state/target-identity.js';
@@ -185,9 +186,13 @@ describe('openResolvedStateRoot', () => {
   });
 
   it.each([
-    ['group', 0o770],
-    ['other', 0o707]
-  ])('refuses a root under a %s-writable ancestor', async (_who, mode) => {
+    ['a group-writable', 0o770],
+    ['an other-writable', 0o707],
+    // The sticky bit alone buys nothing: the exemption below is for the platform's own public
+    // directories, which are root's. A sticky directory THIS account owns is not one of those, and
+    // an account that can chmod it can also empty it.
+    ['a sticky but self-owned', 0o1777]
+  ])('refuses a root under %s ancestor', async (_shape, mode) => {
     // Planted with chmod: a mode argument to mkdir is masked by the umask, and a test that plants
     // permission bits that way plants none.
     const base = await createPrivateFixtureRoot('opnsense-state-lax-ancestor');
@@ -227,6 +232,29 @@ describe('openResolvedStateRoot', () => {
     }
   });
 
+  it('accepts a root under the root-owned sticky public temporary directory', () => {
+    // /tmp is 1777 and root's on both supported platforms — directly on Linux, and on macOS
+    // through the root-owned /tmp symlink onto /private/tmp, so this one leg exercises both of the
+    // walk's relaxations. It is not a curiosity: every suite that points
+    // `OPNSENSE_MCP_STATE_DIR` at `mkdtemp(tmpdir())` runs here on CI, and the walk without this
+    // exemption refuses all of them. Sticky is what makes it safe — the kernel forbids renaming or
+    // removing an entry you do not own, and whatever an outsider can still create is caught by the
+    // ownership check the walk carries on every component.
+    const base = mkdtempSync('/tmp/opnsense-state-public-tmp-');
+    try {
+      const override = join(base, 'state');
+      expect(
+        openResolvedStateRoot(override, {
+          platform: process.platform,
+          env: {},
+          homeDir: '/home/unused'
+        }).path
+      ).toBe(realpathSync(override));
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it.each([['/tmp/state/'], ['/tmp//state'], ['/tmp/a/../state'], ['relative/state']])(
     'rejects the non-normalized or relative override %s',
     (override) => {
@@ -235,6 +263,32 @@ describe('openResolvedStateRoot', () => {
       ).toThrow('OPNSENSE_MCP_STATE_DIR must be a normalized absolute path');
     }
   );
+});
+
+describe('requireSafeComponent', () => {
+  // Two clauses of the walk are unreachable through a real filesystem from an unprivileged test,
+  // so they are asserted against the predicate itself rather than left unpinned. A foreign-owned
+  // ancestor cannot be created by this account, and any directory it could be created in is
+  // already group- or other-writable, which the walk refuses one clause earlier. A non-directory
+  // ancestor can be built, but not observed: `mkdir -p` fails ENOTDIR immediately after and raises
+  // the same integrity error, so deleting the walk's own refusal would change nothing visible.
+  const userId = process.getuid?.() ?? 0;
+  const directory = { isDirectory: () => true, isSymbolicLink: () => false };
+
+  it('refuses an ancestor owned by neither root nor this account', () => {
+    expect(() => {
+      requireSafeComponent({ ...directory, uid: userId + 1, mode: 0o700 }, userId);
+    }).toThrow('State directory failed its integrity checks');
+  });
+
+  it('refuses an ancestor that is not a directory', () => {
+    expect(() => {
+      requireSafeComponent(
+        { isDirectory: () => false, isSymbolicLink: () => false, uid: userId, mode: 0o600 },
+        userId
+      );
+    }).toThrow('State directory failed its integrity checks');
+  });
 });
 
 describe('ensureTargetDirectory', () => {
