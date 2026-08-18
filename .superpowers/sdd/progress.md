@@ -873,7 +873,15 @@ docs/superpowers/plans/2026-08-18-p0c-slice2a-envelope-prep-refactors.md (8 task
 implementers and task reviewers on opus effort max, per the user mandate). Goal: reshape the
 mutation-envelope interfaces and the composition root so Slice 2b can drop in durable
 backup/audit/lock as pure service swaps — R1-R5, R7, R8 from the 2026-08-17 review plus four
-carry-overs — with ZERO observable behaviour change.
+carry-overs — with ZERO observable behaviour change on every reachable path EXCEPT two deliberate,
+plan-ordered, test-pinned carve-outs, both strictly fail-safe and both stated here so the headline
+stops overclaiming: (1) R5 — a lock or backup service that never answers now refuses
+LOCK_UNAVAILABLE/BACKUP_FAILED at the capability's timeout, where the dispatch used to hang forever
+(tests/capabilities/mutation-envelope.test.ts:375, :389, :409); (2) R7 — a mutation-service
+construction failure now yields a read-only server, where startup used to crash
+(tests/app/default-application.test.ts:559, which stubs TMPDIR to an absent path and so disproves the
+plan's "cannot fail on darwin/linux" premise). Every other refusal code, result shape and event order
+is unchanged, which is what the canary below pins.
   - CANARY, the slice's most load-bearing assertion, re-run by every task: the envelope's step-order
     event list must not change. IT DID NOT. In the "runs the fixed order and returns the verified
     output on success" test of tests/capabilities/mutation-envelope.test.ts, the asserted EVENT ARRAY
@@ -914,12 +922,14 @@ carry-overs — with ZERO observable behaviour change.
     runner's signal (sharing one silently hands the second call the first's leftover budget).
     Release is bounded with an undefined caller signal on purpose — an already-aborted signal would
     skip the thunk and leak the process-wide lock — and that choice is pinned.
-  - R7 + R8 (850635b, 3603290): mutation services are built by one lazy fail-closed helper; if
+  - R7 + R8 (850635b, 3603290): mutation services are built by one EAGER, GUARDED fail-closed helper
+    — not a lazy one, whatever R7's review title said: buildMutationServices runs at startup inside
+    createDefaultApplicationRuntime, so the degrade fires there and not at the first write; if
     construction throws, the runtime serves a READ-ONLY catalogue instead of failing to start. The
     composition root now holds the parsed connection config and hands the builder the real origin
     (parsed.url), returned and ignored this slice. Discovery: `services: undefined` alone crashes
     dispatch because the catalogue still holds the envelope capability; the guard at kernel:1870 is
-    UNTESTED and catalog.test.ts:385-390 is the real coverage.
+    UNTESTED and catalog.test.ts:386-391 is the real coverage.
   - Sweep-once (53994c6, 33545b6): cleanupCandidates is hoisted out of the retry loop into
     sweepCandidatesOnce(), called once per ensureIdentityKey call before attempt 1, so a retry can no
     longer remove a live peer's in-flight candidate. The wrapper exists because the sweep left the

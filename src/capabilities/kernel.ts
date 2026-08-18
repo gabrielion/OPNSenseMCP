@@ -1719,7 +1719,12 @@ async function executeMutationEnvelope(
       let backupId: string | undefined;
       if (capability.policy.backup === 'strict') {
         // Built outside the try on purpose: reading the sealed digests is not a backup failure, so
-        // a hostile preflight object still propagates here exactly as it does at step 5.
+        // a hostile preflight object propagates as an envelope failure instead of being reported
+        // as one. That read is one step EARLIER than the step-5 revalidation that used to be its
+        // first reader, so when the backup would also fail it preempts the BACKUP_FAILED this step
+        // would otherwise have reported. Adjudicated, not overlooked: an object that throws on
+        // every read never passes isPreflightResult, so seeing the difference takes a getter that
+        // throws only on a later read, which a production preflight (a plain object) is not.
         const backupRequest: BackupRequest = Object.freeze({
           targetKey: MUTATION_TARGET_KEY,
           capabilityId: capability.id,

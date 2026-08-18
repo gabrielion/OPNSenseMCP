@@ -3,7 +3,10 @@
 - **Snapshot date:** 2026-08-18
 - **Working branch:** `p0c/slice2a-envelope-prep`, not yet landed. P0-C Slice 1, its 1.1 hardening
   and the identity-key retry margin are merged to `main` (`98c33f5`); this branch carries P0-C
-  Slice 2a, the envelope prep refactors, which reshape interfaces and change no observable behavior.
+  Slice 2a, the envelope prep refactors, which reshape interfaces and change no observable behavior
+  apart from two deliberate fail-safe carve-outs: a service that never answers now refuses instead of
+  hanging (R5), and a mutation-service construction failure now degrades to a read-only server
+  instead of crashing startup (R7).
 - **Base at snapshot:** `98c33f5` (`docs: renew Product 3 VM attestation`), which is also `main`'s
   head.
 - **Remote:** `https://github.com/gabrielion/OPNSenseMCP.git`
@@ -477,7 +480,13 @@ in all). The backoff, not the raised bound, is what fixes it: 10 attempts withou
 P0-C Slice 2a (2026-08-18) is this branch. It reshaped the mutation envelope's interfaces and its
 composition root so Slice 2b can drop in durable services as pure swaps — R1–R5, R7 and R8 from the
 2026-08-17 review, plus the sweep-once fix, the version-drift test and the two stale comments — under
-a hard zero-behavior-change rule. The envelope's step-order event list (`lock.acquire`, `preflight`,
+a zero-behavior-change rule with exactly two plan-ordered carve-outs, both strictly fail-safe and both
+pinned by this branch's own tests: R5's bounding turns a lock or backup service that never answers
+into a `LOCK_UNAVAILABLE`/`BACKUP_FAILED` refusal at the capability's timeout, where the dispatch used
+to hang forever (the three "never answers" tests in `tests/capabilities/mutation-envelope.test.ts`),
+and R7's guard turns a mutation-service construction failure into a read-only server, where startup
+used to crash (the degrade test in `tests/app/default-application.test.ts`). Nothing else moved: the
+envelope's step-order event list (`lock.acquire`, `preflight`,
 `audit.intent`, `backup.create`, `preflight`, `handler`, `verify`, `audit.result`, `lock.release`) is
 the canary for that rule and is byte-identical to the one on `main`. What each refactor delivered,
 and what it deliberately left to 2b, is in Task 3 below.
@@ -555,8 +564,9 @@ Slice 2a already delivered, so the plan starts from these rather than repeating 
 - R5 — no unbounded service call is left. `acquire`, `create`, `exists` and both release sites run
   under `runBounded` with the capability's timeout, and `create` and `exists` each take their own
   runner's signal rather than sharing one budget.
-- R7 — the mutation services are built by one lazy fail-closed helper: if construction throws, the
-  runtime serves a read-only catalogue instead of failing to start.
+- R7 — the mutation services are built by one eager, guarded fail-closed helper: construction still
+  runs at startup, not at first write, but a throw inside it now yields a read-only catalogue
+  instead of a failed start.
 - R8 — the composition root holds the parsed connection config and hands the builder the real origin,
   which is returned and ignored this slice.
 - The identity-key sweep runs once per `ensureIdentityKey` call instead of once per retry; the
