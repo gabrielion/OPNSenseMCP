@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ElicitResult } from '@modelcontextprotocol/client';
@@ -660,6 +660,111 @@ describe('default application composition seam', () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
+
+  it('refuses to place durable state relative to the working directory', async () => {
+    // `os.homedir()` answers with an empty string when HOME is one, and the platform defaults are
+    // built from it: macOS would resolve `Library/Application Support/…` and Linux
+    // `.local/state/…` RELATIVE to wherever the server was started — a service manager's working
+    // directory, whatever its mode — and every integrity check would then pass on the wrong
+    // directory, because the root is created before it is canonicalized. There is nothing to
+    // repair, so the composition root refuses and degrades to reads.
+    const target = await startSyntheticOPNsenseTarget(() => ({
+      body: JSON.stringify({ metadata: { system: { status: 'ok' } }, subsystems: {} })
+    }));
+    const directory = await writeTargetConfig(target);
+    // Named here rather than inherited from the suite's setup, because this environment IS the
+    // subject: an empty HOME, and no override to stand in for it. `XDG_STATE_HOME` is emptied with
+    // it so the Linux default falls to its relative spelling too, instead of a configured absolute
+    // state home that would put the leak somewhere this test does not look.
+    vi.stubEnv('HOME', '');
+    vi.stubEnv('OPNSENSE_MCP_STATE_DIR', undefined);
+    vi.stubEnv('XDG_STATE_HOME', '');
+    stubWriteGates();
+
+    const runtime = createDefaultApplicationRuntime();
+    try {
+      expect(
+        listApplicationCapabilities(runtime.application, 'stdio').map(({ mcpName }) => mcpName)
+      ).toEqual(['server_status', 'opn_describe', 'opn_get', 'opn_list']);
+      // Nothing was written where the defaults would have pointed. Both spellings, because the
+      // suite must fail the same way on the platform that is not this one.
+      await expect(access(join(process.cwd(), 'Library'))).rejects.toMatchObject({
+        code: 'ENOENT'
+      });
+      await expect(access(join(process.cwd(), '.local'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await runtime.close();
+      await target.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  // One case per directory the wiring creates, so each validation answers for itself: a single
+  // case would keep passing while the other directory's check was deleted.
+  it.each(['backups', 'audit'] as const)(
+    'refuses the envelope when the %s directory stops being private',
+    async (widened) => {
+      const target = await startSyntheticOPNsenseTarget((request) => {
+        if (request.path === '/api/firewall/alias/searchItem') {
+          const query = JSON.parse(request.body) as { current: number; rowCount: number };
+          return {
+            body: JSON.stringify({
+              total: 0,
+              rowCount: query.rowCount,
+              current: query.current,
+              rows: []
+            })
+          };
+        }
+        return { body: JSON.stringify({ metadata: { system: { status: 'ok' } }, subsystems: {} }) };
+      });
+      const directory = await writeTargetConfig(target);
+      const stateDir = await mkdtemp(join(tmpdir(), 'opnsense-lax-subdirectory-state-'));
+      vi.stubEnv('OPNSENSE_MCP_STATE_DIR', stateDir);
+      stubWriteGates();
+
+      // First start: the layout is created privately and the writes are offered.
+      const first = createDefaultApplicationRuntime();
+      let targetDir = '';
+      try {
+        expect(
+          listApplicationCapabilities(first.application, 'stdio').map(({ mcpName }) => mcpName)
+        ).toContain('opn_create');
+        const targetIds = await readdir(join(stateDir, 'targets'));
+        targetDir = join(stateDir, 'targets', targetIds[0] ?? '');
+      } finally {
+        await first.close();
+      }
+
+      // Between the two runs the directory is widened to group- and other-readable. Both stores
+      // create their own directory with `mkdir`, which is a silent no-op over one that already
+      // exists, so nothing downstream would ever notice. Planted with chmod: a mode argument to
+      // mkdir is masked by the umask, and a test that plants permission bits that way plants none.
+      await chmod(join(targetDir, widened), 0o755);
+
+      const second = createDefaultApplicationRuntime();
+      try {
+        expect(
+          listApplicationCapabilities(second.application, 'stdio').map(({ mcpName }) => mcpName)
+        ).toEqual(['server_status', 'opn_describe', 'opn_get', 'opn_list']);
+        // Fail closed, not fail dead: the target is reachable, so its reads still answer.
+        await expect(
+          dispatchCapability(
+            {
+              name: 'opn_list',
+              arguments: { resource: 'firewall.alias', page: 1, pageSize: 10, query: '' }
+            },
+            { application: second.application, transport: 'stdio' }
+          )
+        ).resolves.toMatchObject({ kind: 'success' });
+      } finally {
+        await second.close();
+        await target.close();
+        await rm(directory, { recursive: true, force: true });
+        await rm(stateDir, { recursive: true, force: true });
+      }
+    }
+  );
 
   it('degrades to a read-only server when the mutation envelope cannot own a backup root', async () => {
     const target = await startSyntheticOPNsenseTarget((request) => {
