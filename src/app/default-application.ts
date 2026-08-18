@@ -75,6 +75,59 @@ export function createOwnedApplicationRuntime(
   });
 }
 
+interface BuiltMutationServices {
+  readonly services: MutationEnvelopeServices;
+  readonly dispose: () => void;
+  /**
+   * The target this envelope writes to. Nothing consumes it yet; it is returned rather than
+   * dropped so the identity the durable state root will be derived from is already carried by the
+   * value that owns the store, instead of being rediscovered later.
+   */
+  readonly origin: string;
+}
+
+/**
+ * Builds the mutation envelope's owned services, or nothing at all.
+ *
+ * Returning `undefined` rather than throwing is the fail-closed degrade: a server that cannot own
+ * a backup store must not start with writes, but it must still answer the reads it was asked for.
+ * The kernel enforces the other half — it refuses to hold a write capability without these
+ * services — so the caller pairs an absent result with a catalogue that has no write in it.
+ */
+function buildMutationServices(
+  client: OPNsenseHttpsClient,
+  origin: string
+): BuiltMutationServices | undefined {
+  let backupRoot: string | undefined;
+  try {
+    const root = mkdtempSync(join(tmpdir(), 'opnsense-mcp-backup-'));
+    backupRoot = root;
+    const services: MutationEnvelopeServices = {
+      lock: createInProcessMutationLockManager(),
+      backup: createOPNsenseConfigBackupService(client, join(root, 'store')),
+      audit: createBoundedAuditSink()
+    };
+    return Object.freeze({
+      services,
+      dispose: () => {
+        rmSync(root, { recursive: true, force: true });
+      },
+      origin
+    });
+  } catch {
+    // A half-built envelope is never handed out, so its scratch root is removed here: no shutdown
+    // path will ever learn about it.
+    if (backupRoot !== undefined) {
+      try {
+        rmSync(backupRoot, { recursive: true, force: true });
+      } catch {
+        // Failing closed means starting read-only, not failing to start.
+      }
+    }
+    return undefined;
+  }
+}
+
 export function createDefaultApplicationRuntime(): OwnedApplicationRuntime {
   const config = loadRuntimeConfig();
   const defaultPath = resolveDefaultOPNsenseConfigPath(process.platform, {
@@ -92,35 +145,34 @@ export function createDefaultApplicationRuntime(): OwnedApplicationRuntime {
   }
 
   let client: OPNsenseHttpsClient | undefined;
-  let backupRoot: string | undefined;
+  let envelope: BuiltMutationServices | undefined;
   try {
-    client = createOPNsenseHttpsClient(loadOPNsenseConnectionConfig(configPath));
+    const parsed = loadOPNsenseConnectionConfig(configPath);
+    client = createOPNsenseHttpsClient(parsed);
     const readAdapter = createOPNsenseReadAdapter(client);
     const aliasAdapter = createOPNsenseAliasAdapter(client);
-    backupRoot = mkdtempSync(join(tmpdir(), 'opnsense-mcp-backup-'));
-    const services: MutationEnvelopeServices = {
-      lock: createInProcessMutationLockManager(),
-      backup: createOPNsenseConfigBackupService(client, join(backupRoot, 'store')),
-      audit: createBoundedAuditSink()
-    };
+    envelope = buildMutationServices(client, parsed.url);
     const application = createApplicationContext(
       config,
-      createProductCapabilityCatalog(readAdapter, aliasAdapter),
-      services
+      // Without the envelope's services there is no protected write, so the alias target is not
+      // offered as one: the catalogue seals the writes exactly as it does for an unreachable
+      // target, and the reads stay listed.
+      envelope === undefined
+        ? createProductCapabilityCatalog(readAdapter)
+        : createProductCapabilityCatalog(readAdapter, aliasAdapter),
+      envelope?.services
     );
     const ownedClient = client;
-    const ownedBackupRoot = backupRoot;
-    return createOwnedApplicationRuntime(application, [
-      () => {
-        ownedClient.close();
-      },
-      () => {
-        rmSync(ownedBackupRoot, { recursive: true, force: true });
-      }
-    ]);
+    const closeClient = () => {
+      ownedClient.close();
+    };
+    return createOwnedApplicationRuntime(
+      application,
+      envelope === undefined ? [closeClient] : [closeClient, envelope.dispose]
+    );
   } catch (error) {
     client?.close();
-    if (backupRoot !== undefined) rmSync(backupRoot, { recursive: true, force: true });
+    envelope?.dispose();
     throw error;
   }
 }

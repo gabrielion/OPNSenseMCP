@@ -22,7 +22,10 @@ import type { RuntimeConfig } from '../../src/config/runtime-config.js';
 import { KNOWN_RESOURCE_SCOPES } from '../../src/capabilities/resource-scopes.js';
 import { createMutationFixture, createReadFixture } from '../fixtures/capabilities.js';
 import { connectLegacy } from '../helpers/connect.js';
-import { startSyntheticOPNsenseTarget } from '../support/https-opnsense-mock.js';
+import {
+  startSyntheticOPNsenseTarget,
+  type SyntheticOPNsenseTarget
+} from '../support/https-opnsense-mock.js';
 
 beforeEach(() => {
   vi.stubEnv('OPNSENSE_CONFIG_FILE', undefined);
@@ -60,6 +63,37 @@ function deferred() {
     resolvePromise = resolve;
   });
   return { promise, resolve: resolvePromise };
+}
+
+interface AliasRow {
+  readonly uuid: string;
+  readonly name: string;
+  readonly type: string;
+  readonly description: string;
+}
+
+const CREATED_ALIAS_UUID = '00000000-0000-0000-0000-000000000001';
+
+/** Points the composition root at a real synthetic target and returns the directory to remove. */
+async function writeTargetConfig(target: SyntheticOPNsenseTarget): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), 'opnsense-composed-runtime-'));
+  const caFile = join(directory, 'ca.pem');
+  const configFile = join(directory, 'config.json');
+  await writeFile(caFile, target.ca, { mode: 0o600 });
+  await writeFile(
+    configFile,
+    JSON.stringify({ url: target.url, apiKey: 'test-key', apiSecret: 'test-secret', caFile }),
+    { mode: 0o600 }
+  );
+  vi.stubEnv('OPNSENSE_CONFIG_FILE', configFile);
+  return directory;
+}
+
+/** Alias writes need the exact triple: not read-only, the experimental flag, the named scope. */
+function stubWriteGates(): void {
+  vi.stubEnv('READ_ONLY', 'false');
+  vi.stubEnv('ENABLED_FEATURE_FLAGS', 'experimental-alias-write');
+  vi.stubEnv('ALLOWED_RESOURCES', 'server.status,system.status,core.services,firewall.alias');
 }
 
 describe('default application composition seam', () => {
@@ -435,6 +469,129 @@ describe('default application composition seam', () => {
     }
   });
 
+  it('composes the mutation envelope: write tools are listed and the backup is taken from the configured target', async () => {
+    const aliases: AliasRow[] = [];
+    const target = await startSyntheticOPNsenseTarget((request) => {
+      if (request.path === '/api/core/backup/download/this') {
+        return {
+          headers: { 'content-type': 'application/xml' },
+          body: '<?xml version="1.0"?><opnsense><system><hostname>lab</hostname></system></opnsense>'
+        };
+      }
+      if (request.path === '/api/firewall/alias/searchItem') {
+        const query = JSON.parse(request.body) as { current: number; rowCount: number };
+        return {
+          body: JSON.stringify({
+            total: aliases.length,
+            rowCount: query.rowCount,
+            current: query.current,
+            rows: aliases
+          })
+        };
+      }
+      if (request.path === '/api/firewall/alias/addItem') {
+        aliases.push({
+          uuid: CREATED_ALIAS_UUID,
+          name: 'lab_hosts',
+          type: 'host',
+          description: 'lab'
+        });
+        return { body: JSON.stringify({ result: 'saved', uuid: CREATED_ALIAS_UUID }) };
+      }
+      if (request.path === '/api/firewall/alias/reconfigure') {
+        return { body: JSON.stringify({ status: 'ok' }) };
+      }
+      return { statusCode: 404, body: '{}' };
+    });
+    const directory = await writeTargetConfig(target);
+    stubWriteGates();
+    const runtime = createDefaultApplicationRuntime();
+    const connection = await connectLegacy(runtime.application, {
+      capabilities: { elicitation: { form: {} } }
+    });
+    connection.client.setRequestHandler('elicitation/create', () =>
+      Promise.resolve({ action: 'accept', content: { confirm: true } } as ElicitResult)
+    );
+    try {
+      // A composition that failed to build the envelope's services could not list a write at all:
+      // the kernel refuses to hold one without them.
+      expect((await connection.client.listTools()).tools.map(({ name }) => name)).toEqual([
+        'server_status',
+        'opn_describe',
+        'opn_get',
+        'opn_list',
+        'opn_create',
+        'opn_delete'
+      ]);
+
+      await expect(
+        connection.client.callTool({
+          name: 'opn_create',
+          arguments: {
+            resource: 'firewall.alias',
+            attributes: {
+              name: 'lab_hosts',
+              type: 'host',
+              content: ['192.0.2.10'],
+              description: 'lab'
+            }
+          }
+        })
+      ).resolves.toMatchObject({
+        structuredContent: { item: { uuid: CREATED_ALIAS_UUID, name: 'lab_hosts' } }
+      });
+
+      // The backup service is bound to the product client: the strict pre-write snapshot is fetched
+      // from the configured target, before the change it protects.
+      const paths = target.requests.map(({ path }) => path);
+      expect(paths).toContain('/api/core/backup/download/this');
+      expect(paths.indexOf('/api/core/backup/download/this')).toBeLessThan(
+        paths.indexOf('/api/firewall/alias/addItem')
+      );
+    } finally {
+      await connection.close();
+      await runtime.close();
+      await target.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('degrades to a read-only server when the mutation envelope cannot own a backup root', async () => {
+    const target = await startSyntheticOPNsenseTarget(() => ({
+      body: JSON.stringify({ metadata: { system: { status: 'ok' } }, subsystems: {} })
+    }));
+    const directory = await writeTargetConfig(target);
+    stubWriteGates();
+    // The real seam, not an injected one: the backup store is created under the process temporary
+    // directory, so an unusable TMPDIR is exactly the failure Slice 2b's resolved state root will
+    // raise on a locked-down host.
+    vi.stubEnv('TMPDIR', join(directory, 'absent'));
+
+    const runtime = createDefaultApplicationRuntime();
+    const connection = await connectLegacy(runtime.application);
+    try {
+      // Fail closed, not fail dead: the writes are gone even though every write gate is open, and
+      // the reads the operator asked for still answer.
+      expect((await connection.client.listTools()).tools.map(({ name }) => name)).toEqual([
+        'server_status',
+        'opn_describe',
+        'opn_get',
+        'opn_list'
+      ]);
+      await expect(
+        dispatchCapability(
+          { name: 'opn_get', arguments: { resource: 'system.status' } },
+          { application: runtime.application, transport: 'stdio' }
+        )
+      ).resolves.toEqual({ kind: 'success', output: { item: { status: 'ok' } } });
+    } finally {
+      await connection.close();
+      await runtime.close();
+      await target.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('is the only default executable composition root and records the downstream replacement seam', async () => {
     const [factory, main, httpEntrypoint] = await Promise.all([
       readFile('src/app/default-application.ts', 'utf8'),
@@ -446,8 +603,6 @@ describe('default application composition seam', () => {
     expect(factory).toContain('createOwnedApplicationRuntime');
     expect(factory).toContain('loadOPNsenseConnectionConfig');
     expect(factory).toContain('createProductCapabilityCatalog(readAdapter, aliasAdapter)');
-    expect(factory).toContain('createInProcessMutationLockManager()');
-    expect(factory).toContain('createOPNsenseConfigBackupService(client');
     expect(factory).toContain('client?.close()');
     expect(main).toContain('startStdio');
     expect(httpEntrypoint).toContain('createDefaultApplicationRuntime');
