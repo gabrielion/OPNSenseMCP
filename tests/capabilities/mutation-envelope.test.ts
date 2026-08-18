@@ -240,6 +240,22 @@ describe('mutation envelope lifecycle', () => {
     expect(harness.backupRequests[0]?.transactionId).toBe(txids[0]);
   });
 
+  it('generates a fresh transactionId for each envelope run', async () => {
+    // Two runs through one process: an id hoisted to module scope or a memoized helper would keep
+    // every assertion above green while making the durable join meaningless. The pin is per-RUN
+    // freshness — each run keeps one id for itself and does not share it with the previous run.
+    const harness = makeHarness();
+    const capability = makeCapability(harness.events);
+    await dispatch(capability, harness.services);
+    await dispatch(capability, harness.services);
+    expect(harness.auditRecords).toHaveLength(4);
+    const ids = harness.auditRecords.map((r) => r.transactionId);
+    expect(new Set(ids.slice(0, 2)).size).toBe(1);
+    expect(new Set(ids.slice(2)).size).toBe(1);
+    expect(ids[2]).not.toBe(ids[0]);
+    expect(harness.backupRequests[1]?.transactionId).toBe(ids[2]);
+  });
+
   it('awaits the lock release after the terminal audit and tolerates its report', async () => {
     // The release is reported, not obeyed, this slice: an unconfirmed release changes neither the
     // verified success nor the step order. Making it a refusal is a later, deliberate change.
