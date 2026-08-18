@@ -877,9 +877,14 @@ carry-overs — with ZERO observable behaviour change.
   - CANARY, the slice's most load-bearing assertion, re-run by every task: the envelope's step-order
     event list must not change. IT DID NOT. In the "runs the fixed order and returns the verified
     output on success" test of tests/capabilities/mutation-envelope.test.ts, the asserted EVENT ARRAY
-    is byte-identical between 98c33f5 and the final tree (md5 7e6d085af5111f34ceace93ef780e473 on
-    both) and still reads, in order: lock.acquire, preflight, audit.intent, backup.create, preflight,
-    handler, verify, audit.result, lock.release. Claim exactly that, and nothing wider: the
+    is byte-identical between 98c33f5 and the final tree, and still reads, in order: lock.acquire,
+    preflight, audit.intent, backup.create, preflight, handler, verify, audit.result, lock.release.
+    Reproduce it with the command, not with the digest alone — a digest without its extraction is
+    unverifiable, and a narrower extraction of "the same" array yields a different one:
+      sed -n '/runs the fixed/,/]);/p' tests/capabilities/mutation-envelope.test.ts | md5
+    gives 7e6d085af5111f34ceace93ef780e473 on both trees; that range covers the it() header through
+    the first `]);`, i.e. the event array plus the four lines above it. Claim exactly that, and
+    nothing wider: the
     surrounding it() block is NOT byte-identical, because Task 3 added 13 lines of BackupRequest
     assertions inside it, so a whole-block diff is 13 additions and no deletions. No refusal code,
     result shape or event order moved anywhere this slice.
@@ -1011,9 +1016,18 @@ carry-overs — with ZERO observable behaviour change.
         record under the wrong code; terminalAuditRecorded=false conflates "audit failed" with "never
         reached step 8" (gate on verified success); kernel:1870 untested; EXECUTION_FAILED is
         indistinguishable from an upstream 403 (UX backlog) — a candidate for the Slice 3 refusal
-        vocabulary; a cancel mid-envelope never reports CANCELLED, since there is no cancellation
-        vocabulary at all and the caller gets whichever refusal the abort produces on the step it
-        lands in; and R3's single-helper invariant is pinned by a ONE-SHOT grep rather than a test —
+        vocabulary; a caller abort is masked at every step EXCEPT step 2 — a step-2 preflight abort
+        whose cause is the caller maps to refusal('CANCELLED') at kernel:1700-1707 (runtime-proven in
+        the T8 re-review), and the entry check at kernel:1674 refuses an already-aborted call the same
+        way, while elsewhere the abort surfaces as the step's own code (LOCK_UNAVAILABLE step 1
+        :1683, deliberate per its own comment; BACKUP_FAILED step 4 :1741/:1756;
+        STATE_REVALIDATION_FAILED step 5 :1782; OUTCOME_INDETERMINATE step 6 :1792, deliberate since a
+        write may have landed; OUTCOME_UNVERIFIED step 7 :1807), so Slice 3 decides which of those
+        should surface as CANCELLED and the answer is not "all of them". DO NOT write "there is no
+        cancellation vocabulary": 'CANCELLED' IS in the RefusalCode union (types.ts:128) with messages
+        at kernel:136 and mcp/results.ts:12. That false wording reached this entry by transcription
+        from the workspace ledger's Task 4 note, which is now corrected at its source.
+        And R3's single-helper invariant is pinned by a ONE-SHOT grep rather than a test —
         Slice 3 must encode "every terminal path leaves through finishWith" as an execution-boundary
         source-text test, or it decays (the 9-versus-11 drift under R3 above is what that decay looks
         like).
