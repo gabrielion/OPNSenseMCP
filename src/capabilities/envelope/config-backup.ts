@@ -12,8 +12,9 @@ import {
   writeSync
 } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { Buffer } from 'node:buffer';
+import { maintainRetention } from './retention.js';
 import type { BackupRequest, BackupService } from '../types.js';
 
 const BACKUP_ID_BYTES = 16;
@@ -326,6 +327,12 @@ export function createOPNsenseConfigBackupService(
       request: BackupRequest,
       signal: AbortSignal
     ): Promise<{ readonly backupId: string }> {
+      // Retention runs first, before even the download: this step is the last moment before the
+      // envelope's first firewall write, so a purge that cannot be completed has to refuse the
+      // mutation here rather than let the store grow without bound. Its failures are static
+      // sentences, so they reach the kernel as BACKUP_FAILED with nothing of the state root in
+      // them. The store is `<targetDir>/backups`, and the trail retention reads is its sibling.
+      maintainRetention(dirname(rootDir));
       const downloaded = await source.downloadConfigBackup(signal);
       if (downloaded.byteLength === 0 || downloaded.byteLength > MAX_CONFIG_BACKUP_BYTES) {
         throw backupError(INVALID_BACKUP);

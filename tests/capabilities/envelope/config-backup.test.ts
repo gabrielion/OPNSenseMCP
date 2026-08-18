@@ -151,6 +151,32 @@ describe('OPNsense configuration backup service', () => {
     expect(readdirSync(store)).toEqual([]);
   });
 
+  // Retention maintenance is part of this step, and it is the first thing in it: the store lives at
+  // `<targetDir>/backups`, so a target whose durable state cannot be bounded refuses the mutation
+  // before the configuration is even fetched — which is what makes it a refusal before the first
+  // firewall write. The planted metadata is unreadable, so the refusal can only come from there,
+  // and the message is checked because a leaked fs errno would carry the private store path.
+  it('refuses before the download when retention cannot be maintained', async () => {
+    const store = join(root, 'backups');
+    const planted = join(store, 'a'.repeat(32));
+    mkdirSync(planted, { recursive: true, mode: 0o700 });
+    writeFileSync(join(planted, 'metadata.json'), 'not json at all', { mode: 0o600 });
+    const downloads = source();
+    const service = createOPNsenseConfigBackupService(downloads, store);
+
+    let message = '';
+    try {
+      await service.create(REQUEST, signal);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toBe('Durable state failed its retention checks');
+    expect(message).not.toMatch(/\//u);
+    expect(downloads.downloadConfigBackup).not.toHaveBeenCalled();
+    expect(readdirSync(store)).toEqual(['a'.repeat(32)]);
+  });
+
   // The planted backup is complete and self-consistent — its metadata names the planted id and
   // describes the very bytes the link points at — so the symlink is the only fault left, and a
   // service that followed it would answer `true`.
