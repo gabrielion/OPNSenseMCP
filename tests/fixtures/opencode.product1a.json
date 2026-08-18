@@ -9,9 +9,9 @@
   "model": "opencode/deepseek-v4-flash-free",
   "package": {
     "name": "@gabrielion/opnsense-mcp",
-    "version": "0.1.0",
-    "sha256": "2b11fcd073c41e77ef9d517808dd567168b2b6a86adffc5be97a47724b0cf0f3",
-    "tarSha256": "11414b37d26835b96e599bc7f2b5d565dbc44266fdc725294b687ee1435c022b"
+    "version": "0.1.1",
+    "sha256": "b7e6c579ff6a528ecdb82d96d1b64c3c36a65b62366dcbfb62e3fec287908721",
+    "tarSha256": "9120d3e63384bcbc994e02d752b0f572d618afaf8998646c416d052e3364aeca"
   },
   "tools": [
     {
@@ -26,7 +26,7 @@
     },
     {
       "name": "opn_list",
-      "inputSha256": "0cf3425523d23a35467ce3a3f88ed96b19e2e01bd93a8deddbaf31ae611d9b9b",
+      "inputSha256": "aac6f4a46e201e91a8c3896bb6b18d18312574c893b1c9b84383878d7c52c3e7",
       "resultSha256": "e85b2a523390d051d034f2f1013aba72c7c6847b7ca38f3ddb29cae496f6a393"
     }
   ],
