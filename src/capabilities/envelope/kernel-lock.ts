@@ -43,6 +43,13 @@ export type SpawnLockHelper = (
 export interface KernelLockDependencies {
   readonly platform?: NodeJS.Platform;
   readonly spawn?: SpawnLockHelper;
+  // Seams for the trust checks, not an escape from them. Production passes neither and gets the
+  // fixed paths above; whichever path is in use is validated identically before anything is
+  // executed, so pointing these at an untrusted file proves the refusal rather than bypassing it.
+  // The platform still decides both the argv dialect and whether a kernel lock exists at all, so
+  // an unsupported platform refuses regardless of what is injected here.
+  readonly helperPath?: string;
+  readonly waiterPath?: string;
 }
 
 function ownedByThisUser(uid: number): boolean {
@@ -101,9 +108,9 @@ function openPrivateLockFile(path: string): number | null {
   return fd;
 }
 
-function helperArguments(platform: NodeJS.Platform): readonly string[] {
+function helperArguments(platform: NodeJS.Platform, waiterPath: string): readonly string[] {
   const descriptor = `/dev/fd/${String(LOCK_FD)}`;
-  const waiter = [process.execPath, WAITER_PATH];
+  const waiter = [process.execPath, waiterPath];
   // `lockf -s` is silent and `-k` is implied for a descriptor, so the lock file is never unlinked.
   // The Linux spelling is written to the same protocol; it is unverified on this workstation, which
   // has no `flock`, and fails closed there rather than guessing.
@@ -244,11 +251,19 @@ export function createKernelMutationLockManager(
 ): MutationLockManager {
   const platform = dependencies.platform ?? process.platform;
   const spawn = dependencies.spawn ?? nodeSpawn;
+  const waiterPath = dependencies.waiterPath ?? WAITER_PATH;
 
   return Object.freeze({
     async acquire(targetKey: string, signal: AbortSignal): Promise<LockHandle | null> {
-      const helper = PLATFORM_HELPERS[platform];
-      if (helper === undefined || !trustedExecutable(helper) || !trustedExecutable(WAITER_PATH)) {
+      // The platform gate comes first: without a known helper there is no argv dialect to speak,
+      // and an injected path cannot supply one.
+      const helper = dependencies.helperPath ?? PLATFORM_HELPERS[platform];
+      if (
+        PLATFORM_HELPERS[platform] === undefined ||
+        helper === undefined ||
+        !trustedExecutable(helper) ||
+        !trustedExecutable(waiterPath)
+      ) {
         return null;
       }
       if (signal.aborted) return null;
@@ -261,7 +276,7 @@ export function createKernelMutationLockManager(
       try {
         // An empty environment, not an inherited one: the server's environment is where the
         // firewall credentials live, and the waiter needs none of it.
-        child = spawn(helper, helperArguments(platform), { stdio, env: {} });
+        child = spawn(helper, helperArguments(platform, waiterPath), { stdio, env: {} });
       } catch {
         closeQuietly(fd);
         return null;
