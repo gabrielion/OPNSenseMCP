@@ -19,25 +19,32 @@ const KEY_BYTES = 32;
 const KEY_NAME = 'identity.key';
 const CANDIDATE_PATTERN = /^identity\.key\.candidate-[0-9a-f]{16}$/u;
 const KEY_INTEGRITY = 'Identity key failed its integrity checks';
-// Concurrent starters settle within a handful of filesystem operations, but only once one of them
-// gets through the window between writing its candidate and linking it: every peer's sweep removes
-// any candidate it sees, so a starter descheduled inside that window loses the whole attempt. The
-// window is as wide as an fsync — hundreds of microseconds on a journalling filesystem — and on a
-// two-core runner with a dozen starters the owner is regularly descheduled across it. Retries with
-// no pause between them all land inside the same contended window, which is how a whole budget
-// used to be spent inside one scheduling quantum. The margin is therefore both more attempts and,
-// below, a jittered pause between them. The bound is still what stops a permanently faulty key —
-// an extra hard link that no sweep may remove, say — from spinning forever.
+// Concurrent starters settle within a handful of filesystem operations, but one can still lose an
+// attempt to a peer that is only just starting. The sweep runs once per call, at the start, so a
+// candidate is exposed for the window between its own creation and its link — as wide as an fsync,
+// hundreds of microseconds on a journalling filesystem — and only to the startup sweeps of the
+// peers that cross that window with it. On a two-core runner with a dozen starters the owner is
+// regularly descheduled across it. Two transients therefore survive: that first-sweep collision,
+// and the nlink window, where a winner is read between its link and its unlink. The measurements
+// behind the numbers here predate sweep-once, when the sweep recurred on every attempt and a
+// candidate was exposed to the whole of every peer's run: retries with no pause between them all
+// landed inside the same contended window, which is how a whole budget used to be spent inside one
+// scheduling quantum. The margin is therefore both more attempts and, below, a jittered pause
+// between them. The bound is still what stops a permanently faulty key — an extra hard link that no
+// sweep may remove, say — from spinning forever.
 const MAX_ATTEMPTS = 10;
 // Pause before retry n, in milliseconds, by 1-based attempt; every retry past the ramp holds the
 // cap, so nine retries cost at most 412ms even at the top of the jitter — a bound worth keeping on
 // a startup path a human is waiting on. The first retry is free because a transient often means the
-// race is already decided: the sweep that removed our candidate belongs to a peer that is about to
-// publish, or has published, or we published first and lost only our own leftover candidate — and
-// the retry then finds a key and short-circuits on it. Measured at twelve-way concurrency on two
-// vCPUs, 30% of the starters that took the free pause succeeded on the very next attempt. Pausing
-// there would buy nothing. The ramp exists for the other case, where nobody has published yet and
-// the starters are still sweeping each other.
+// race is already decided: a sweep that removed our candidate is some peer's single startup sweep,
+// so that peer is about to publish, or has published, or we published first and lost only our own
+// leftover candidate — and the retry then finds a key and short-circuits on it. Measured at
+// twelve-way concurrency on two vCPUs, 30% of the starters that took the free pause succeeded on
+// the very next attempt. That number is history: it predates sweep-once, when the sweep that took
+// our candidate could equally belong to a peer deep in its own retries and nowhere near publishing.
+// Pausing on the first retry would buy nothing either way. The ramp exists for the starter that
+// meets a further peer's first sweep, or the nlink window, on the attempt after that — it
+// desynchronises the pair instead of replaying the same collision immediately.
 const RETRY_DELAYS_MS: readonly number[] = [0, 5, 10, 20, 40];
 const RETRY_CAP_MS = 50;
 const NOFOLLOW = (constants.O_NOFOLLOW as number | undefined) ?? 0;
@@ -107,11 +114,14 @@ function readValidatedKey(path: string): Uint8Array {
   }
 }
 
-// Startup recovery: any fixed-pattern candidate is either the residue of a crash between link and
-// cleanup (it shares the published key's inode) or an unpublished private candidate of a dead
-// process. Both are safe to unlink; the published name itself is never touched. Concurrent
-// starters run this sweep at the same time, so it is idempotent: an entry that has already
-// disappeared is exactly the outcome we wanted, not a failure.
+// Startup recovery, and only that: a fixed-pattern candidate that is already there when a call
+// begins is either the residue of a crash between link and cleanup (it shares the published key's
+// inode) or an unpublished private candidate of a dead process. Both are safe to unlink; the
+// published name itself is never touched. Residue is a fact about the past — it cannot appear while
+// this process runs — so the caller sweeps once per call and never again from a retry, which is
+// what keeps a live peer's in-flight candidate out of reach. Concurrent starters still cross each
+// other's sweeps, so this stays idempotent: an entry that has already disappeared is exactly the
+// outcome we wanted, not a failure.
 function cleanupCandidates(rootPath: string): void {
   const candidates = readdirSync(rootPath).filter((name) => CANDIDATE_PATTERN.test(name));
   let removed = 0;
@@ -169,8 +179,9 @@ function publishCandidate(candidatePath: string, keyPath: string): void {
     // Publication without replacement: exactly one concurrent starter wins this hard link.
     linkSync(candidatePath, keyPath);
   } catch (error) {
-    // A peer's sweep removed our candidate before we could publish it. Nothing is wrong with the
-    // root, so the whole attempt is worth repeating.
+    // A peer's startup sweep removed our candidate before we could publish it — the one window in
+    // which a sweep can still take it. Nothing is wrong with the root, so the whole attempt is
+    // worth repeating.
     if (hasCode(error, 'ENOENT')) throw new TransientIdentityKeyError();
     if (!hasCode(error, 'EEXIST')) {
       discardCandidateQuietly(candidatePath);
@@ -180,9 +191,9 @@ function publishCandidate(candidatePath: string, keyPath: string): void {
   }
 }
 
-// Removing our own candidate is the last step of publication. A peer's sweep may already have done
-// it for us: the same race as above, and equally worth repeating, since the repeat now finds a
-// published key and short-circuits.
+// Removing our own candidate is the last step of publication. A peer's startup sweep may already
+// have done it for us: the same race as above, and equally worth repeating, since the repeat now
+// finds a published key and short-circuits.
 function discardPublishedCandidate(candidatePath: string): void {
   try {
     unlinkSync(candidatePath);
@@ -194,7 +205,6 @@ function discardPublishedCandidate(candidatePath: string): void {
 
 function publishOrReadIdentityKey(root: StateRoot): Uint8Array {
   const keyPath = join(root.path, KEY_NAME);
-  cleanupCandidates(root.path);
   if (keyExists(root.path)) return readValidatedKey(keyPath);
 
   const candidatePath = join(root.path, `${KEY_NAME}.candidate-${randomBytes(8).toString('hex')}`);
@@ -205,9 +215,9 @@ function publishOrReadIdentityKey(root: StateRoot): Uint8Array {
   return readValidatedKey(keyPath);
 }
 
-// The one place that enforces the module's error contract: whatever an attempt throws — an fs
-// errno with a path in it, anything else — leaves as the static sentence. Only the transient
-// classification survives, and only as a type.
+// Where an attempt meets the module's error contract: whatever it throws — an fs errno with a path
+// in it, anything else — leaves as the static sentence. Only the transient classification survives,
+// and only as a type. The sweep, being no longer part of an attempt, answers for itself below.
 function attemptEnsureIdentityKey(root: StateRoot): Uint8Array {
   try {
     return publishOrReadIdentityKey(root);
@@ -259,10 +269,25 @@ const DEFAULT_RETRY_DEPENDENCIES: IdentityKeyRetryDependencies = Object.freeze({
   }
 });
 
+// The sweep is a step of the call, not of an attempt, so it sits outside the loop: a retry that
+// swept again would delete the in-flight candidate of a peer that started after us, which is the
+// collision the loop below exists to survive rather than to cause. It keeps the module's error
+// contract on its own, since it is now outside the attempt that used to enforce it: whatever it
+// throws leaves as the static sentence, and never as a transient — a sweep that failed for a reason
+// of its own would fail the same way on every retry.
+function sweepCandidatesOnce(root: StateRoot): void {
+  try {
+    cleanupCandidates(root.path);
+  } catch {
+    throw integrityError();
+  }
+}
+
 export function ensureIdentityKey(
   root: StateRoot,
   dependencies: IdentityKeyRetryDependencies = DEFAULT_RETRY_DEPENDENCIES
 ): Uint8Array {
+  sweepCandidatesOnce(root);
   for (let attempt = 1; ; attempt += 1) {
     try {
       return attemptEnsureIdentityKey(root);

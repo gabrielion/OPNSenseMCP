@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   chmodSync,
+  existsSync,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -11,6 +12,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -272,6 +274,48 @@ describe('ensureIdentityKey retry loop', () => {
         'Identity key failed its integrity checks'
       );
       expect(recorder.waits).toEqual([]);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+// The sweep is a startup step, not a retry step. Nothing about one attempt makes that visible, so
+// the pin is behavioural: a candidate that appears while the call is already retrying belongs to a
+// live peer and must still be there when the call returns, while residue that was there before the
+// call must be gone. The injected wait supplies the script the retry pauses run inside.
+describe('ensureIdentityKey sweep scope', () => {
+  it('sweeps once per call: mid-retry candidates survive, pre-call residue does not', () => {
+    const { base, rootPath } = scratchRoot();
+    try {
+      const root = openStateRoot(rootPath);
+      const published = Buffer.from(ensureIdentityKey(root));
+      const residue = join(rootPath, `identity.key.candidate-${'d'.repeat(16)}`);
+      writeFileSync(residue, Buffer.alloc(32), { mode: 0o600 });
+      // A hard link outside the candidate pattern holds nlink at 2, so every attempt stays
+      // transient until the injected wait removes it. That is what buys the call its retries.
+      const strayLink = join(rootPath, 'stray-link');
+      linkSync(join(rootPath, 'identity.key'), strayLink);
+      // A live peer's in-flight candidate, written after this call has already swept.
+      const peerCandidate = join(rootPath, 'identity.key.candidate-0123456789abcdef');
+
+      let pauses = 0;
+      const key = Buffer.from(
+        ensureIdentityKey(root, {
+          wait: () => {
+            pauses += 1;
+            if (pauses === 1) writeFileSync(peerCandidate, Buffer.alloc(32), { mode: 0o600 });
+            if (pauses === 2) unlinkSync(strayLink);
+          }
+        })
+      );
+
+      expect(key.equals(published)).toBe(true);
+      expect(pauses).toBe(2);
+      expect(existsSync(residue)).toBe(false);
+      // Attempts 2 and 3 both ran after the peer's candidate appeared. A sweep inside the attempt
+      // would have deleted it; the sweep belongs to the start of the call, so it is still here.
+      expect(existsSync(peerCandidate)).toBe(true);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
