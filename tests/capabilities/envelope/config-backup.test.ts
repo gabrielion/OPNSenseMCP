@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import {
+  chmodSync,
   linkSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -11,6 +13,7 @@ import {
   truncateSync,
   writeFileSync
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -20,8 +23,9 @@ import type { BackupRequest } from '../../../src/capabilities/types.js';
 const signal = new AbortController().signal;
 const CONFIG_XML =
   '<?xml version="1.0"?><opnsense><system><hostname>lab</hostname></system></opnsense>';
-// The envelope's request as the kernel builds it. This store keeps the configuration bytes and
-// nothing else, so every field beyond the target key is deliberately inert here.
+// The envelope's request as the kernel builds it. Every field of it is persisted beside the
+// configuration bytes, so a later reader can say which transaction the snapshot belongs to without
+// re-reading — or ever holding — the configuration itself.
 const REQUEST: BackupRequest = Object.freeze({
   targetKey: 'opnsense-config',
   capabilityId: 'opnsense.create',
@@ -32,6 +36,23 @@ const REQUEST: BackupRequest = Object.freeze({
   effectPlanDigest: 'c'.repeat(64),
   transactionId: 'd'.repeat(32)
 });
+// The whole of the stored metadata: safe ids, digests and lengths. The exact-key assertion below is
+// what keeps configuration bytes, credentials and raw arguments out of the file for good.
+const METADATA_KEYS = [
+  'schemaVersion',
+  'transactionId',
+  'backupId',
+  'targetKey',
+  'capabilityId',
+  'mcpName',
+  'argumentsSha256',
+  'effectiveResourceScopes',
+  'observedStateDigest',
+  'effectPlanDigest',
+  'byteLength',
+  'xmlSha256',
+  'createdAt'
+];
 
 let root: string;
 
@@ -47,6 +68,10 @@ function source(bytes: string = CONFIG_XML) {
   return { downloadConfigBackup: vi.fn().mockResolvedValue(new TextEncoder().encode(bytes)) };
 }
 
+function readMetadata(path: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+}
+
 describe('OPNsense configuration backup service', () => {
   it('downloads and stores the configuration privately and verifiably', async () => {
     const store = join(root, 'store');
@@ -57,14 +82,29 @@ describe('OPNsense configuration backup service', () => {
     expect(Object.keys(created)).toEqual(['backupId']);
     expect(await service.exists(created.backupId, signal)).toBe(true);
     expect(lstatSync(store).mode & 0o777).toBe(0o700);
-    const files = readdirSync(store);
-    expect(files).toHaveLength(1);
-    const [fileName = ''] = files;
-    const file = lstatSync(join(store, fileName));
-    expect(file.isFile()).toBe(true);
-    expect(file.isSymbolicLink()).toBe(false);
-    expect(file.mode & 0o777).toBe(0o600);
-    expect(readFileSync(join(store, fileName), 'utf8')).toBe(CONFIG_XML);
+    // Nothing but the published backup: the staging directory the write went through is renamed
+    // into place, never left behind.
+    expect(readdirSync(store)).toEqual([created.backupId]);
+    const backupDir = join(store, created.backupId);
+    const directory = lstatSync(backupDir);
+    expect(directory.isDirectory()).toBe(true);
+    expect(directory.mode & 0o777).toBe(0o700);
+    expect(readdirSync(backupDir).sort()).toEqual(['config.xml', 'metadata.json']);
+    for (const name of ['config.xml', 'metadata.json']) {
+      const entry = lstatSync(join(backupDir, name));
+      expect(entry.isFile()).toBe(true);
+      expect(entry.isSymbolicLink()).toBe(false);
+      expect(entry.mode & 0o777).toBe(0o600);
+    }
+    expect(readFileSync(join(backupDir, 'config.xml'), 'utf8')).toBe(CONFIG_XML);
+
+    const metadata = readMetadata(join(backupDir, 'metadata.json'));
+    expect(Object.keys(metadata).sort()).toEqual([...METADATA_KEYS].sort());
+    expect(metadata.schemaVersion).toBe(1);
+    expect(metadata.backupId).toBe(created.backupId);
+    expect(metadata.transactionId).toBe(REQUEST.transactionId);
+    expect(metadata.byteLength).toBe(CONFIG_XML.length);
+    expect(metadata.xmlSha256).toBe(createHash('sha256').update(CONFIG_XML).digest('hex'));
   });
 
   it('reports a missing or malformed backup id as absent', async () => {
@@ -86,13 +126,26 @@ describe('OPNsense configuration backup service', () => {
     await expect(service.create(REQUEST, signal)).rejects.toThrow();
   });
 
+  // The planted backup is complete and self-consistent — its metadata names the planted id and
+  // describes the very bytes the link points at — so the symlink is the only fault left, and a
+  // service that followed it would answer `true`.
   it('refuses to read a symlinked backup path as valid', async () => {
     const store = join(root, 'store');
     const service = createOPNsenseConfigBackupService(source(), store);
     const created = await service.create(REQUEST, signal);
-    const realFile = join(store, `${created.backupId}.xml`);
     const linkId = 'f'.repeat(32);
-    symlinkSync(realFile, join(store, `${linkId}.xml`));
+    const planted = join(store, linkId);
+    mkdirSync(planted, { mode: 0o700 });
+    const metadata = readMetadata(join(store, created.backupId, 'metadata.json'));
+    writeFileSync(
+      join(planted, 'metadata.json'),
+      JSON.stringify({ ...metadata, backupId: linkId }),
+      {
+        mode: 0o600
+      }
+    );
+    symlinkSync(join(store, created.backupId, 'config.xml'), join(planted, 'config.xml'));
+
     expect(await service.exists(linkId, signal)).toBe(false);
   });
 
@@ -103,39 +156,45 @@ describe('OPNsense configuration backup service', () => {
     const store = join(root, 'store');
     const service = createOPNsenseConfigBackupService(source(), store);
     const created = await service.create(REQUEST, signal);
-    linkSync(join(store, `${created.backupId}.xml`), join(root, 'second-link.xml'));
+    linkSync(join(store, created.backupId, 'config.xml'), join(root, 'second-link.xml'));
     expect(await service.exists(created.backupId, signal)).toBe(false);
   });
 
-  // The other two legs of the discipline — truncation and a flipped byte — are checked only on the
-  // write path, where `create` re-reads exactly what it just wrote (config-backup.ts:56 and :98).
-  // `exists` stats without reading, and `create` persists neither the length nor the digest, so an
-  // edit made after that verification is invisible to every later caller. Asserting the discipline
-  // the way it deserves needs a stored digest, i.e. a change to the module this slice froze, so it
-  // rides with the durable backup root. Until then these two record what the module actually
-  // promises — and they go red the first time it promises more, which is the point of writing them.
-  it('does not notice a stored backup truncated after the write verification', async () => {
+  // The three legs the write-path verification alone could never carry: `create` re-reads exactly
+  // what it just wrote, so every edit made after that moment used to be invisible. They are checks
+  // of `exists`, and they hold only because the length, the digest and the mode are persisted
+  // beside the bytes and revalidated on every call.
+  it('rejects a stored backup truncated after the write verification', async () => {
     const store = join(root, 'store');
     const service = createOPNsenseConfigBackupService(source(), store);
     const created = await service.create(REQUEST, signal);
-    const path = join(store, `${created.backupId}.xml`);
+    const path = join(store, created.backupId, 'config.xml');
     truncateSync(path, statSync(path).size - 1);
 
     expect(readFileSync(path, 'utf8')).not.toBe(CONFIG_XML);
-    expect(await service.exists(created.backupId, signal)).toBe(true);
+    expect(await service.exists(created.backupId, signal)).toBe(false);
   });
 
-  it('does not notice a byte flipped in a stored backup after the write verification', async () => {
+  it('rejects a byte flipped in a stored backup after the write verification', async () => {
     const store = join(root, 'store');
     const service = createOPNsenseConfigBackupService(source(), store);
     const created = await service.create(REQUEST, signal);
-    const path = join(store, `${created.backupId}.xml`);
+    const path = join(store, created.backupId, 'config.xml');
     const bytes = readFileSync(path);
     bytes.writeUInt8(bytes.readUInt8(0) ^ 0xff, 0);
     writeFileSync(path, bytes);
 
     expect(readFileSync(path).byteLength).toBe(CONFIG_XML.length);
     expect(readFileSync(path, 'utf8')).not.toBe(CONFIG_XML);
-    expect(await service.exists(created.backupId, signal)).toBe(true);
+    expect(await service.exists(created.backupId, signal)).toBe(false);
+  });
+
+  it('rejects a stored backup whose mode was widened after the write', async () => {
+    const store = join(root, 'store');
+    const service = createOPNsenseConfigBackupService(source(), store);
+    const created = await service.create(REQUEST, signal);
+    chmodSync(join(store, created.backupId, 'config.xml'), 0o644);
+
+    expect(await service.exists(created.backupId, signal)).toBe(false);
   });
 });
