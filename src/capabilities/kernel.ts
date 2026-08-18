@@ -296,7 +296,7 @@ export interface CapabilityCatalogView {
    * Every capability the catalogue holds, exposed or not. Used ONLY by the construction-time
    * envelope-services guard, which must not depend on the policy that can hide a write.
    */
-  listAll?(): readonly CapabilityDefinition[];
+  listAll(): readonly CapabilityDefinition[];
 }
 
 export interface CapabilityPolicyOptions {
@@ -1217,7 +1217,7 @@ export function sealUnavailableCapabilities(
   if (unavailableCapabilitiesByCatalog.has(catalog)) {
     throw new Error('Unavailable capability metadata is already sealed');
   }
-  const activeDefinitions = catalog.listAll?.() ?? [];
+  const activeDefinitions = catalog.listAll();
   const ids = new Set(activeDefinitions.map(({ id }) => id));
   const names = new Set(activeDefinitions.map(({ mcpName }) => mcpName));
   const byName = new Map<string, CapabilityDefinition>();
@@ -1999,9 +1999,9 @@ export function createCapabilityDispatcher(
     // allow-list, so a dispatcher could hold one while listing none. Ask the catalogue for
     // everything it holds, so widening the allow-list later cannot reveal an unprotected
     // capability on an already-built dispatcher.
-    const holdsEnvelopeCapability = (catalog.listAll?.() ?? []).some((capability) =>
-      isMutationEnvelopeCapability(capability)
-    );
+    const holdsEnvelopeCapability = catalog
+      .listAll()
+      .some((capability) => isMutationEnvelopeCapability(capability));
     const exposesEnvelopeCapability = exposedEnvelopeCapability || holdsEnvelopeCapability;
     if (exposesEnvelopeCapability) {
       throw new Error('Mutation envelope services are required to expose a write capability');

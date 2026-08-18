@@ -688,7 +688,8 @@ describe('pre-handler policy authorization', () => {
     } as CapabilityDefinition;
     const view: CapabilityCatalogView = {
       getByMcpName: () => malformed,
-      listExposed: () => [malformed]
+      listExposed: () => [malformed],
+      listAll: () => [malformed]
     };
     const dispatcher = createCapabilityDispatcher(view, policyOptions());
 
