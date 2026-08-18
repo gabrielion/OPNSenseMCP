@@ -179,6 +179,25 @@ describe('mutation envelope lifecycle', () => {
     expect(harness.events.slice(-2)).toEqual(['audit.result', 'lock.release']);
   });
 
+  it('releases the lock and propagates the failure when an envelope step throws', async () => {
+    // No step is expected to throw. If one ever does, the process-wide target lock must still be
+    // released, or every later write on this process refuses LOCK_UNAVAILABLE until a restart.
+    const harness = makeHarness();
+    const hostilePreflight = {
+      get effectPlanDigest(): string {
+        throw new Error('sealed digest');
+      },
+      observedStateDigest: 'state'
+    };
+    await expect(
+      dispatch(
+        makeCapability(harness.events, { preflightResults: [hostilePreflight] }),
+        harness.services
+      )
+    ).rejects.toThrow('sealed digest');
+    expect(harness.events).toEqual(['lock.acquire', 'preflight', 'lock.release']);
+  });
+
   it('fails closed when the target lock is unavailable, before preflight or audit', async () => {
     const harness = makeHarness({ lockNull: true });
     const result = await dispatch(makeCapability(harness.events), harness.services);
@@ -222,6 +241,7 @@ describe('mutation envelope lifecycle', () => {
     const result = await dispatch(makeCapability(harness.events), harness.services);
     expect(result).toMatchObject({ kind: 'refused', code: 'BACKUP_FAILED' });
     expect(harness.events).not.toContain('handler');
+    expect(harness.events.at(-1)).toBe('lock.release');
   });
 
   it('preserves the backup and refuses when the state changes after preflight', async () => {
@@ -275,6 +295,7 @@ describe('mutation envelope lifecycle', () => {
       expect(result.message).not.toMatch(/preserved/iu);
       expect(Object.keys(result).sort()).toEqual(['code', 'kind', 'message']);
     }
+    expect(harness.events.at(-1)).toBe('lock.release');
     expect(harness.createdBackups.size).toBe(1);
   });
 

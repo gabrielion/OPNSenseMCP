@@ -1680,109 +1680,123 @@ async function executeMutationEnvelope(
   if (lock === null) return refusal('LOCK_UNAVAILABLE');
 
   // Steps 2-8 leave through this block instead of returning, so that step 9 runs sequentially after
-  // the result is decided rather than inside a `finally`. Every exit still releases the lock exactly
-  // once, and a release that reports a problem is a result the envelope can eventually act on.
+  // the result is decided rather than inside a `finally` — a release whose report the envelope can
+  // eventually act on has to be on the normal path. The `catch` is the safety net a `finally` used
+  // to provide: exactly one of the two release sites runs, so the lock is never leaked nor released
+  // twice.
   let result: CapabilityResult;
-  envelope: {
-    // Step 2: sealed, side-effect-free, bounded preflight.
-    const preflight = await runBounded(timeoutMs, context.signal, (signal) =>
-      preflightCallback(authorization.input, makeContext(signal))
-    );
-    if (preflight.kind !== 'value' || !isPreflightResult(preflight.value)) {
-      result = refusal(
-        preflight.kind === 'aborted'
-          ? preflight.cause === 'caller'
-            ? 'CANCELLED'
-            : 'TIMEOUT'
-          : 'PREFLIGHT_FAILED'
+  try {
+    envelope: {
+      // Step 2: sealed, side-effect-free, bounded preflight.
+      const preflight = await runBounded(timeoutMs, context.signal, (signal) =>
+        preflightCallback(authorization.input, makeContext(signal))
       );
-      break envelope;
-    }
-    const sealed = preflight.value;
-
-    // Step 3: redacted audit intent (a failure here is itself fail-closed).
-    if (!recordAudit('intent', 'intent')) {
-      result = refusal('EXECUTION_FAILED');
-      break envelope;
-    }
-
-    // Step 4: strict verified backup precedes the first write.
-    let backupId: string | undefined;
-    if (capability.policy.backup === 'strict') {
-      try {
-        const created = await services.backup.create(
-          MUTATION_TARGET_KEY,
-          context.signal ?? new AbortController().signal
+      if (preflight.kind !== 'value' || !isPreflightResult(preflight.value)) {
+        result = refusal(
+          preflight.kind === 'aborted'
+            ? preflight.cause === 'caller'
+              ? 'CANCELLED'
+              : 'TIMEOUT'
+            : 'PREFLIGHT_FAILED'
         );
-        backupId = created.backupId;
-        if (backupId.length === 0 || !(await services.backup.exists(backupId))) {
-          recordAudit('result', 'BACKUP_FAILED', backupId);
+        break envelope;
+      }
+      const sealed = preflight.value;
+
+      // Step 3: redacted audit intent (a failure here is itself fail-closed).
+      if (!recordAudit('intent', 'intent')) {
+        result = refusal('EXECUTION_FAILED');
+        break envelope;
+      }
+
+      // Step 4: strict verified backup precedes the first write.
+      let backupId: string | undefined;
+      if (capability.policy.backup === 'strict') {
+        try {
+          const created = await services.backup.create(
+            MUTATION_TARGET_KEY,
+            context.signal ?? new AbortController().signal
+          );
+          backupId = created.backupId;
+          if (backupId.length === 0 || !(await services.backup.exists(backupId))) {
+            recordAudit('result', 'BACKUP_FAILED', backupId);
+            result = refusal('BACKUP_FAILED');
+            break envelope;
+          }
+        } catch {
+          recordAudit('result', 'BACKUP_FAILED');
           result = refusal('BACKUP_FAILED');
           break envelope;
         }
-      } catch {
-        recordAudit('result', 'BACKUP_FAILED');
-        result = refusal('BACKUP_FAILED');
+      }
+
+      // Step 5: revalidate the sealed state before the first write.
+      const revalidation = await runBounded(timeoutMs, context.signal, (signal) =>
+        preflightCallback(authorization.input, makeContext(signal))
+      );
+      if (
+        revalidation.kind !== 'value' ||
+        !isPreflightResult(revalidation.value) ||
+        revalidation.value.observedStateDigest !== sealed.observedStateDigest ||
+        revalidation.value.effectPlanDigest !== sealed.effectPlanDigest
+      ) {
+        recordAudit('result', 'STATE_REVALIDATION_FAILED', backupId);
+        result = refusal('STATE_REVALIDATION_FAILED');
         break envelope;
       }
-    }
 
-    // Step 5: revalidate the sealed state before the first write.
-    const revalidation = await runBounded(timeoutMs, context.signal, (signal) =>
-      preflightCallback(authorization.input, makeContext(signal))
-    );
-    if (
-      revalidation.kind !== 'value' ||
-      !isPreflightResult(revalidation.value) ||
-      revalidation.value.observedStateDigest !== sealed.observedStateDigest ||
-      revalidation.value.effectPlanDigest !== sealed.effectPlanDigest
-    ) {
-      recordAudit('result', 'STATE_REVALIDATION_FAILED', backupId);
-      result = refusal('STATE_REVALIDATION_FAILED');
-      break envelope;
-    }
+      // Step 6: bounded execution of the sealed apply phase.
+      const applied = await runBounded(timeoutMs, context.signal, (signal) =>
+        invokeHandler(capability, authorization.input, makeContext(signal))
+      );
+      if (applied.kind === 'aborted') {
+        recordAudit('result', 'OUTCOME_INDETERMINATE', backupId);
+        result = refusal('OUTCOME_INDETERMINATE');
+        break envelope;
+      }
+      if (applied.kind === 'rejected') {
+        recordAudit('result', 'EXECUTION_FAILED', backupId);
+        result = refusal('EXECUTION_FAILED');
+        break envelope;
+      }
 
-    // Step 6: bounded execution of the sealed apply phase.
-    const applied = await runBounded(timeoutMs, context.signal, (signal) =>
-      invokeHandler(capability, authorization.input, makeContext(signal))
-    );
-    if (applied.kind === 'aborted') {
-      recordAudit('result', 'OUTCOME_INDETERMINATE', backupId);
-      result = refusal('OUTCOME_INDETERMINATE');
-      break envelope;
-    }
-    if (applied.kind === 'rejected') {
-      recordAudit('result', 'EXECUTION_FAILED', backupId);
-      result = refusal('EXECUTION_FAILED');
-      break envelope;
-    }
+      // Step 7: verify the declared outcome; an unverifiable result is never a success.
+      const verified = await runBounded(timeoutMs, context.signal, (signal) =>
+        verifyCallback(authorization.input, applied.value, makeContext(signal))
+      );
+      if (verified.kind !== 'value' || !verified.value) {
+        recordAudit('result', 'OUTCOME_UNVERIFIED', backupId);
+        result = refusal('OUTCOME_UNVERIFIED');
+        break envelope;
+      }
 
-    // Step 7: verify the declared outcome; an unverifiable result is never a success.
-    const verified = await runBounded(timeoutMs, context.signal, (signal) =>
-      verifyCallback(authorization.input, applied.value, makeContext(signal))
-    );
-    if (verified.kind !== 'value' || !verified.value) {
-      recordAudit('result', 'OUTCOME_UNVERIFIED', backupId);
-      result = refusal('OUTCOME_UNVERIFIED');
-      break envelope;
-    }
-
-    let parsedOutput: unknown;
-    try {
-      parsedOutput = capability.parseOutput(applied.value);
-      const snapshot = createCanonicalJsonSnapshot(parsedOutput).value;
-      if (!isRecord(snapshot)) {
+      let parsedOutput: unknown;
+      try {
+        parsedOutput = capability.parseOutput(applied.value);
+        const snapshot = createCanonicalJsonSnapshot(parsedOutput).value;
+        if (!isRecord(snapshot)) {
+          recordAudit('result', 'INVALID_OUTPUT', backupId);
+          result = refusal('INVALID_OUTPUT');
+          break envelope;
+        }
+        // Step 8: final audit, then step 9 (lock release) below.
+        recordAudit('result', 'success', backupId);
+        result = Object.freeze({ kind: 'success', output: snapshot });
+      } catch {
         recordAudit('result', 'INVALID_OUTPUT', backupId);
         result = refusal('INVALID_OUTPUT');
-        break envelope;
       }
-      // Step 8: final audit, then step 9 (lock release) below.
-      recordAudit('result', 'success', backupId);
-      result = Object.freeze({ kind: 'success', output: snapshot });
-    } catch {
-      recordAudit('result', 'INVALID_OUTPUT', backupId);
-      result = refusal('INVALID_OUTPUT');
     }
+  } catch (error) {
+    // No step above is expected to throw, but the target key is process-wide: one leaked lock makes
+    // every later write refuse LOCK_UNAVAILABLE until the process restarts. So an unexpected failure
+    // still releases, and is still reported to the caller unchanged.
+    try {
+      await lock.release();
+    } catch {
+      // A release that fails while unwinding leaves nothing better to try.
+    }
+    throw error;
   }
 
   // Step 9: release the lock on every path above, and keep what the release reported.
