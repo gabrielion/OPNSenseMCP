@@ -155,10 +155,11 @@ export function createDefaultApplicationRuntime(): OwnedApplicationRuntime {
     const application = createApplicationContext(
       config,
       // Without the envelope's services there is no protected write, so the alias target is not
-      // offered as one: the catalogue seals the writes exactly as it does for an unreachable
-      // target, and the reads stay listed.
+      // offered as one: the catalogue seals the writes. The target itself is still reachable, so
+      // the adapter is still handed over and the alias reads keep answering — withholding the
+      // writes must not cost the operator a read.
       envelope === undefined
-        ? createProductCapabilityCatalog(readAdapter)
+        ? createProductCapabilityCatalog(readAdapter, aliasAdapter, false)
         : createProductCapabilityCatalog(readAdapter, aliasAdapter),
       envelope?.services
     );

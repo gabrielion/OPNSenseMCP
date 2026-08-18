@@ -310,6 +310,43 @@ describe('product catalog write surface', () => {
     expect(catalog.getByMcpName('opn_delete')).toBeUndefined();
   });
 
+  it('seals the alias writes without sealing the alias reads when only writes are withheld', async () => {
+    // Target-reachability and write-availability are two facts, not one. A reachable target whose
+    // local write envelope could not be built still answers every read it was asked for.
+    const reachableAliasAdapter: OPNsenseAliasAdapter = {
+      ...aliasAdapter,
+      searchHostAliases: () => Promise.resolve({ page: 1, pageSize: 10, total: 0, items: [] })
+    };
+    const catalog = createProductCapabilityCatalog(readAdapter, reachableAliasAdapter, false);
+
+    expect(catalog.all.map((c) => c.mcpName)).toEqual([
+      'server_status',
+      'opn_describe',
+      'opn_get',
+      'opn_list'
+    ]);
+    const dispatcher = createCapabilityDispatcher(catalog, {
+      readOnly: false,
+      allowedResourceScopes: new Set(['firewall.alias']),
+      enabledFeatureFlags: new Set<FeatureFlag>(['experimental-alias-write'])
+    });
+    await expect(
+      dispatcher.dispatch(
+        {
+          name: 'opn_list',
+          arguments: { resource: 'firewall.alias', page: 1, pageSize: 10, query: '' }
+        },
+        { transport: 'stdio' }
+      )
+    ).resolves.toMatchObject({ kind: 'success' });
+    await expect(
+      dispatcher.dispatch(
+        { name: 'opn_create', arguments: { SENTINEL_INVALID: true } },
+        { transport: 'stdio' }
+      )
+    ).resolves.toMatchObject({ kind: 'refused', code: 'TARGET_UNAVAILABLE' });
+  });
+
   it('keeps unavailable definitions outside every public catalogue lookup', () => {
     const catalog = createProductCapabilityCatalog(readAdapter);
 

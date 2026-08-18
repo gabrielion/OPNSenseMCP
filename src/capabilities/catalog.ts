@@ -74,11 +74,20 @@ export class CapabilityCatalog {
   }
 }
 
+/**
+ * Builds the product catalogue from two independent facts.
+ *
+ * `aliasAdapter` carries target-REACHABILITY: it governs the alias reads, through the availability
+ * check `list.ts` makes for itself. `exposeAliasWrites` carries write-AVAILABILITY: it alone decides
+ * whether the alias writes are catalogued or sealed. They coincide by default, and only by default:
+ * a caller that reached the target but could not own the local machinery a protected write needs
+ * passes a reachable adapter with the writes withheld, and the reads keep answering.
+ */
 export function createProductCapabilityCatalog(
   adapter: OPNsenseReadAdapter = UNAVAILABLE_OPNSENSE_READ_ADAPTER,
-  aliasAdapter: OPNsenseAliasAdapter = UNAVAILABLE_OPNSENSE_ALIAS_ADAPTER
+  aliasAdapter: OPNsenseAliasAdapter = UNAVAILABLE_OPNSENSE_ALIAS_ADAPTER,
+  exposeAliasWrites = aliasAdapter.available
 ): CapabilityCatalog {
-  const aliasTargetAvailable = aliasAdapter.available;
   const capabilities: CapabilityDefinition[] = [
     serverStatusCapability,
     opnDescribeCapability,
@@ -89,9 +98,9 @@ export function createProductCapabilityCatalog(
     createOPNsenseCreateCapability(aliasAdapter),
     createOPNsenseDeleteCapability(aliasAdapter)
   ];
-  if (aliasTargetAvailable) capabilities.push(...writes);
+  if (exposeAliasWrites) capabilities.push(...writes);
   const catalog = new CapabilityCatalog(capabilities);
-  if (!aliasTargetAvailable) sealUnavailableCapabilities(catalog, writes);
+  if (!exposeAliasWrites) sealUnavailableCapabilities(catalog, writes);
   return catalog;
 }
 

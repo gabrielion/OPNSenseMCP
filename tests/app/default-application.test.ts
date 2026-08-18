@@ -557,9 +557,20 @@ describe('default application composition seam', () => {
   });
 
   it('degrades to a read-only server when the mutation envelope cannot own a backup root', async () => {
-    const target = await startSyntheticOPNsenseTarget(() => ({
-      body: JSON.stringify({ metadata: { system: { status: 'ok' } }, subsystems: {} })
-    }));
+    const target = await startSyntheticOPNsenseTarget((request) => {
+      if (request.path === '/api/firewall/alias/searchItem') {
+        const query = JSON.parse(request.body) as { current: number; rowCount: number };
+        return {
+          body: JSON.stringify({
+            total: 0,
+            rowCount: query.rowCount,
+            current: query.current,
+            rows: []
+          })
+        };
+      }
+      return { body: JSON.stringify({ metadata: { system: { status: 'ok' } }, subsystems: {} }) };
+    });
     const directory = await writeTargetConfig(target);
     stubWriteGates();
     // The real seam, not an injected one: the backup store is created under the process temporary
@@ -585,15 +596,10 @@ describe('default application composition seam', () => {
         )
       ).resolves.toEqual({ kind: 'success', output: { item: { status: 'ok' } } });
 
-      // DEFERRED WRONG SHAPE — pinned so it cannot be shipped by accident. The target is reachable;
-      // only the LOCAL backup root failed. Alias reads die anyway because `catalog.ts` (which writes
-      // to expose) and `list.ts` (which reads) both key off the single `aliasAdapter.available`
-      // flag, so sealing the writes seals the reads with them. Separating target-reachability from
-      // write-availability is a Slice 2b PREREQUISITE, not a nicety: `openResolvedStateRoot` throws
-      // unconditionally on win32, which makes this degrade the ordinary win32 path — shipping it
-      // unchanged would hand every Windows operator a read regression, the exact opposite of what
-      // the fail-closed degrade (R7) exists to buy. This assertion is deliberately red-if-fixed:
-      // when 2b splits the flags, alias listing succeeds here and this line must be rewritten.
+      // The target is reachable; only the LOCAL backup root failed. Target-reachability and
+      // write-availability are separate flags, so sealing the alias writes does not seal the alias
+      // reads with them: `openResolvedStateRoot` throws unconditionally on win32, which makes this
+      // degrade the ordinary win32 path, and a Windows operator must still get every read.
       await expect(
         dispatchCapability(
           {
@@ -602,7 +608,7 @@ describe('default application composition seam', () => {
           },
           { application: runtime.application, transport: 'stdio' }
         )
-      ).resolves.toMatchObject({ kind: 'refused', code: 'TARGET_UNAVAILABLE' });
+      ).resolves.toMatchObject({ kind: 'success' });
     } finally {
       await connection.close();
       await runtime.close();
