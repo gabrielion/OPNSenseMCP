@@ -1665,6 +1665,11 @@ async function executeMutationEnvelope(
     }
   };
 
+  // Step 8 has one shape and one call site per outcome: every terminal path — refusal or verified
+  // success — leaves through here, so the final audit can never be skipped by a new branch.
+  const finishWith = (outcome: RefusalCode | 'success', backupId?: string): boolean =>
+    recordAudit('result', outcome, backupId);
+
   if (context.signal?.aborted === true) return refusal('CANCELLED');
 
   // Step 1: acquire the target's exclusive mutation lock.
@@ -1685,6 +1690,8 @@ async function executeMutationEnvelope(
   // to provide: exactly one of the two release sites runs, so the lock is never leaked nor released
   // twice.
   let result: CapabilityResult;
+  // Whether the one terminal audit landed; nothing reads it this slice (see the discard below).
+  let terminalAuditRecorded = false;
   try {
     envelope: {
       // Step 2: sealed, side-effect-free, bounded preflight.
@@ -1719,12 +1726,12 @@ async function executeMutationEnvelope(
           );
           backupId = created.backupId;
           if (backupId.length === 0 || !(await services.backup.exists(backupId))) {
-            recordAudit('result', 'BACKUP_FAILED', backupId);
+            terminalAuditRecorded = finishWith('BACKUP_FAILED', backupId);
             result = refusal('BACKUP_FAILED');
             break envelope;
           }
         } catch {
-          recordAudit('result', 'BACKUP_FAILED');
+          terminalAuditRecorded = finishWith('BACKUP_FAILED');
           result = refusal('BACKUP_FAILED');
           break envelope;
         }
@@ -1740,7 +1747,7 @@ async function executeMutationEnvelope(
         revalidation.value.observedStateDigest !== sealed.observedStateDigest ||
         revalidation.value.effectPlanDigest !== sealed.effectPlanDigest
       ) {
-        recordAudit('result', 'STATE_REVALIDATION_FAILED', backupId);
+        terminalAuditRecorded = finishWith('STATE_REVALIDATION_FAILED', backupId);
         result = refusal('STATE_REVALIDATION_FAILED');
         break envelope;
       }
@@ -1750,12 +1757,12 @@ async function executeMutationEnvelope(
         invokeHandler(capability, authorization.input, makeContext(signal))
       );
       if (applied.kind === 'aborted') {
-        recordAudit('result', 'OUTCOME_INDETERMINATE', backupId);
+        terminalAuditRecorded = finishWith('OUTCOME_INDETERMINATE', backupId);
         result = refusal('OUTCOME_INDETERMINATE');
         break envelope;
       }
       if (applied.kind === 'rejected') {
-        recordAudit('result', 'EXECUTION_FAILED', backupId);
+        terminalAuditRecorded = finishWith('EXECUTION_FAILED', backupId);
         result = refusal('EXECUTION_FAILED');
         break envelope;
       }
@@ -1765,7 +1772,7 @@ async function executeMutationEnvelope(
         verifyCallback(authorization.input, applied.value, makeContext(signal))
       );
       if (verified.kind !== 'value' || !verified.value) {
-        recordAudit('result', 'OUTCOME_UNVERIFIED', backupId);
+        terminalAuditRecorded = finishWith('OUTCOME_UNVERIFIED', backupId);
         result = refusal('OUTCOME_UNVERIFIED');
         break envelope;
       }
@@ -1775,15 +1782,15 @@ async function executeMutationEnvelope(
         parsedOutput = capability.parseOutput(applied.value);
         const snapshot = createCanonicalJsonSnapshot(parsedOutput).value;
         if (!isRecord(snapshot)) {
-          recordAudit('result', 'INVALID_OUTPUT', backupId);
+          terminalAuditRecorded = finishWith('INVALID_OUTPUT', backupId);
           result = refusal('INVALID_OUTPUT');
           break envelope;
         }
         // Step 8: final audit, then step 9 (lock release) below.
-        recordAudit('result', 'success', backupId);
+        terminalAuditRecorded = finishWith('success', backupId);
         result = Object.freeze({ kind: 'success', output: snapshot });
       } catch {
-        recordAudit('result', 'INVALID_OUTPUT', backupId);
+        terminalAuditRecorded = finishWith('INVALID_OUTPUT', backupId);
         result = refusal('INVALID_OUTPUT');
       }
     }
@@ -1798,6 +1805,11 @@ async function executeMutationEnvelope(
     }
     throw error;
   }
+
+  // Slice 3's AUDIT_RESULT_FAILED precedence lives here: a terminal audit that could not be written
+  // will outrank a verified success, decided between the envelope's verdict and the release. Until
+  // then a lost result record changes nothing, exactly as before.
+  void terminalAuditRecorded;
 
   // Step 9: release the lock on every path above, and keep what the release reported.
   let releaseReport: 'released' | 'unconfirmed' = 'unconfirmed';

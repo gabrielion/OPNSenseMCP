@@ -79,6 +79,7 @@ interface HarnessOptions {
   readonly backupThrow?: boolean;
   readonly backupMissing?: boolean;
   readonly auditIntentThrow?: boolean;
+  readonly auditResultThrow?: boolean;
 }
 
 interface Harness {
@@ -119,6 +120,9 @@ function makeHarness(opts: HarnessOptions = {}): Harness {
       record: (record) => {
         events.push(`audit.${record.phase}`);
         if (opts.auditIntentThrow === true && record.phase === 'intent') {
+          throw new Error('audit');
+        }
+        if (opts.auditResultThrow === true && record.phase === 'result') {
           throw new Error('audit');
         }
       }
@@ -220,6 +224,16 @@ describe('mutation envelope lifecycle', () => {
     const result = await dispatch(makeCapability(harness.events), harness.services);
     expect(result).toMatchObject({ kind: 'refused', code: 'EXECUTION_FAILED' });
     expect(harness.events).toEqual(['lock.acquire', 'preflight', 'audit.intent', 'lock.release']);
+  });
+
+  it('still reports the verified success when the terminal audit record throws', async () => {
+    // A pin, not an endorsement: today a failed RESULT audit is swallowed, so a verified write is
+    // still a success and the step order is unchanged. Slice 3 turns this into AUDIT_RESULT_FAILED,
+    // which must then be a deliberate edit of this test rather than silent drift.
+    const harness = makeHarness({ auditResultThrow: true });
+    const result = await dispatch(makeCapability(harness.events), harness.services);
+    expect(result).toEqual({ kind: 'success', output: { applied: 'x' } });
+    expect(harness.events.slice(-2)).toEqual(['audit.result', 'lock.release']);
   });
 
   it('refuses the write when the strict backup fails, before the handler runs', async () => {
