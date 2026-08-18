@@ -853,7 +853,7 @@ docs/project-status.md, this ledger. Not pushed.
   - Gate results (Node v22.23.1):
     - `npx vitest run tests/state/`: 4 files / 76 tests, green (run 3x on the first commit's tree),
       then 77 tests green on the second
-    - `npm run verify`: exit 0 (61 files / 1227 tests)
+    - `npm run verify`: exit 0 (61 files / 1227 tests on the first commit, 1228 on the second)
     - `npm run test:conformance`: exit 0 (2025-11-25 and 2026-07-28 profiles)
     - `npm run license:check`: exit 0 — `git diff --check`: exit 0
     - eslint / prettier / tsc on the touched files: clean

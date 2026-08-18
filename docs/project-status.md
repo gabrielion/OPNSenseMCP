@@ -434,12 +434,10 @@ the CLI and refreshed the public documentation. P0-C Slice 1 landed on `main` th
 The 2026-08-17/18 Slice 1.1 hardened that module on `p0c/slice1.1-hardening`:
 
 - concurrent first starts no longer kill each other. The identity-key publication tolerates a swept
-  candidate, classifies transient failures and repeats the whole attempt up to 10 times, pausing on a
-  jittered backoff between attempts (0, 5, 10, 20, 40 then 50 ms, ±50 % derived from the pid and the
-  attempt, ≤ 412 ms in all); every error that escapes is one static sentence carrying no path. A real
-  multi-process race test (12 starters on a shared barrier, fresh roots and planted residue) is the
-  proof. The backoff, not the raised bound, is what fixes it: 10 attempts without a pause still failed
-  29 % and 8 % of starters across two 2-vCPU Linux runs.
+  candidate, classifies transient failures and repeats the whole attempt — that branch bounded the
+  repeat at 5 attempts, which the follow-up fix below replaced; every error that escapes is one
+  static sentence carrying no path. A real multi-process race test (12 starters on a shared barrier,
+  fresh roots and planted residue) is the proof.
 - the state root is canonicalized before it is validated, through a new `openResolvedStateRoot`
   entry point, so the macOS `/var` → `/private/var` spelling is accepted; a non-normalized override
   is rejected with its own static message.
@@ -449,6 +447,13 @@ The 2026-08-17/18 Slice 1.1 hardened that module on `p0c/slice1.1-hardening`:
 - CI gained an independent `evidence-freshness` job running `evidence:check`, mirrored inline on the
   release path; both are pinned by tests.
 - the tree was bumped to 0.1.1 across 13 files, with the sealed fixture deliberately untouched.
+
+A separate follow-up fix on `p0c/identity-key-retry-margin` (2026-08-18) then closed a CI-observed
+flake in that race test: the 5-attempt bound exhausted on a two-vCPU `ubuntu-24.04` runner, one
+starter in twelve, in release run 32084653665. The publication now allows 10 attempts with a jittered
+pause between them (0, 5, 10, 20, 40 then 50 ms, ±50 % derived from the pid and the attempt, ≤ 412 ms
+in all). The backoff, not the raised bound, is what fixes it: 10 attempts without a pause still failed
+29 % and 8 % of starters across two 2-vCPU Linux runs. Neither branch changed the error contract.
 
 The remaining ordered work:
 

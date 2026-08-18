@@ -249,8 +249,11 @@ const RETRY_PARK = new Int32Array(new SharedArrayBuffer(4));
 
 const DEFAULT_RETRY_DEPENDENCIES: IdentityKeyRetryDependencies = Object.freeze({
   wait: (milliseconds: number): void => {
-    // Finite and positive or nothing: Atomics.wait treats Infinity as no timeout and NaN as zero,
-    // and a startup path must never be able to park forever on an arithmetic slip.
+    // Finite and positive or nothing. Atomics.wait converts BOTH NaN and Infinity into an infinite
+    // timeout — DoWait sets t to +Infinity for either, which this runtime was probed to confirm —
+    // so the finiteness half of this guard is load-bearing twice over: it is what stops an
+    // arithmetic slip anywhere in the schedule from parking startup forever, and NaN is the likelier
+    // slip of the two. Only a negative or zero pause is safe to fall through as "no pause".
     if (!Number.isFinite(milliseconds) || milliseconds <= 0) return;
     Atomics.wait(RETRY_PARK, 0, 0, milliseconds);
   }
