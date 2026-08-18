@@ -713,7 +713,7 @@ Branch: p0c/slice1-state-identity (2026-08-10)
     ruling).
 
 === P0-C SLICE 1.1 (hardening of Slice 1 + 0.1.1 candidate) — COMPLETE, NOT YET LANDED ===
-Branch: p0c/slice1.1-hardening (2026-08-17/18), base fc3b100 from main, commits cc0d671..5d772b0.
+Branch: p0c/slice1.1-hardening (2026-08-17/18), base fc3b100 from main, commits fc3b100..989f503.
   - N1/N2 — the two concurrent-first-start races parked by Slice 1 are CLOSED
     (src/state/identity-key.ts):
     - cleanupCandidates now tolerates ENOENT: a peer sweeping our candidate is not a failure. Every
@@ -732,7 +732,7 @@ Branch: p0c/slice1.1-hardening (2026-08-17/18), base fc3b100 from main, commits 
       deepest observed chain was 4 of 5 attempts at 20-way with 0/960 exhaustions. Revisit only if
       reconcile-era concurrency grows.
     - Trap: the race children import a COMPILED build passed as an argument, and beforeAll compiles
-      src into a private scratch dir — never dist/, which five sibling tests in the same parallel
+      src into a private scratch dir — never dist/, which three sibling tests in the same parallel
       project read or execute. A hand-run pointed at dist/ tests whatever was last built there.
   - N4 — canonical entry point (src/state/state-root.ts): openResolvedStateRoot resolves the state
     root BEFORE validating it, so the macOS /var -> /private/var spelling that integration actually

@@ -227,7 +227,7 @@ does not make publishing it acceptable.
 
 ### State root and target identity
 
-`OPNSENSE_MCP_STATE_DIR` is the only override and must be absolute. Defaults are:
+`OPNSENSE_MCP_STATE_DIR` is the only override and must be a normalized absolute path. Defaults are:
 
 - macOS: `$HOME/Library/Application Support/opnsense-mcp/state`;
 - Linux: `$XDG_STATE_HOME/opnsense-mcp`, or `$HOME/.local/state/opnsense-mcp`;
