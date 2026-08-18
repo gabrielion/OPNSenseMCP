@@ -7,10 +7,13 @@
 - **Base at snapshot:** `98c33f5` (`docs: renew Product 3 VM attestation`), which is also `main`'s
   head.
 - **Remote:** `https://github.com/gabrielion/OPNSenseMCP.git`
-- **npm:** `@gabrielion/opnsense-mcp@0.1.0` has been on the public registry since 2026-07-29
-  (OIDC `release.yml`, no stored credential). 0.1.0 predates the `b848501` services-listing fix and
-  the `--help`/`--version` CLI flags; the tree is at 0.1.1 on `main` since `5d772b0` and publishing
-  it is the standing distribution task.
+- **npm:** `@gabrielion/opnsense-mcp@0.1.1` was published on 2026-08-18. A GitHub Release `v0.1.1`
+  triggered `release.yml`, which published over OIDC with no stored credential once the operator
+  approved the `npm-publish` environment, and the registry state was checked the same day with
+  `npx -y @gabrielion/opnsense-mcp@0.1.1 --version` run **outside** this repository — inside it, npx
+  resolves the local package and never queries the registry. The release tag lives on GitHub; a local
+  clone carries only `v0.1.0`. 0.1.0, on the registry since 2026-07-29, predates the `b848501`
+  services-listing fix and the `--help`/`--version` CLI flags, so 0.1.1 is the version to install.
 - **VM evidence state:** `main`'s head `98c33f5` is itself the Product 3 attestation commit, produced
   by the documented landing sequence. On this branch `npm run evidence:verify` is stale by design,
   because the slice's own commits follow the attested one; that staleness is cleared only by a real
@@ -481,13 +484,13 @@ and what it deliberately left to 2b, is in Task 3 below.
 
 The remaining ordered work:
 
-### Task 1 — land this branch, then publish 0.1.1
+### Task 1 — land this branch
 
-`0.1.0` predates the `b848501` listing fix and the CLI flags; a user on 0.1.0 can still hit the
-clamped-`rowCount` failure on large service pages (observed live in the 2026-08-10 session). The
-version is already bumped on `main`, so what remains is to land `p0c/slice2a-envelope-prep` with the
-Task 2 evidence sequence and then dispatch the `Release` workflow; the operator must approve the
-`npm-publish` environment. Three things about that landing:
+0.1.1 is published (see the npm note at the top), so nothing here waits on a release and no `Release`
+workflow needs dispatching. What remains is to land `p0c/slice2a-envelope-prep` with the Task 2
+evidence sequence. The clamped-`rowCount` failure on large service pages, which a user still on 0.1.0
+can hit (observed live in the 2026-08-10 session), is fixed for anyone on 0.1.1. Three things about
+that landing:
 
 - **`npm run verify` is expected green on this branch.** Unlike the Slice 1.1 landing there is no
   expected-RED assertion: the sealed fixture already records 0.1.1, and nothing in this slice touches
@@ -542,8 +545,10 @@ Slice 2a already delivered, so the plan starts from these rather than repeating 
   throws is still swallowed exactly as before.
 - R2 — `LockHandle.release()` returns `'released' | 'unconfirmed'`. The in-process handle always
   reports `'released'`; the envelope captures the report and deliberately does not act on it.
-- R3 — one `finishWith(outcome, backupId?)` helper carries all nine terminal audit sites, so a new
-  branch cannot silently skip the result record.
+- R3 — one `finishWith(outcome, backupId?)` helper carries all eleven terminal audit sites, so a new
+  branch cannot silently skip the result record. It was nine when the helper landed; R5's bounding
+  added the two runner-non-value `BACKUP_FAILED` refusals. The preflight and intent exits legitimately
+  bypass the helper — they never reach step 8 — so a recount must count terminal sites, not exits.
 - R4 — `BackupService.create(request, signal)` takes a `BackupRequest`: locked target, capability id,
   MCP name, arguments digest, effective scopes, observed-state digest and effect-plan digest, all
   kernel-supplied, instead of one positional scope string.
@@ -622,6 +627,13 @@ Deferred to Slice 3, where the refusal vocabulary is opened:
   `kernel.ts:1870` is untested.
 - **`EXECUTION_FAILED` is indistinguishable from an upstream 403** to the operator (UX backlog from
   the 0.1.1 end-to-end run). It is a candidate for the Slice 3 vocabulary work.
+- **A cancel mid-envelope never reports `CANCELLED`.** A caller that cancels after the envelope
+  starts gets whichever refusal the abort happens to produce on the step it lands in; there is no
+  cancellation vocabulary at all. It belongs with the refusal-vocabulary work, not before it.
+- **R3's single-helper invariant is pinned by a one-shot grep, not by a test.** "Every terminal path
+  leaves through `finishWith`" was checked by hand once, when the helper landed. Slice 3 must encode
+  it as an execution-boundary source-text test, or the invariant decays the first time someone adds
+  a branch — and the eleven-versus-nine drift above is what that decay looks like.
 
 The two concurrent-first-start races that Slice 1 parked are **closed** by Slice 1.1 (ENOENT-tolerant
 sweep, bounded retry, and a real multi-process race test) and are no longer carried.
@@ -666,8 +678,8 @@ Before changing anything, report:
 - which P0 increment is actually complete;
 - the exact provenance status of tests/agentic/**.
 
-The standing distribution task is publishing 0.1.1: npm 0.1.0 predates the b848501 listing fix and
-the --help/--version CLI flags, and the tree is already bumped on main. Follow
+0.1.1 is already published to npm (2026-08-18, GitHub Release v0.1.1 -> release.yml -> OIDC publish);
+do not dispatch a release for it. The open task is landing p0c/slice2a-envelope-prep. Follow
 "Immediate next-session objective / Task 1", using the Task 2 evidence renewal sequence for the
 candidate: gates, real smoke:opencode, evidence:check 0, commit the candidate, real vm:product3,
 commit only docs/evidence/product3-vm.json, evidence:verify 0, push. On p0c/slice2a-envelope-prep

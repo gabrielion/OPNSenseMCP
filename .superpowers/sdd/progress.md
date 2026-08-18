@@ -875,11 +875,14 @@ mutation-envelope interfaces and the composition root so Slice 2b can drop in du
 backup/audit/lock as pure service swaps — R1-R5, R7, R8 from the 2026-08-17 review plus four
 carry-overs — with ZERO observable behaviour change.
   - CANARY, the slice's most load-bearing assertion, re-run by every task: the envelope's step-order
-    event list must not change. IT DID NOT. The "runs the fixed order and returns the verified output
-    on success" block in tests/capabilities/mutation-envelope.test.ts is BYTE-IDENTICAL to main's
-    (extracted-block diff empty at the final tree) and still asserts, in order: lock.acquire,
-    preflight, audit.intent, backup.create, preflight, handler, verify, audit.result, lock.release.
-    No refusal code, result shape or event order moved anywhere this slice.
+    event list must not change. IT DID NOT. In the "runs the fixed order and returns the verified
+    output on success" test of tests/capabilities/mutation-envelope.test.ts, the asserted EVENT ARRAY
+    is byte-identical between 98c33f5 and the final tree (md5 7e6d085af5111f34ceace93ef780e473 on
+    both) and still reads, in order: lock.acquire, preflight, audit.intent, backup.create, preflight,
+    handler, verify, audit.result, lock.release. Claim exactly that, and nothing wider: the
+    surrounding it() block is NOT byte-identical, because Task 3 added 13 lines of BackupRequest
+    assertions inside it, so a whole-block diff is 13 additions and no deletions. No refusal code,
+    result shape or event order moved anywhere this slice.
   - R2 + R1 (56d0362, 71c8f72): LockHandle.release() now returns Promise<'released' | 'unconfirmed'>
     and the in-process handle always reports 'released' (a process-local token cannot fail to drop).
     executeMutationEnvelope's try/finally became a labeled block — every former `return X` is
@@ -889,9 +892,14 @@ carry-overs — with ZERO observable behaviour change.
     restructure had deleted: a catch/release/rethrow guard, RED-reproduced with a throwing getter,
     because one leak of the process-wide lock is a restart-only write outage. Slice 3 must know there
     are now TWO release sites and that the catch deliberately never converts to LOCK_RELEASE_FAILED.
-  - R3 (a50b9e7): one `finishWith(outcome, backupId?)` helper carries all NINE terminal audit sites,
-    so a new branch cannot skip the result record. `terminalAuditRecorded` is captured and discarded
-    exactly where Slice 3's AUDIT_RESULT_FAILED precedence will read it.
+  - R3 (a50b9e7): one `finishWith(outcome, backupId?)` helper carries EVERY terminal audit site, so a
+    new branch cannot skip the result record. The count moved inside this slice and any future
+    statement of it must be recounted, not copied: 9 sites at a50b9e7 and 0a6288b, then 11 from
+    9f171c2 onward (R5's bounding added the create- and exists-runner non-value BACKUP_FAILED
+    refusals), 11 at the final tree — kernel.ts:1741, 1756, 1761, 1766, 1782, 1792, 1797, 1807, 1817,
+    1822, 1825. The preflight and intent exits legitimately bypass the helper: they never reach step
+    8. `terminalAuditRecorded` is captured and discarded exactly where Slice 3's AUDIT_RESULT_FAILED
+    precedence will read it.
   - R4 (0a6288b): BackupService.create(BackupRequest, signal) — targetKey, capabilityId, mcpName,
     argumentsSha256, effectiveResourceScopes, observedStateDigest, effectPlanDigest, all
     kernel-supplied and already canonicalized — replaces the positional scope string. The request is
@@ -1003,7 +1011,12 @@ carry-overs — with ZERO observable behaviour change.
         record under the wrong code; terminalAuditRecorded=false conflates "audit failed" with "never
         reached step 8" (gate on verified success); kernel:1870 untested; EXECUTION_FAILED is
         indistinguishable from an upstream 403 (UX backlog) — a candidate for the Slice 3 refusal
-        vocabulary.
+        vocabulary; a cancel mid-envelope never reports CANCELLED, since there is no cancellation
+        vocabulary at all and the caller gets whichever refusal the abort produces on the step it
+        lands in; and R3's single-helper invariant is pinned by a ONE-SHOT grep rather than a test —
+        Slice 3 must encode "every terminal path leaves through finishWith" as an execution-boundary
+        source-text test, or it decays (the 9-versus-11 drift under R3 above is what that decay looks
+        like).
   - Minor deferrals recorded by the task reviews and NOT fixed here: envelope paths 9/10
     (INVALID_OUTPUT) have no test at all (pre-existing); a throwing envelope rejects dispatch()
     instead of fail-closing to a refusal (deliberate, Slice 4 question); the terminal-audit pin is
@@ -1012,7 +1025,16 @@ carry-overs — with ZERO observable behaviour change.
     degrade is silent (no logging seam — graduates to needed in 2b) and leaks a temp root on double
     failure; two identity-key comment looseness items; the 0o300 and 0o500 sweep tests fail-not-
     false-pass under uid 0.
+  - DISTRIBUTION, recorded here because the tree cannot prove it (controller-attested 2026-08-18,
+    outside this slice's diff): 0.1.1 IS PUBLISHED to npm. A GitHub Release v0.1.1 triggered
+    release.yml, which published over OIDC with no stored credential after the user approved the
+    npm-publish environment; the registry state was verified the same day with
+    `npx -y @gabrielion/opnsense-mcp@0.1.1 --version` -> 0.1.1, run OUTSIDE the repository (inside
+    it, npx resolves the local package by name and never queries the registry — the self-name trap).
+    The release tag lives on GitHub; a local clone has only v0.1.0, so absence of a v0.1.1 tag is NOT
+    evidence of an unpublished version. docs/project-status.md asserted publication as an open task
+    in three places until this entry; all three are corrected.
   - Landing sequence for this branch (controller): merge ff -> real smoke:opencode (src/** changed)
     -> full gates green -> candidate fixture commit -> vm:product3 -> attestation commit ->
     evidence:verify 0 + evidence:check 0 -> push -> confirm all four CI jobs executed. No release
-    this slice.
+    this slice (0.1.1 is already out; see DISTRIBUTION above).
