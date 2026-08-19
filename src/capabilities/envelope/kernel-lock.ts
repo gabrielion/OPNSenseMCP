@@ -112,11 +112,14 @@ function helperArguments(platform: NodeJS.Platform, waiterPath: string): readonl
   const descriptor = `/dev/fd/${String(LOCK_FD)}`;
   const waiter = [process.execPath, waiterPath];
   // `lockf -s` is silent and `-k` is implied for a descriptor, so the lock file is never unlinked.
-  // The Linux spelling is written to the same protocol; it is unverified on this workstation, which
-  // has no `flock`, and fails closed there rather than guessing.
+  // Both helpers fork, keep the locked descriptor in the parent, and exec the waiter in the child;
+  // BSD `lockf` closes that descriptor in the child before exec, and util-linux `flock` only does
+  // so under `-o` — without it the waiter inherits a dup of the LOCKED description, so killing the
+  // helper frees nothing while the waiter lives (proven on Linux: kill-then-reacquire fails without
+  // `-o` and succeeds with it; darwin needs no flag).
   return platform === 'darwin'
     ? ['-s', '-t', String(HELPER_WAIT_SECONDS), descriptor, ...waiter]
-    : ['-x', '-w', String(HELPER_WAIT_SECONDS), descriptor, ...waiter];
+    : ['-x', '-w', String(HELPER_WAIT_SECONDS), '-o', descriptor, ...waiter];
 }
 
 function exitOf(child: ChildProcess): Promise<void> {
