@@ -140,7 +140,9 @@ function dependencies(overrides = {}) {
     removeTemporaryRoot: vi.fn(async () => {
       calls.push('remove');
     }),
-    removeQmpSocket: vi.fn(async () => undefined),
+    removeQmpSocket: vi.fn(async () => {
+      calls.push('qmp');
+    }),
     verifyResidue: vi.fn(async () => true),
     calls,
     ...overrides
@@ -186,7 +188,7 @@ describe('Product 3 restore round-trip runner', () => {
       consolePath: `${deps.instanceRoot}/console.sock`,
       backupXml: SENTINEL_BACKUP_XML
     });
-    expect(deps.calls).toEqual(['start', 'stop', 'remove']);
+    expect(deps.calls).toEqual(['start', 'qmp', 'stop', 'remove']);
     expect(deps.writeAttestation).toHaveBeenCalledOnce();
     expect(deps.writeAttestation).toHaveBeenCalledWith(
       deps.attestationPath,
@@ -332,7 +334,11 @@ describe('Product 3 restore round-trip runner', () => {
     await expect(runProduct3Restore({ ...deps, stdout: stdout.stream })).resolves.toBe(2);
 
     expect(deps.runInstalled).toHaveBeenCalledTimes(1);
-    expect(deps.calls).toEqual(['start', 'stop', 'remove']);
+    // The QMP socket cleanup is not conditioned on a clean run: `failureStage` is 'restore' (not
+    // null) by the time cleanup runs here, and the unlink must still happen — a real `qmp.sock`
+    // left behind on ANY failure path is exactly what would silently defeat `residueFree` later.
+    expect(deps.removeQmpSocket).toHaveBeenCalledWith(`${deps.instanceRoot}/qmp.sock`);
+    expect(deps.calls).toEqual(['start', 'qmp', 'stop', 'remove']);
     expect(deps.writeAttestation).not.toHaveBeenCalled();
     const parsed = JSON.parse(stdout.output());
     expect(parsed.status).toBe('failed');
@@ -353,7 +359,7 @@ describe('Product 3 restore round-trip runner', () => {
 
     await expect(runProduct3Restore({ ...deps, stdout: stdout.stream })).resolves.toBe(2);
 
-    expect(deps.calls).toEqual(['start', 'stop', 'remove']);
+    expect(deps.calls).toEqual(['start', 'qmp', 'stop', 'remove']);
     const parsed = JSON.parse(stdout.output());
     expect(parsed.failureStage).toBe('loader');
     expect(parsed.checks.backupRestored).toBe(false);
@@ -404,7 +410,7 @@ describe('Product 3 restore round-trip runner', () => {
 
     expect(deps.restoreOverConsole).not.toHaveBeenCalled();
     expect(deps.runInstalled).toHaveBeenCalledTimes(1);
-    expect(deps.calls).toEqual(['start', 'stop', 'remove']);
+    expect(deps.calls).toEqual(['start', 'qmp', 'stop', 'remove']);
     expect(deps.writeAttestation).not.toHaveBeenCalled();
     const parsed = JSON.parse(stdout.output());
     expect(parsed.checks.aliasPresent).toBe(false);
@@ -452,7 +458,7 @@ describe('Product 3 restore round-trip runner', () => {
 
     await expect(runProduct3Restore({ ...deps, stdout: stdout.stream })).resolves.toBe(2);
 
-    expect(deps.calls).toEqual(['start', 'stop']);
+    expect(deps.calls).toEqual(['start', 'qmp', 'stop']);
     expect(deps.runInstalled).not.toHaveBeenCalled();
     expect(JSON.parse(stdout.output())).toMatchObject({
       status: 'failed',
@@ -519,7 +525,7 @@ describe('Product 3 restore round-trip runner', () => {
     signalSource.emit('SIGTERM');
 
     await expect(run).resolves.toBe(3);
-    expect(deps.calls).toEqual(['start', 'stop', 'remove']);
+    expect(deps.calls).toEqual(['start', 'qmp', 'stop', 'remove']);
     expect(deps.restoreOverConsole).not.toHaveBeenCalled();
     expect(JSON.parse(stdout.output())).toMatchObject({
       status: 'failed',
@@ -546,7 +552,7 @@ describe('Product 3 restore round-trip runner', () => {
     await expect(run).resolves.toBe(3);
     expect(deps.restoreOverConsole).not.toHaveBeenCalled();
     expect(deps.runInstalled).toHaveBeenCalledTimes(1);
-    expect(deps.calls).toEqual(['start', 'stop', 'remove']);
+    expect(deps.calls).toEqual(['start', 'qmp', 'stop', 'remove']);
     expect(signalSource.listenerCount('SIGINT')).toBe(0);
     expect(signalSource.listenerCount('SIGTERM')).toBe(0);
     expect(JSON.parse(stdout.output())).toMatchObject({
@@ -755,7 +761,22 @@ describe('the console restore driver against an echoing single-user guest', () =
     // contiguous frame marker — only the fake guest's separately written "real output" does.
     expect(observed.applyCommand).not.toContain(FRAME_BEGIN);
     expect(observed.applyCommand).not.toContain(FRAME_END);
-    expect(observed.applyCommand).toContain('/usr/bin/openssl');
+    // The digest invocation form specifically — not just any occurrence of '/usr/bin/openssl',
+    // which the earlier, unrelated base64-decode clause of the same command already contains and
+    // would satisfy trivially regardless of which tool computes the digest.
+    expect(observed.applyCommand).toContain('openssl dgst -sha256');
+    expect(observed.applyCommand).not.toContain('/sbin/sha256');
+
+    // The staging discipline: `umask 077` must be typed strictly between the remount and the
+    // heredoc upload it protects, so the staged base64 config lands 0600, not the default 0644.
+    const remountIndex = observed.sent.indexOf('/sbin/mount -u -o rw /\n');
+    const umaskIndex = observed.sent.indexOf('umask 077\n');
+    const heredocOpenIndex = observed.sent.indexOf(
+      '/bin/cat > /usr/local/etc/mcpr.b64 <<__OPNSENSE_MCP_RESTORE_EOF__\n'
+    );
+    expect(remountIndex).toBeGreaterThan(-1);
+    expect(umaskIndex).toBeGreaterThan(remountIndex);
+    expect(heredocOpenIndex).toBeGreaterThan(umaskIndex);
 
     await new Promise((resolve) => server.close(resolve));
   });
