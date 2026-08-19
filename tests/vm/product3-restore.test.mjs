@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -11,9 +14,12 @@ import {
 } from '../../scripts/vm/product1b-bootstrap.mjs';
 import { buildQemuArguments } from '../../scripts/vm/product1b-lifecycle.mjs';
 import {
+  FRAME_BEGIN,
+  FRAME_END,
   Product3RestoreConsoleError,
   deriveQmpQemuArguments,
   parseProduct3RestoreArguments,
+  restoreOverConsole,
   runProduct3Restore
 } from '../../scripts/vm/product3-restore.mjs';
 
@@ -25,9 +31,20 @@ const TREE = '2'.repeat(40);
 const SENTINEL_BACKUP_XML =
   '<?xml version="1.0"?><opnsense><SENTINEL_RESTORE_CONFIG_SIGIL/></opnsense>';
 
-afterEach(() => {
+const socketRoots = [];
+
+afterEach(async () => {
   vi.useRealTimers();
+  await Promise.all(
+    socketRoots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
+  );
 });
+
+async function temporarySocketPath(name) {
+  const root = await mkdtemp(join(tmpdir(), 'p3-restore-console-'));
+  socketRoots.push(root);
+  return join(root, name);
+}
 
 function captureStream() {
   const stream = new PassThrough();
@@ -123,6 +140,7 @@ function dependencies(overrides = {}) {
     removeTemporaryRoot: vi.fn(async () => {
       calls.push('remove');
     }),
+    removeQmpSocket: vi.fn(async () => undefined),
     verifyResidue: vi.fn(async () => true),
     calls,
     ...overrides
@@ -201,6 +219,106 @@ describe('Product 3 restore round-trip runner', () => {
     await expect(runProduct3Restore({ ...deps, stdout: stdout.stream })).resolves.toBe(0);
 
     expect(order).toEqual(['runInstalled:mutate', 'restoreOverConsole', 'runInstalled:reobserve']);
+  });
+
+  it('writes an attestation payload with exactly the expected key set, schemaVersion 2, and no leaked private data', async () => {
+    const stdout = captureStream();
+    let capturedAttestation;
+    const deps = dependencies({
+      writeAttestation: vi.fn(async (_path, attestation) => {
+        capturedAttestation = attestation;
+      })
+    });
+
+    await expect(runProduct3Restore({ ...deps, stdout: stdout.stream })).resolves.toBe(0);
+
+    // Exact key set, not objectContaining: a payload with any extra field (a leaked path, a
+    // credential, an XML fragment) must fail this, not just a payload missing an expected one.
+    expect(Object.keys(capturedAttestation).sort()).toEqual([
+      'checks',
+      'clientVersion',
+      'commit',
+      'host',
+      'image',
+      'node',
+      'protocolVersion',
+      'scenario',
+      'schemaVersion',
+      'tree'
+    ]);
+    expect(capturedAttestation.schemaVersion).toBe(2);
+    expect(capturedAttestation.checks).toEqual(completeChecks());
+    expect(JSON.stringify(capturedAttestation)).not.toMatch(
+      /SENTINEL|\/private|opnsense\.internal|192\.0\.2|<opnsense>|<\?xml|opnsense-mcp|console\.sock/iu
+    );
+  });
+
+  it('wires the QMP-transformed spawn into the VM launch', async () => {
+    const stdout = captureStream();
+    const spawnQemuFake = vi.fn(() => ({ pid: 424_242, unref: () => undefined }));
+    const deps = dependencies({ spawnQemu: spawnQemuFake });
+
+    await expect(runProduct3Restore({ ...deps, stdout: stdout.stream })).resolves.toBe(0);
+
+    expect(deps.startVm).toHaveBeenCalledWith(
+      expect.objectContaining({ spawnVm: expect.any(Function) })
+    );
+    // Invoke the captured closure directly (never through the always-faked `startVm`, which never
+    // calls it itself) against buildQemuArguments' real output, and check it delegates to the
+    // injected spawn with deriveQmpQemuArguments' transform applied — never a real subprocess
+    // spawn, since `spawnQemuFake` replaces the real `spawnQemu` for this call entirely.
+    const passedSpawnVm = deps.startVm.mock.calls[0][0].spawnVm;
+    const realArguments = buildQemuArguments({
+      overlayPath: '/private/SENTINEL_OVERLAY/overlay.qcow2',
+      consolePath: `${deps.instanceRoot}/console.sock`,
+      pidPath: `${deps.instanceRoot}/qemu.pid`,
+      accelerator: 'tcg',
+      nonce: 'a'.repeat(16)
+    });
+
+    passedSpawnVm('qemu-system-x86_64', realArguments);
+
+    expect(spawnQemuFake).toHaveBeenCalledWith(
+      'qemu-system-x86_64',
+      deriveQmpQemuArguments(realArguments, `${deps.instanceRoot}/qmp.sock`)
+    );
+  });
+
+  it('removes its own QMP socket before the shared VM stop runs', async () => {
+    const stdout = captureStream();
+    const order = [];
+    const deps = dependencies({
+      removeQmpSocket: vi.fn(async (path) => {
+        order.push(`removeQmpSocket:${path}`);
+      }),
+      stopVm: vi.fn(async () => {
+        order.push('stop');
+        return { state: 'stopped', cleaned: true };
+      })
+    });
+
+    await expect(runProduct3Restore({ ...deps, stdout: stdout.stream })).resolves.toBe(0);
+
+    // product1b-lifecycle.mjs's shared stop only unlinks its own fixed file list and then rmdir's
+    // instanceRoot, swallowing ENOTEMPTY — so this scenario's own qmp.sock must be gone BEFORE
+    // that rmdir runs, or a real run would leave instanceRoot behind and residueFree would go
+    // false on an otherwise-perfect restore.
+    expect(order).toEqual([`removeQmpSocket:${deps.instanceRoot}/qmp.sock`, 'stop']);
+  });
+
+  it('treats a failed QMP socket removal as a cleanup failure, refusing residue-free and the attestation', async () => {
+    const stdout = captureStream();
+    const deps = dependencies({
+      removeQmpSocket: vi.fn(async () => Promise.reject(new Error('EACCES')))
+    });
+
+    await expect(runProduct3Restore({ ...deps, stdout: stdout.stream })).resolves.toBe(2);
+
+    expect(deps.calls).toEqual(['start', 'stop', 'remove']);
+    const parsed = JSON.parse(stdout.output());
+    expect(parsed.checks.residueFree).toBe(false);
+    expect(parsed.failureStage).toBe('cleanup');
+    expect(deps.writeAttestation).not.toHaveBeenCalled();
   });
 
   it('leaves backupRestored and stateReverted false with a set failure stage when the console restore throws, and writes no attestation', async () => {
@@ -468,7 +586,7 @@ describe('scenario-scoped QMP QEMU argument derivation', () => {
     });
   }
 
-  it('replaces the -monitor none pair with a QMP unix-socket monitor and drops -no-reboot', () => {
+  it('adds a QMP unix-socket monitor beside the pinned -monitor none and drops -no-reboot', () => {
     const qmpPath = '/private/SENTINEL_INSTANCE/qmp.sock';
     const base = baseArguments();
 
@@ -476,20 +594,20 @@ describe('scenario-scoped QMP QEMU argument derivation', () => {
 
     expect(base).toContain('-no-reboot');
     expect(derived).not.toContain('-no-reboot');
-    expect(derived).not.toContain('-monitor');
+    // '-monitor none' is pinned, deliberate suppression of the default HMP monitor; '-qmp' is an
+    // independent channel that must not turn that suppression back off, so the pair survives
+    // untouched rather than being replaced.
+    const monitorIndex = derived.indexOf('-monitor');
+    expect(monitorIndex).toBeGreaterThan(-1);
+    expect(derived[monitorIndex + 1]).toBe('none');
     const qmpIndex = derived.indexOf('-qmp');
     expect(qmpIndex).toBeGreaterThan(-1);
     expect(derived[qmpIndex + 1]).toBe(`unix:${qmpPath},server=on,wait=off`);
-    expect(derived).toHaveLength(base.length - 1);
-    // Nothing besides the monitor pair and the trailing reboot flag changes: every other flag and
-    // value the shared builder produced survives the transform, in the same relative order. Splice
-    // out the exact pair/flag by position rather than filtering by value, since '-display none'
-    // shares the literal token 'none' with '-monitor none' and must not be removed too.
-    const monitorIndex = base.indexOf('-monitor');
-    const untouchedBase = [...base];
-    untouchedBase.splice(monitorIndex, 2);
-    const rebootIndex = untouchedBase.indexOf('-no-reboot');
-    untouchedBase.splice(rebootIndex, 1);
+    expect(derived).toHaveLength(base.length + 1);
+    // Nothing besides the trailing reboot flag is removed, and nothing besides the new '-qmp'
+    // pair is added: every flag/value the shared builder produced is still present, in the same
+    // relative order.
+    const untouchedBase = base.filter((token) => token !== '-no-reboot');
     const untouchedDerived = [...derived];
     untouchedDerived.splice(qmpIndex, 2);
     expect(untouchedDerived).toEqual(untouchedBase);
@@ -503,5 +621,186 @@ describe('scenario-scoped QMP QEMU argument derivation', () => {
 
   it('rejects a non-absolute QMP socket path', () => {
     expect(() => deriveQmpQemuArguments(baseArguments(), 'relative/qmp.sock')).toThrow();
+  });
+});
+
+// Ports tests/vm/product1b-bootstrap.test.mjs's own fixture shape (createServer, readUntil,
+// step(): read-then-echo-then-reprompt) — a real serial tty echoes a typed line back before the
+// guest ever executes it, which is exactly the invariant C-1 broke: the frame markers were typed
+// in cleartext, so the driver's own search matched the echo before the command's real,
+// executed-looking output ever arrived. `resetGuest`/`probePort` are faked so these tests drive
+// only the serial console dialogue — nothing here opens a QMP socket or touches the network.
+describe('the console restore driver against an echoing single-user guest', () => {
+  const RESTORE_LOADER_MENU_TEXT = '\r\n1. Boot Multi user [Enter]\r\n2. Boot Single User\r\n';
+  const RESTORE_SHELL_PROMPT_TEXT = 'root@:/ # ';
+  const RESTORE_CONTINUATION_PROMPT_TEXT = '> ';
+
+  function readUntil(socket, predicate, maximumChunkBytes = Number.POSITIVE_INFINITY) {
+    return new Promise((resolve, reject) => {
+      let received = '';
+      const onData = (chunk) => {
+        received += chunk.subarray(0, maximumChunkBytes).toString('utf8');
+        if (predicate(received)) {
+          cleanup();
+          resolve(received);
+        }
+      };
+      const onError = (error) => {
+        cleanup();
+        reject(error);
+      };
+      const onClose = () => {
+        cleanup();
+        reject(new Error('fixture socket closed early'));
+      };
+      const cleanup = () => {
+        socket.off('data', onData);
+        socket.off('error', onError);
+        socket.off('close', onClose);
+      };
+      socket.on('data', onData);
+      socket.once('error', onError);
+      socket.once('close', onClose);
+    });
+  }
+
+  function encodedLines(xml) {
+    const lines = Buffer.from(xml, 'utf8')
+      .toString('base64')
+      .match(/.{1,76}/gu);
+    if (lines === null) throw new Error('fixture encoding failed');
+    return lines;
+  }
+
+  // Drives the fixed single-user dialogue this driver expects, up to and including the
+  // decode/apply command, and returns every byte the driver typed. `decodeReply` is the fake
+  // guest's own choice of what the command's REAL, executed output looks like — a real,
+  // duplicated, or mismatched framed digest, entirely independent of the echo the guest sends
+  // first, exactly modeling how a real tty separates the two.
+  async function runSingleUserRestoreGuest(socket, { backupXml, decodeReply }) {
+    const sent = [];
+    const step = async (prompt, limit = 512) => {
+      const command = await readUntil(socket, (input) => input.endsWith('\n'), limit);
+      sent.push(command);
+      // A real serial tty echoes the typed line before printing the next prompt.
+      socket.write(command.replace(/\n$/u, '\r\n'));
+      if (prompt !== '') socket.write(prompt);
+      return command;
+    };
+
+    socket.write(RESTORE_LOADER_MENU_TEXT);
+    sent.push(await readUntil(socket, (input) => input.length >= 1, 8));
+    socket.write('2\r\nBooting [single user]...\r\n');
+    socket.write('Enter full pathname of shell or RETURN for /bin/sh: ');
+    sent.push(await readUntil(socket, (input) => input.endsWith('\n'), 8));
+    socket.write(`\r\n${RESTORE_SHELL_PROMPT_TEXT}`);
+
+    await step(RESTORE_SHELL_PROMPT_TEXT); // remount
+    await step(RESTORE_SHELL_PROMPT_TEXT); // umask
+    await step(RESTORE_CONTINUATION_PROMPT_TEXT); // heredoc-open
+    for (const line of encodedLines(backupXml)) {
+      const uploaded = await step(RESTORE_CONTINUATION_PROMPT_TEXT, 128);
+      if (uploaded !== `${line}\n`) throw new Error('fixture upload mismatch');
+    }
+    await step(RESTORE_SHELL_PROMPT_TEXT, 128); // heredoc-close (the EOF marker line)
+
+    // The decode/apply command: echo it verbatim first — the exact invariant under test — then
+    // separately emit whatever this fake guest was told to answer with as the command's real
+    // output. The two are never the same bytes on the wire in a fixed run, by construction.
+    const applyCommand = await readUntil(socket, (input) => input.endsWith('\n'), 4096);
+    sent.push(applyCommand);
+    socket.write(applyCommand.replace(/\n$/u, '\r\n'));
+    socket.write(decodeReply);
+
+    return { sent: sent.join(''), applyCommand };
+  }
+
+  async function serveRestoreConsole(socketPath, { backupXml, decodeReply }) {
+    const observed = {};
+    const server = createServer((socket) => {
+      runSingleUserRestoreGuest(socket, { backupXml, decodeReply })
+        .then((result) => {
+          observed.sent = result.sent;
+          observed.applyCommand = result.applyCommand;
+        })
+        .catch(() => socket.destroy());
+    });
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socketPath, resolve);
+    });
+    return { server, observed };
+  }
+
+  it('lands the restore over a console that echoes every typed line before the guest executes it', async () => {
+    const socketPath = await temporarySocketPath('console.sock');
+    const backupXml = '<opnsense><SAMPLE_RESTORE_FIXTURE/></opnsense>';
+    const expectedDigest = createHash('sha256').update(backupXml, 'utf8').digest('hex');
+    const { server, observed } = await serveRestoreConsole(socketPath, {
+      backupXml,
+      decodeReply: `${FRAME_BEGIN}${expectedDigest}${FRAME_END}\r\n`
+    });
+
+    await expect(
+      restoreOverConsole({
+        consolePath: socketPath,
+        backupXml,
+        timeoutMs: 2_000,
+        resetGuest: async () => undefined,
+        probePort: async () => true
+      })
+    ).resolves.toBeUndefined();
+
+    // The core C-1 property: the bytes actually typed (and therefore echoed) never spell the
+    // contiguous frame marker — only the fake guest's separately written "real output" does.
+    expect(observed.applyCommand).not.toContain(FRAME_BEGIN);
+    expect(observed.applyCommand).not.toContain(FRAME_END);
+    expect(observed.applyCommand).toContain('/usr/bin/openssl');
+
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  it('rejects a console reply whose digest does not match the uploaded backup', async () => {
+    const socketPath = await temporarySocketPath('console.sock');
+    const backupXml = '<opnsense><SAMPLE_RESTORE_FIXTURE/></opnsense>';
+    const { server } = await serveRestoreConsole(socketPath, {
+      backupXml,
+      decodeReply: `${FRAME_BEGIN}${'0'.repeat(64)}${FRAME_END}\r\n`
+    });
+
+    await expect(
+      restoreOverConsole({
+        consolePath: socketPath,
+        backupXml,
+        timeoutMs: 2_000,
+        resetGuest: async () => undefined,
+        probePort: async () => true
+      })
+    ).rejects.toMatchObject({ code: 'PRODUCT3_RESTORE_CONSOLE_FAILED', stage: 'decode' });
+
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  it('rejects a console reply that frames the digest twice', async () => {
+    const socketPath = await temporarySocketPath('console.sock');
+    const backupXml = '<opnsense><SAMPLE_RESTORE_FIXTURE/></opnsense>';
+    const expectedDigest = createHash('sha256').update(backupXml, 'utf8').digest('hex');
+    const framed = `${FRAME_BEGIN}${expectedDigest}${FRAME_END}`;
+    const { server } = await serveRestoreConsole(socketPath, {
+      backupXml,
+      decodeReply: `${framed}${framed}\r\n`
+    });
+
+    await expect(
+      restoreOverConsole({
+        consolePath: socketPath,
+        backupXml,
+        timeoutMs: 2_000,
+        resetGuest: async () => undefined,
+        probePort: async () => true
+      })
+    ).rejects.toMatchObject({ code: 'PRODUCT3_RESTORE_CONSOLE_FAILED', stage: 'decode' });
+
+    await new Promise((resolve) => server.close(resolve));
   });
 });

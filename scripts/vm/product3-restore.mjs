@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createConnection } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -93,6 +93,15 @@ export function parseProduct3RestoreArguments(arguments_) {
   return Object.freeze({ attestationPath: arguments_[1] });
 }
 
+// Single source of truth for where this scenario's QMP monitor socket lives: a sibling of the
+// serial console socket product1b-lifecycle.mjs already places at `<instanceRoot>/console.sock`.
+// Both the launch-time QMP wiring (`spawnQemuWithQmp`, below) and the live console driver
+// (`restoreOverConsole`'s default) call this, so the path is derived in exactly one place rather
+// than independently recomputed at each call site.
+function deriveQmpSocketPath(consolePath) {
+  return join(dirname(consolePath), 'qmp.sock');
+}
+
 // ---------------------------------------------------------------------------------------------
 // Scenario-scoped QEMU argument variant.
 //
@@ -101,11 +110,14 @@ export function parseProduct3RestoreArguments(arguments_) {
 // already booted multi-user, and the only credential-free privileged entry on the pinned image is
 // that loader's single-user shell. The recommended, adjudicated mechanism is a QMP monitor socket
 // so the runner can issue `system_reset` itself. Rather than editing the shared builder, this
-// transforms ITS RETURNED argument list: the `-monitor none` pair becomes a QMP unix-socket
-// monitor, and the trailing `-no-reboot` is dropped (a monitor-issued reset should not be
-// mistaken for the crash-reboot loop that flag exists to break). `startDisposableVm`'s own
-// `spawnVm` seam is where this gets applied (see `spawnQemuWithQmp` below) — `buildQemuArguments`
-// itself is never called differently, only its output is post-processed.
+// transforms ITS RETURNED argument list: a QMP unix-socket monitor is added BESIDE the pinned
+// `-monitor none`, and the trailing `-no-reboot` is dropped (a monitor-issued reset should not be
+// mistaken for the crash-reboot loop that flag exists to break). `-monitor none` itself is left
+// untouched — it suppresses the default, unauthenticated HMP monitor, a suppression the pinned
+// launch contract chose deliberately, and `-qmp` is an independent monitor channel that does not
+// turn that default monitor back on. `startDisposableVm`'s own `spawnVm` seam is where this gets
+// applied (see `spawnQemuWithQmp` below) — `buildQemuArguments` itself is never called
+// differently, only its output is post-processed.
 // ---------------------------------------------------------------------------------------------
 export function deriveQmpQemuArguments(baseArguments, qmpPath) {
   if (!Array.isArray(baseArguments) || typeof qmpPath !== 'string' || !isAbsolute(qmpPath)) {
@@ -120,14 +132,22 @@ export function deriveQmpQemuArguments(baseArguments, qmpPath) {
     rebootIndex === -1
       ? [...baseArguments]
       : [...baseArguments.slice(0, rebootIndex), ...baseArguments.slice(rebootIndex + 1)];
-  const adjustedMonitorIndex = withoutReboot.indexOf('-monitor');
-  const transformed = [...withoutReboot];
-  transformed.splice(adjustedMonitorIndex, 2, '-qmp', `unix:${qmpPath},server=on,wait=off`);
-  return Object.freeze(transformed);
+  return Object.freeze([...withoutReboot, '-qmp', `unix:${qmpPath},server=on,wait=off`]);
 }
 
-function spawnQemuWithQmp(qmpPath) {
-  return (command, arguments_) => spawnQemu(command, deriveQmpQemuArguments(arguments_, qmpPath));
+// `spawn` is injectable (defaulting to the real, exported `spawnQemu`) purely for testability: it
+// lets a test capture the exact closure `startVm` receives as `spawnVm` and invoke it without
+// risking a real `child_process.spawn` of a QEMU binary.
+function spawnQemuWithQmp(qmpPath, spawn = spawnQemu) {
+  return (command, arguments_) => spawn(command, deriveQmpQemuArguments(arguments_, qmpPath));
+}
+
+async function removeQmpSocketIfPresent(qmpPath) {
+  try {
+    await unlink(qmpPath);
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -220,17 +240,37 @@ const SINGLE_USER_SHELL_PROMPT = /Enter full pathname of shell[^\r\n]*:[ ]?/u;
 const HEREDOC_EOF = '__OPNSENSE_MCP_RESTORE_EOF__';
 const STAGED_ENCODED = '/usr/local/etc/mcpr.b64';
 const CONFIG_PATH = '/conf/config.xml';
-const FRAME_BEGIN = '__OPNSENSE_MCP_RESTORE_V1_D24B9F17_BEGIN__';
-const FRAME_END = '__OPNSENSE_MCP_RESTORE_V1_D24B9F17_END__';
+export const FRAME_BEGIN = '__OPNSENSE_MCP_RESTORE_V1_D24B9F17_BEGIN__';
+export const FRAME_END = '__OPNSENSE_MCP_RESTORE_V1_D24B9F17_END__';
 const REMOUNT_COMMAND = '/sbin/mount -u -o rw /\n';
+const UMASK_COMMAND = 'umask 077\n';
 const HEREDOC_OPEN_COMMAND = `/bin/cat > ${STAGED_ENCODED} <<${HEREDOC_EOF}\n`;
+// A real serial tty echoes a typed line back before the guest ever executes it (proven and
+// exercised in tests/vm/product1b-bootstrap.test.mjs's own fixture guest), so a frame marker
+// typed in cleartext would satisfy this driver's own search on the ECHO, before the command's
+// real output ever arrives — product1b-bootstrap.mjs never puts its own frame markers on the wire
+// except base64-encoded, which is exactly the invariant a literal marker here would have broken.
+// Splitting each marker across two adjacent double-quoted shell words defeats that: the shell
+// concatenates adjacent quoted words into one argument when the command actually RUNS, but the
+// bytes as TYPED (and therefore echoed) never spell the contiguous marker.
+function shellSplitLiteral(marker) {
+  const midpoint = Math.ceil(marker.length / 2);
+  return `"${marker.slice(0, midpoint)}""${marker.slice(midpoint)}"`;
+}
+const FRAME_BEGIN_LITERAL = shellSplitLiteral(FRAME_BEGIN);
+const FRAME_END_LITERAL = shellSplitLiteral(FRAME_END);
 // One command applies the staged upload, verifies it landed (a framed sha256 of the file this
-// scenario just wrote, so a truncated or corrupted transfer fails closed before boot continues),
-// and removes the staging file. Folding these into one line keeps the state machine's stage count
-// down without weakening the verification the brief's "live probe" language asks for.
+// scenario just wrote, computed with the same guest tool — /usr/bin/openssl — the proven
+// bootstrap dialogue already uses live, rather than an unproven /sbin/sha256, so a truncated or
+// corrupted transfer fails closed before boot continues), and removes the staging file. `${d#*= }`
+// is POSIX parameter expansion (no external `cut`/`awk`, neither proven present in this shell):
+// `openssl dgst -sha256 <path>` prints `SHA256(<path>)= <hex>`, and `#*= ` strips the shortest
+// leading match up to and including that literal `= `, leaving just the hex digest in `$d`.
 const APPLY_COMMAND =
   `/usr/bin/openssl base64 -d -in ${STAGED_ENCODED} -out ${CONFIG_PATH} ` +
-  `&& /bin/echo ${FRAME_BEGIN}$(/sbin/sha256 -q ${CONFIG_PATH})${FRAME_END} ` +
+  `&& d=$(/usr/bin/openssl dgst -sha256 ${CONFIG_PATH}) ` +
+  '&& d=${d#*= } ' +
+  `&& /bin/echo ${FRAME_BEGIN_LITERAL}"$d"${FRAME_END_LITERAL} ` +
   `&& /bin/rm -f ${STAGED_ENCODED}\n`;
 const RESUME_COMMAND = 'exit\n';
 
@@ -245,6 +285,7 @@ export const RESTORE_CONSOLE_SAFE_STAGES = Object.freeze([
   'single-user',
   'shell',
   'remount',
+  'umask',
   'heredoc-open',
   'heredoc-lines',
   'heredoc-close',
@@ -357,6 +398,14 @@ function driveConfigOverwrite({
         }
         if (
           stage === 'remount' &&
+          (next = matchAfter(transcript, offset, SHELL_PROMPT)) !== undefined
+        ) {
+          offset = next;
+          stage = 'umask';
+          send(UMASK_COMMAND);
+        }
+        if (
+          stage === 'umask' &&
           (next = matchAfter(transcript, offset, SHELL_PROMPT)) !== undefined
         ) {
           offset = next;
@@ -485,7 +534,7 @@ export async function restoreOverConsole({
   ) {
     throw new Product3RestoreConsoleError('validation');
   }
-  const qmpPath = join(dirname(consolePath), 'qmp.sock');
+  const qmpPath = deriveQmpSocketPath(consolePath);
   const uploadLines = heredocLines(backupXml);
   const expectedDigest = createHash('sha256').update(backupXml, 'utf8').digest('hex');
 
@@ -799,6 +848,7 @@ export async function runProduct3Restore(options = {}) {
   const prepareBase = options.prepareBase ?? (() => prepareImage({ cacheRoot }));
   const startVm = options.startVm ?? startDisposableVm;
   const stopVm = options.stopVm ?? stopDisposableVm;
+  const spawnVmProcess = options.spawnQemu ?? spawnQemu;
   const bootstrap = options.bootstrap ?? bootstrapProduct1b;
   const createArtifacts = options.createArtifacts ?? createConnectionArtifacts;
   const createTemporaryRoot = options.createTemporaryRoot ?? createPrivateTemporaryRoot;
@@ -806,6 +856,7 @@ export async function runProduct3Restore(options = {}) {
   const runInstalled = options.runInstalled ?? runInstalledRestoreLifecycle;
   const restoreOverConsoleOperation = options.restoreOverConsole ?? restoreOverConsole;
   const removeTemporaryRoot = options.removeTemporaryRoot ?? removePrivateTemporaryRoot;
+  const removeQmpSocket = options.removeQmpSocket ?? removeQmpSocketIfPresent;
   const verifyResidue = options.verifyResidue ?? verifyProduct1bResidue;
   const inspectGit = options.inspectGit ?? inspectGitWorktree;
   const writeAttestation = options.writeAttestation ?? writeVmAttestationAtomic;
@@ -816,6 +867,10 @@ export async function runProduct3Restore(options = {}) {
   let ownedVm = false;
   let temporaryRoot;
   let releasePackage;
+  // Declared here (not inside the inner try) so the cleanup `finally` below — a sibling block, not
+  // a nested one — can still read it: the same pattern `temporaryRoot`/`releasePackage` already
+  // use, and for the same reason (a `const` scoped inside the try would not be visible there).
+  let qmpPath;
   let cleanupFailed = false;
   let interrupted = false;
   let failureStage = 'doctor';
@@ -847,7 +902,12 @@ export async function runProduct3Restore(options = {}) {
       throwIfInterrupted();
       failureStage = 'vm-start';
       let credentials;
-      const qmpPath = join(instanceRoot, 'qmp.sock');
+      // console.sock is product1b-lifecycle.mjs's own private-but-stable convention
+      // (`join(instanceRoot, 'console.sock')`) — already relied on by the `bootstrapConsole`
+      // callback's own `consolePath` argument below, and now the single place both the QMP socket
+      // path and this scenario's later `restoreOverConsole` call derive from.
+      const consoleSocketPath = join(instanceRoot, 'console.sock');
+      qmpPath = deriveQmpSocketPath(consoleSocketPath);
       const started = await startVm({
         instanceRoot,
         rawPath: join(cacheRoot, IMAGE_SPEC.rawName),
@@ -856,8 +916,8 @@ export async function runProduct3Restore(options = {}) {
         // Scenario-scoped variant of the launch: adds the QMP monitor `restoreOverConsole` needs
         // to re-enter the loader later. See `deriveQmpQemuArguments` — product1b-lifecycle.mjs
         // itself is untouched, only the argument list its own `buildQemuArguments` call returns
-        // is transformed before the real `spawnQemu` runs it.
-        spawnVm: spawnQemuWithQmp(qmpPath),
+        // is transformed before the real spawn runs it.
+        spawnVm: spawnQemuWithQmp(qmpPath, spawnVmProcess),
         bootstrapConsole: async ({ consolePath }) => {
           // QEMU is launched: from here the runner owns it and must prove it was stopped.
           ownedVm = true;
@@ -910,7 +970,7 @@ export async function runProduct3Restore(options = {}) {
       throwIfInterrupted();
       failureStage = 'restore';
       await restoreOverConsoleOperation({
-        consolePath: join(instanceRoot, 'console.sock'),
+        consolePath: consoleSocketPath,
         backupXml: mutation.backupXml
       });
       checks.backupRestored = true;
@@ -944,6 +1004,18 @@ export async function runProduct3Restore(options = {}) {
       // firewall data it carries all stay private.
     } finally {
       if (ownedVm) {
+        // qmp.sock is this scenario's own addition to instanceRoot: product1b-lifecycle.mjs's
+        // shared `cleanupOwnedState` only unlinks its own fixed, hard-coded file list and then
+        // rmdir's instanceRoot, swallowing ENOTEMPTY — so a surviving qmp.sock would silently
+        // leave instanceRoot behind, and `residueFree` would go false on an otherwise-perfect run.
+        // Removed defensively, before the shared stop runs: this file cannot edit that allow-list,
+        // so the only way to keep it from shadowing this cleanup is to run first.
+        try {
+          if (qmpPath !== undefined) await removeQmpSocket(qmpPath);
+        } catch {
+          cleanupFailed = true;
+          failureStage = 'cleanup';
+        }
         try {
           const stopped = await stopVm({ instanceRoot });
           checks.vmStopped = stopped?.state === 'stopped' && stopped.cleaned === true;
@@ -992,7 +1064,11 @@ export async function runProduct3Restore(options = {}) {
           throw new Product3RestoreError('GIT_STATE_CHANGED');
         }
         const attestation = {
-          schemaVersion: 3,
+          // Pinned to 2, matching alias's own generation: Task 12's adjudicated brief shares this
+          // schema version unchanged (the restore scenario runs the same product profile), and
+          // attestation.mjs's builder hard-rejects anything else — this writer wiring itself stays
+          // untouched here, since Task 12 owns swapping it for the restore-shaped serializer.
+          schemaVersion: 2,
           commit: gitIdentity.commit,
           tree: gitIdentity.tree,
           node: nodeVersion,
