@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -968,6 +968,47 @@ describe('Product 3 restore VM attestation atomic writer', () => {
     await expect(
       writeVmRestoreAttestationAtomic(outputPath, restoreAttestationInput({ schemaVersion: 3 }))
     ).rejects.toThrow('VM_ATTESTATION_INVALID');
+  });
+
+  // Mirrors product3-alias.test.mjs's own "cleans the same-directory temporary file when the
+  // atomic rename fails" leg exactly, against this file's duplicated copy of the same mechanics:
+  // a failed rename must still remove the `.pending-<nonce>` temp file it created, or a leaked
+  // temp file next to the real evidence path would trip the verifier's worktree-clean check at
+  // landing (an unrelated untracked file, not one of the two allowed evidence paths).
+  it('cleans the same-directory temporary file when the atomic rename fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opnsense-product3-restore-attestation-'));
+    attestationRoots.push(root);
+    const outputPath = join(root, 'product3-restore-vm.json');
+    await writeFile(outputPath, 'old\n', 'utf8');
+
+    await expect(
+      writeVmRestoreAttestationAtomic(outputPath, restoreAttestationInput(), {
+        renameFile: async () => {
+          throw new Error('rename failed');
+        }
+      })
+    ).rejects.toThrow('VM_ATTESTATION_WRITE_FAILED');
+
+    expect(await readFile(outputPath, 'utf8')).toBe('old\n');
+    expect(await readdir(root)).toEqual(['product3-restore-vm.json']);
+  });
+
+  // Mirrors product3-alias.test.mjs's own "creates a missing output parent and still leaves only
+  // the final atomic file" leg: the directory-creation path is exercised, and no stray temp file
+  // or partial directory is left behind alongside the real one.
+  it('creates a missing output parent and still leaves only the final atomic file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opnsense-product3-restore-attestation-'));
+    attestationRoots.push(root);
+    const missingParent = join(root, 'missing');
+    const outputPath = join(missingParent, 'product3-restore-vm.json');
+
+    await writeVmRestoreAttestationAtomic(outputPath, restoreAttestationInput());
+
+    expect(await readFile(outputPath, 'utf8')).toBe(
+      serializeVmRestoreAttestation(restoreAttestationInput())
+    );
+    expect(await readdir(root)).toEqual(['missing']);
+    expect(await readdir(missingParent)).toEqual(['product3-restore-vm.json']);
   });
 });
 

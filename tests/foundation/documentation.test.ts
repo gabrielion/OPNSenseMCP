@@ -777,6 +777,26 @@ describe('commit-bound VM attestation verifier', () => {
     expect(await runVerifier(extraPath.root)).toEqual({ code: 2, stdout: '', stderr: '' });
   });
 
+  it('rejects a coherent alias attestation alongside a restore attestation pinned to an older commit', async () => {
+    // Both files present, both well-formed — the alias one re-pinned to the CURRENT commit, the
+    // restore one left pointing at the earlier one, "stale" because tracked.txt changed in
+    // between (a real, non-evidence code change, not just other evidence churn). This is the one
+    // quadrant the combination rule exists to catch: `code === 0` requires BOTH files coherent,
+    // never just one of the two.
+    const fixture = await verifierFixture();
+    await writeFile(join(fixture.root, 'tracked.txt'), 'later tested bytes\n', 'utf8');
+    await git(fixture.root, ['add', 'tracked.txt']);
+    await git(fixture.root, ['commit', '-qm', 'create later tested commit']);
+
+    const testedCommit = await git(fixture.root, ['rev-parse', 'HEAD']);
+    const testedTree = await git(fixture.root, ['rev-parse', 'HEAD^{tree}']);
+    // Alias re-pinned to the new HEAD (coherent); restore deliberately left at the fixture's
+    // original, now-older commit (stale).
+    await writeFile(fixture.evidencePath, vmAttestation(testedCommit, testedTree), 'utf8');
+
+    expect(await runVerifier(fixture.root)).toEqual({ code: 2, stdout: '', stderr: '' });
+  });
+
   it('returns unreadable for a missing, malformed, or non-canonical document', async () => {
     const fixture = await verifierFixture();
     await unlink(fixture.evidencePath);
