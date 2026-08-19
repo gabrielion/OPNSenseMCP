@@ -508,3 +508,32 @@ ledger commit → merge ff to main → scratch state-dir stub → smoke:opencode
 commit → vm:product3 alias attestation + evidence commit → live restore proof + evidence commit
 → evidence:verify/check 0 → push → 4 CI jobs → workspace cleanup. ONE VM at a time, health-gated
 (TCG flapping = dominant failure mode per ground-truth ops memory).
+
+LANDING EXECUTED 2026-08-19: ledger commit d40b0f8 → merge ff (origin/main was exactly 1d4f049)
+→ smoke reseal PASSED, fixture commit 774ffae, FULL suite 1354/1354 (first all-green run of the
+lineage; state dir cleaned+confirmed absent) → vm:product3 PASSED 12/12, evidence commit d33a6dc
+→ restore producer: TWO failures at failureStage 'package' (see finding below), then PASSED
+14/14 — backupRestored:true, stateReverted:true, THE LIVE RESTORE ROUND-TRIP IS PROVEN — evidence
+commit 5911080 → evidence:verify 0 + evidence:check 0 (two-file verifier's first real pair,
+subset rule worked on the real alias-then-restore shape) → pushed 1d4f049..5911080.
+LANDING FINDING 1 (npm_execpath): the documented raw invocation `node scripts/vm/
+product3-restore.mjs ...` fails DETERMINISTICALLY at the package stage — prepare-installed-
+package.mjs:126 requiredNpmCli reads process.env.npm_execpath, which only `npm run` sets; the
+alias producer always runs via `npm run vm:product3`, the restore producer has no npm script
+(T12 accepted concern — its hidden cost, invisible offline). Workaround used for the landing:
+export npm_execpath=/opt/homebrew/opt/node@22/lib/node_modules/npm/bin/npm-cli.js. ERRAND: add
+`vm:product3-restore` to package.json at the next candidate (package.json change = digest move)
+or a fallback in requiredNpmCli; update the landing-doc invocation then.
+LANDING FINDING 2 (Linux flock, the predicted watch item): CI verify job RED on the landing
+push — exactly one failure, kernel-lock "frees the lock when the helper process is killed":
+util-linux flock(1) FORKS by default, parent holds the locked descriptor, and the exec'd waiter
+inherits a DUP of the LOCKED description — killing the helper pid freed nothing while the waiter
+lived. Reproduced in Docker (node:22, flock 2.38.1) with a pure-shell probe (no-o: reacquire
+exit 1; with-o: exit 0). FIX be48094: add `-o` (--close) to the Linux argv — util-linux's
+spelling of what BSD lockf does by default (verified by lsof: lockf's child has no fd 3).
+Kernel-lock suite: Linux 13+1skip (was 1 failed), darwin 14/14. Review (sonnet): APPROVED,
+mechanism independently re-proven both platforms; flagged trade-off ACCEPTED: nothing statically
+pins the `-o` token on darwin — the net is the Linux CI behavioral leg; follow-up candidate.
+Reseal commit 6f795cd (src moved the digest again). CI-red window on main: 5911080..be48094.
+Attestations stale again post-fix-push (normal commit-bound convention; CI runs evidence:check
+only, which the reseal keeps green; next candidate renews both per the documented sequence).
