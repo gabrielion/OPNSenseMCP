@@ -543,3 +543,13 @@ commits after them. REAL INVARIANT: every push to main must carry attestations r
 covered by the subset rule up to) its tip. Remedy executed: renew BOTH producers at the tip as
 the final two evidence-only commits, verify 0, push. Rule for every future push to main: end
 the push with the two attestation renewals (or push only evidence-suffixed histories).
+LANDING FINDING 4 (fetch-depth): the renewed-attestations push STILL failed evidence:verify on
+the runner (exit 2, silent) while exiting 0 locally — ci.yml pinned `fetch-depth: 2` for the OLD
+one-file contract ("the attested commit may sit one commit behind HEAD"); the T12 two-file
+contract puts the ALIAS attested commit at tip~2 (alias evidence + restore evidence land after
+it), unreachable at depth 2 → coherence unresolvable → stale. The workflow file was in no task's
+file list — a cross-boundary miss the landing-readiness audit could not see from the branch
+diff. FIX: fetch-depth 3 in ci.yml + release.yml (tip + 2 parents = the two-file worst case,
+either landing order), comments rewritten with the arithmetic. CI-config-only change,
+self-reviewed (correctness is arithmetic), validated by the CI run it unblocks. Followed by the
+mandatory two renewals (the invariant of FINDING 3).

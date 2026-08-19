@@ -62,7 +62,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-          fetch-depth: 2 # the attested commit may sit one commit behind HEAD
+          fetch-depth: 3 # the attested alias commit may sit two commits behind HEAD (two-file evidence)
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.23.1 # current patched Node 22
