@@ -454,3 +454,57 @@ FINAL-REVIEW AGENDA (reviewer observation, ledger's one unresolved carry): TASK-
 effectiveResourceScopes unbounded in the shared validator vs durable sink's 4096-byte line cap —
 a long-scope capability would refuse EVERY mutation once wired (fail-closed loud). Decision
 still open; routed to final review.
+Task 13: fix round 1 closed — commit `ee85fc1`. Re-review (sonnet): FINDINGS CLOSED — all 10
+post-fix kernel.ts citation-tokens verified line-by-line at HEAD (BACKUP_FAILED grew 2→4 sites,
+grep confirms exactly four in the whole file, no fifth); types.ts:128 correctly untouched; M-1
+clause traced to MAX_BACKUP_XML_BYTES/RESTORE_MAX_TRANSCRIPT_BYTES source constants; gates +
+canary green. Scope caveat accepted: the commit also carries the force-added ledger's own
+fix-round entry (process journal, not content drift).
+Task 13: complete (commits d29bfd5 + ee85fc1).
+
+===== ALL 14 PLAN TASKS COMPLETE 2026-08-19 (Tasks 0-13, commits 959de45..ee85fc1, 24 commits
+on p0c/slice2b-durable-state off main 1d4f049). Suite 1350 passed + 1 documented sealed-evidence
+staleness; verifier exit 1 (restore evidence absent by design); canary byte-identical throughout.
+Next: final whole-branch review (fable), ONE fix wave, then the landing sequence. =====
+
+FINAL WHOLE-BRANCH REVIEW (fable, 1d4f049..ee85fc1): READY TO MERGE WITH FIXES. Zero Critical,
+zero production-code defects. Independent adversarial verification PASSED: two-process
+restart-survival against real dist/; live lockf serialization probe (contended → null in bound,
+release → 'released', argv no path + empty env); O_NOFOLLOW / env-leak / exists-fail-open
+mutants all caught 1-to-1; 517KB-diff secrets sweep clean; sealed artifacts byte-identical;
+src/ unchanged across 2b.2 (reseal-once premise holds). Fix wave (4 Importants + 2 authorized
+riders): I-1 backup write-path fsync unpinned (fsyncSync :185 + fsyncDirectory(stagingDir) :304
+deletable 14/14 green; port durable-audit's vi.mock fsync-spy harness); I-2 landing state-dir
+warning ordered AFTER the reseal step it guards (move between steps 2 and 3; also state that
+step 6 runs only after step 5's attestation commit — restore producer refuses dirty worktree);
+I-3 document the scopes/4096 interplay (one bullet, reviewer-supplied wording); I-4 promoted
+T7 minor: pin pipe.destroy()-before-abort ordering in kernel-lock release (Probe C recipe,
+~15 lines). Riders at zero canary risk: kernel.ts:296-297 stale listAll doc comment (T2 minor);
+landing step 1 reworded to "verify the plan file is committed (it is, at 959de45)".
+RULING (effectiveResourceScopes): ACCEPT AND DOCUMENT this slice — scopes not
+attacker-lengthenable (subset of visibleResourceScopes, 256-char isMetadataString elements,
+today exactly ['firewall.alias']); overflow shape is the slice's preferred loud fail-closed
+(sink throws pre-write → EXECUTION_FAILED at intent); bounding the validator would tighten the
+sealed ring for zero present payoff; right future fix = COUNT bound at authorization time in
+Slice 3. Triage: 1 promoted (=I-4), 29 accepted (5 resolved by later tasks/rulings, 12
+same-class test gaps, 12 bounded documented behaviors). Landing-readiness: executable with the
+I-2 ordering fix; .prettierignore blocker confirmed closed on-branch; both-producers renewal +
+transcript caveat + Linux watch items all carried; landing recommendation recorded: prefer the
+scratch OPNSENSE_MCP_STATE_DIR stub over cleanup-after (cleanup leaves a reusable identity key).
+Slice-3 note: composition-seam diagnostic = highest-leverage item; first Linux flock failure
+would present as writes-sealed in the installed-package CI job.
+
+FIX WAVE CLOSED — commit `9e25ae0` (4 files; F-1 fsync-spy harness with per-site kills 1/1/2,
+fault leg static-message + empty store; F-4 Probe-C leg, swap mutant kills reacquire; F-2+R-2
+warning now precedes the reseal step + dirty-worktree sentence + step-1 verify form; F-3 4096
+bullet at project-status:889-893; R-1 comment-only, both callers real). Scoped re-review
+(sonnet): FINDINGS CLOSED — all mutants re-applied with exact counts, docs read top-to-bottom,
+gates + canary green, 1353+1 documented. Residual ACCEPTED (controller): the "Copy/paste prompt
+for a new session" block (~project-status:1007) restates the pre-fix landing order — non-normative
+bootstrap prose, moot once this landing completes; not worth a commit.
+BRANCH CLEAN FOR LANDING: 959de45..9e25ae0 (26 commits), READY TO MERGE verdict satisfied after
+the one fix wave. Landing sequence begins (per the user-approved plan + F-2 amended order):
+ledger commit → merge ff to main → scratch state-dir stub → smoke:opencode reseal + fixture
+commit → vm:product3 alias attestation + evidence commit → live restore proof + evidence commit
+→ evidence:verify/check 0 → push → 4 CI jobs → workspace cleanup. ONE VM at a time, health-gated
+(TCG flapping = dominant failure mode per ground-truth ops memory).
