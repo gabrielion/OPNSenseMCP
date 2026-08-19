@@ -535,5 +535,11 @@ Kernel-lock suite: Linux 13+1skip (was 1 failed), darwin 14/14. Review (sonnet):
 mechanism independently re-proven both platforms; flagged trade-off ACCEPTED: nothing statically
 pins the `-o` token on darwin — the net is the Linux CI behavioral leg; follow-up candidate.
 Reseal commit 6f795cd (src moved the digest again). CI-red window on main: 5911080..be48094.
-Attestations stale again post-fix-push (normal commit-bound convention; CI runs evidence:check
-only, which the reseal keeps green; next candidate renews both per the documented sequence).
+LANDING FINDING 3 (controller error, corrected): the claim "CI runs evidence:check only" was
+WRONG — the CI verify job ALSO runs `npm run evidence:verify` on every main push (the
+evidence-freshness job runs evidence:check). The fix push (be48094..f930a09) therefore went RED
+on evidence:verify exit 2: both attestations attested 5911080-era commits with non-evidence
+commits after them. REAL INVARIANT: every push to main must carry attestations renewed at (or
+covered by the subset rule up to) its tip. Remedy executed: renew BOTH producers at the tip as
+the final two evidence-only commits, verify 0, push. Rule for every future push to main: end
+the push with the two attestation renewals (or push only evidence-suffixed histories).
