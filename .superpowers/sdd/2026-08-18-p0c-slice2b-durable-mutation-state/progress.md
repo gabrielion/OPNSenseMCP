@@ -435,3 +435,22 @@ Task 12: complete (commits f77d605 + 4a38744).
 Task 12: controller ruling (README "does not prove" minor): current text KEPT this slice — the
 existing sentence targets the alias attestation, which still does not prove restore; recorded as
 a follow-up nicety in project-status, no scope extension.
+
+Task 13 (docs, ledger, gates): implementer commit `d29bfd5` (sonnet, DONE_WITH_CONCERNS; 3 files:
+project-status rewrite, one .prettierignore line, ledger force-added). Concern upheld by
+controller + reviewer: the dispatch's "(a)-(l) work-list" instruction was a STALE MEMORY — no
+such lettering exists in the file or its history; the implementer extended the real bold-lead-in
+list in its real style (memory corrected). Review (opus): SPEC ✅ all 11 coverage items verified
+independently (unsafe-ancestor text matches state-root.ts exactly and the code comment
+cross-reference resolves; canary re-measured; verifier exit 1 reproduced; drift-test note
+byte-preserved + carried clause; every quoted number checked incl. 22 commits, 14 keys,
+retention constants; diff deletions all superseded 2a content; no secrets). APPROVED WITH
+FINDINGS. Fix round 1 in flight: I-1 eight kernel.ts line refs in the Slice-3 caller-abort
+bullet stale (shifted by THIS slice's T1/T7; doc's own rule = code wins; implementer re-derives
+all eight) + folded M-1 (landing step 6 gains the transcript-budget misdiagnosis clause).
+Task 13: minor (deferred): exemption wording marginally narrower than code (says "world-writable"
+where predicate is mode & 0o022; examples all 1777, harmless).
+FINAL-REVIEW AGENDA (reviewer observation, ledger's one unresolved carry): TASK-8 CARRY
+effectiveResourceScopes unbounded in the shared validator vs durable sink's 4096-byte line cap —
+a long-scope capability would refuse EVERY mutation once wired (fail-closed loud). Decision
+still open; routed to final review.

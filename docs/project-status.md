@@ -619,7 +619,14 @@ this order:
    both return `0`. This is the first live run of the QMP-reset-and-console-overwrite mechanism
    Task 11 could only prove through injected seams offline; if the live probe that the guest
    re-imports `/conf/config.xml` on boot does not hold, the producer's own `failureStage` says so —
-   never hand-edit, synthesize or bypass the evidence.
+   never hand-edit, synthesize or bypass the evidence. If `failureStage` names the console stage
+   specifically, check the backup's `config.xml` size before chasing the console mechanism itself:
+   the general backup bound is 2 MiB, but the restore's own console transcript has a tighter 512 KiB
+   coded budget with a real ceiling closer to 300–350 KB in practice, and a configuration above that
+   real ceiling fails at the console stage and reads exactly like a console fault, not a size fault,
+   because nothing in the pipeline reports the mismatch directly. The disposable VM's own
+   configuration is realistic and fits comfortably under it, so this is unlikely to fire — but it is
+   the first thing to rule out if it does.
 7. Push, then confirm all four CI jobs actually executed (`parallel`, `installed-package`,
    `opencode-runner`, `evidence-freshness`) rather than reporting green because an earlier step
    failed and a later job never ran. No release this slice — 0.1.1 is already on npm.
@@ -844,19 +851,20 @@ Deferred to Slice 3, where the refusal vocabulary is opened:
   success-audit re-enters `finishWith('INVALID_OUTPUT')` — a double record under the wrong code — so
   it must be hoisted. `terminalAuditRecorded = false` also conflates "the audit failed" with "step 8
   was never reached"; gate it on verified success. The `services === undefined` runtime guard at
-  `kernel.ts:1870` is untested.
+  `kernel.ts:1913` is untested.
 - **`EXECUTION_FAILED` is indistinguishable from an upstream 403** to the operator (UX backlog from
   the 0.1.1 end-to-end run). It is a candidate for the Slice 3 vocabulary work.
 - **A caller abort is masked at every step except step 2.** The cancellation vocabulary exists and
   the envelope already uses it: `CANCELLED` is a `RefusalCode` (`types.ts:128`) with its own operator
   message, a step-2 preflight abort whose cause is the caller becomes `refusal('CANCELLED')`
-  (`kernel.ts:1700-1707`), and the entry check at `kernel.ts:1674` refuses an already-aborted call
+  (`kernel.ts:1738-1744`), and the entry check at `kernel.ts:1697` refuses an already-aborted call
   the same way. Every other step reports its own code instead: `LOCK_UNAVAILABLE` at step 1
-  (`:1683` — deliberate, its comment says timing out and being cancelled report alike),
-  `BACKUP_FAILED` at step 4 (`:1741`, `:1756`), `STATE_REVALIDATION_FAILED` at step 5 (`:1782`),
-  `OUTCOME_INDETERMINATE` at step 6 (`:1792` — correct by design, a write may have landed) and
-  `OUTCOME_UNVERIFIED` at step 7 (`:1807`). Slice 3 decides which of those should surface as
-  `CANCELLED`; the answer is not "all of them".
+  (`:1720` — deliberate, its comment says timing out and being cancelled report alike),
+  `BACKUP_FAILED` at step 4 (`:1785`, `:1800`, `:1805`, `:1810` — one site each for a failed create,
+  an exists call that could not answer, an exists call that answered false, and the catch-all),
+  `STATE_REVALIDATION_FAILED` at step 5 (`:1826`), `OUTCOME_INDETERMINATE` at step 6 (`:1836` —
+  correct by design, a write may have landed) and `OUTCOME_UNVERIFIED` at step 7 (`:1851`). Slice 3
+  decides which of those should surface as `CANCELLED`; the answer is not "all of them".
 - **R3's single-helper invariant is pinned by a one-shot grep, not by a test.** "Every terminal path
   leaves through `finishWith`" was checked by hand once, when the helper landed. Slice 3 must encode
   it as an execution-boundary source-text test, or the invariant decays the first time someone adds
