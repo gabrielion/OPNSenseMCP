@@ -1,14 +1,18 @@
 # OPNSenseMCP Project Status and Session Handoff
 
-- **Snapshot date:** 2026-08-18
-- **Working branch:** `p0c/slice2a-envelope-prep`, not yet landed. P0-C Slice 1, its 1.1 hardening
-  and the identity-key retry margin are merged to `main` (`98c33f5`); this branch carries P0-C
-  Slice 2a, the envelope prep refactors, which reshape interfaces and change no observable behavior
-  apart from two deliberate fail-safe carve-outs: a service that never answers now refuses instead of
-  hanging (R5), and a mutation-service construction failure now degrades to a read-only server
-  instead of crashing startup (R7).
-- **Base at snapshot:** `98c33f5` (`docs: renew Product 3 VM attestation`), which is also `main`'s
-  head.
+- **Snapshot date:** 2026-08-19
+- **Working branch:** `p0c/slice2b-durable-state`, not yet landed. P0-C Slice 1, its 1.1 hardening,
+  the identity-key retry margin **and Slice 2a** (the envelope prep refactors) are merged to `main`
+  (`1d4f049`); this branch carries P0-C Slice 2b, durable mutation state. It replaces the
+  process-lifetime backup/audit/lock behind Slice 2a's interfaces with durable ones — a
+  content-verified backup store, an append-only monthly audit log and a kernel-backed inter-process
+  lock, all under a new durable layout `targets/<targetId>/{backups,audit,lock}` — adds retention and
+  an ancestor-ownership walk for the state root, and proves a full backup-restore round-trip on the
+  disposable VM over its console (not the API). Slice 2b.1 (Tasks 0–10, deterministic, no VM) and
+  2b.2 (Tasks 11–13, the restore scenario and this document) are both implemented and reviewed; what
+  remains is the landing sequence in "Immediate next-session objective / Task 1".
+- **Base at snapshot:** `1d4f049` (`docs: renew Product 3 VM attestation`), which is also `main`'s
+  head; this branch adds 22 implementation and review commits on top of it, plus this document's own.
 - **Remote:** `https://github.com/gabrielion/OPNSenseMCP.git`
 - **npm:** `@gabrielion/opnsense-mcp@0.1.1` was published on 2026-08-18. A GitHub Release `v0.1.1`
   triggered `release.yml`, which published over OIDC with no stored credential once the operator
@@ -17,20 +21,31 @@
   resolves the local package and never queries the registry. The release tag lives on GitHub; a local
   clone carries only `v0.1.0`. 0.1.0, on the registry since 2026-07-29, predates the `b848501`
   services-listing fix and the `--help`/`--version` CLI flags, so 0.1.1 is the version to install.
-- **VM evidence state:** `main`'s head `98c33f5` is itself the Product 3 attestation commit, produced
-  by the documented landing sequence. On this branch `npm run evidence:verify` is stale by design,
-  because the slice's own commits follow the attested one; that staleness is cleared only by a real
-  `npm run vm:product3` in the landing sequence.
+  Slice 2b lands no version bump, so 0.1.1 stays the version to install after it lands too.
+- **VM evidence state:** `main`'s head `1d4f049` is the Product 3 alias-lifecycle attestation commit,
+  attesting tested commit `d6336a3`. `npm run evidence:verify` now checks **two** independent
+  evidence files — the existing alias round-trip and a new restore round-trip — and returns non-zero
+  if either is missing, malformed or incoherent with the current commit. On this branch it returns
+  `1`: the new file, `docs/evidence/product3-restore-vm.json`, does not exist yet (by design — Slice
+  2b.2 wired the producer, the attestation builder and the two-file verifier, but the live VM run is
+  a landing-sequence step, not a branch-commit step), and the existing alias evidence is
+  independently stale too — this branch's 22 commits since `1d4f049` are all non-evidence commits,
+  which the verifier's git-coherence check treats as staleness regardless of which paths they touch.
+  Both producers must run again at the landing commit, alias first then restore, per the order in
+  "Immediate next-session objective / Task 1"; running only the restore producer would move the
+  combined exit code from `1` to `2`, not to `0`.
 - **OpenCode evidence state:** the seal in `tests/fixtures/opencode.product1a.json` is produced only
   by the real `npm run smoke:opencode` (OpenCode 1.18.16 standalone at `~/.opencode/bin/opencode`,
-  the path the script expects); it was last renewed at `808646f` for the retry-margin tarball and
-  records version 0.1.1. The smoke model was repinned from `opencode/north-mini-code-free`, which had
-  become unavailable upstream (401, then silent hangs, while `opencode models` still listed it), to
-  `opencode/deepseek-v4-flash-free`. The seal is stale on this branch, because Slice 2a changed
-  `src/**`. What moves the tarball digest is exactly `src/**` (through
+  the path the script expects); it was last renewed at `d6336a3` for the Slice 2a tarball and records
+  version 0.1.1. The smoke model was repinned from `opencode/north-mini-code-free`, which had become
+  unavailable upstream (401, then silent hangs, while `opencode models` still listed it), to
+  `opencode/deepseek-v4-flash-free`. The seal is stale on this branch, because Slice 2b.1 changed
+  `src/**` again (the durable backup, audit and lock modules, retention, the ancestor walk and the
+  composition-root wiring). What moves the tarball digest is exactly `src/**` (through
   `dist/`), `README.md`, `LICENSE`, `package.json` and the two tsconfigs; `scripts/**`, `docs/**`,
   `tests/**`, `.github/**` and `evals/**` do not move it, and a `package-lock.json` bump matters only
-  when it moves the toolchain that produces `dist/`. CI now runs `evidence:check` in its own
+  when it moves the toolchain that produces `dist/`. Slice 2b.2 (Tasks 11–13) touches none of that,
+  so it does not re-move the digest a second time. CI runs `evidence:check` in its own
   `evidence-freshness` job, so a stale seal is visible instead of silent; only the real producer can
   clear it.
 
@@ -53,8 +68,11 @@ Read them in this order before changing code:
 6. [`docs/provenance/migration-manifest.json`](provenance/migration-manifest.json) and the
    [provenance preflight plan](superpowers/plans/2026-07-19-private-provenance-contract-preflight.md)
    before touching a provenance-listed destination.
-7. [`.superpowers/sdd/progress.md`](../.superpowers/sdd/progress.md) — chronological implementation
-   ledger, including failures and traps.
+7. The chronological implementation ledgers, including failures and traps:
+   [`.superpowers/sdd/progress.md`](../.superpowers/sdd/progress.md) through Slice 2a, and
+   [`.superpowers/sdd/2026-08-18-p0c-slice2b-durable-mutation-state/progress.md`](../.superpowers/sdd/2026-08-18-p0c-slice2b-durable-mutation-state/progress.md)
+   for Slice 2b — each plan now keeps its own ledger in a directory named after itself rather than
+   appending to the one flat file.
 
 Do not execute a plan whose header says `SUPERSEDED`, `BLOCKED` or `DO NOT EXECUTE`.
 
@@ -148,21 +166,37 @@ Default operation remains read-only.
 
 ### Current mutation limitations
 
-The centralized mutation envelope exists and covers authorization, confirmation, an in-process lock,
-pre-change backup, audit, revalidation, write and outcome verification. It is not yet durable:
+The centralized mutation envelope exists and covers authorization, confirmation, a lock, pre-change
+backup, audit, revalidation, write and outcome verification. Slice 2b made the state behind that
+envelope durable:
 
-- backup storage is removed at process shutdown;
-- audit is an in-memory bounded ring;
-- locking is process-local;
-- no restore or automatic rollback is implemented;
-- alias pagination and complete-state identity are not closed past the first bounded page;
-- Windows writes remain outside the supported claim.
+- backup storage survives process shutdown, under a persisted, content-verified store
+  (`targets/<targetId>/backups/<backupId>/{config.xml,metadata.json}`) with retention, not a process
+  purge, bounding it;
+- audit is an append-only monthly log on disk (`targets/<targetId>/audit/YYYY-MM.jsonl`); the
+  in-memory bounded ring from earlier slices still exists but now backs only tests and fixtures;
+- locking is inter-process and kernel-backed (`flock`/`lockf` on `targets/<targetId>/lock`), so a
+  second server process aimed at the same target serializes against the first instead of walking
+  through it.
 
-Slice 2a reshaped the envelope's interfaces so those implementations can be swapped for durable ones
-without touching the kernel — the lock handle reports its release, the backup service is handed a
-`BackupRequest`, every service call is bounded by the capability's timeout, and the composition root
-builds the services lazily and fail-closed — but the services behind those interfaces are still the
-process-lifetime ones listed above.
+What is still a limitation, unchanged or only partly addressed by 2b:
+
+- there is still no automatic rollback inside the mutation envelope, and restore is still not an MCP
+  tool — Slice 2b proves a backup is restorable at all, over the disposable VM's console (not the
+  API, not a capability a caller can invoke), which is a proof of the backup's integrity, not a
+  product feature;
+- the kernel-backed lock still has no mid-hold liveness channel: if the helper process holding it
+  dies while the envelope keeps mutating, nothing notices — a second server aimed at the same target
+  can acquire the lock while the first envelope is still running (reproduced during review: a second
+  acquire succeeded 42 ms after the first helper died). `LockHandle` has no channel to report it;
+  this is recorded as a known limitation in its own contract text, not fixed this slice;
+- alias pagination and complete-state identity are still not closed past the first bounded page;
+- Windows writes remain outside the supported claim (`openResolvedStateRoot` still throws
+  unconditionally on win32) — but Slice 2b stopped that unavailability from taking alias **reads**
+  down with the writes, so a win32 operator now keeps the read surface;
+- reconciliation for unresolved (started-but-undecided) transactions still has no CLI;
+- indeterminate-write ("may-have-started") classification still does not exist;
+- exact alias syntax validation still does not exist.
 
 These are P0-C requirements, not documentation defects to hide.
 
@@ -229,24 +263,29 @@ If `npm run evidence:verify` returns `2`, the evidence is stale. Never hand-edit
 
 ### P0-C — durable and correct first mutation
 
-**State:** in progress. Slice 1 (durable private state root and target identity), Slice 1.1 (hardening
-of that module plus the 0.1.1 bump) and the identity-key retry margin are merged to `main` at
-`98c33f5`. Slice 2a (envelope prep refactors — R1–R5, R7–R8 and four carry-overs, with zero
-observable behavior change) is complete on `p0c/slice2a-envelope-prep` and waits for its landing
-sequence. Slice 2b — the durable backup root, the durable backup/audit/lock implementations and the
-inter-process lock — has no plan yet; its required carry-overs, including the prerequisites Slice 2a's
-reviews raised, are listed under "Immediate next-session objective / Task 3".
+**State:** in progress. Slice 1 (durable private state root and target identity), Slice 1.1
+(hardening of that module plus the 0.1.1 bump), the identity-key retry margin and Slice 2a (envelope
+prep refactors — R1–R5, R7–R8 and four carry-overs, with zero observable behavior change) are all
+merged to `main` at `1d4f049`. Slice 2b — the durable backup root, the durable backup/audit/lock
+implementations behind Slice 2a's interfaces, the inter-process lock, retention, the state-root
+ancestor walk and the restore round-trip attestation — is complete and reviewed on
+`p0c/slice2b-durable-state` and waits for its landing sequence, listed under "Immediate next-session
+objective / Task 1".
 
 P0-C covers:
 
 - durable private state root and target identity (delivered by Slice 1, hardened by Slice 1.1);
-- inter-process kernel-backed lock;
-- durable backup and append-only audit;
-- reconciliation for unresolved transactions;
-- indeterminate-write classification;
-- exact alias syntax;
-- complete pagination and outcome verification;
-- renewal of the Product 3 VM attestation.
+- inter-process kernel-backed lock (delivered by Slice 2b);
+- durable backup and append-only audit (delivered by Slice 2b, with retention bounding both);
+- reconciliation for unresolved transactions (still open — no CLI; deferred past 2b, see the
+  Slice-2b deferrals below);
+- indeterminate-write classification (still open — Slice 3 territory);
+- exact alias syntax (still open — Slice 3 territory);
+- complete pagination (still open — Slice 3 territory);
+- outcome verification (exists already, from the mutation envelope's earlier slices, unchanged by
+  2b);
+- renewal of the Product 3 VM attestation — both the alias round-trip and the new restore round-trip,
+  at the 2b landing sequence.
 
 The full design is in
 [`2026-07-25-post-cutover-p0-hardening-design.md`](superpowers/specs/2026-07-25-post-cutover-p0-hardening-design.md).
@@ -314,6 +353,29 @@ alias absent
 The attestation is [`docs/evidence/product3-vm.json`](evidence/product3-vm.json). Its verifier, not the
 existence of the file, decides whether it is coherent with the current commit.
 
+A new sibling runner, `scripts/vm/product3-restore.mjs`, extends that lifecycle with a round-trip the
+API alone cannot prove, because OPNsense config restore is not a REST operation:
+
+```text
+alias absent (observed over REST)
+  -> backup taken through the product (the envelope's strict pre-write snapshot)
+  -> alias created through the product (the same mutation the alias runner proves)
+  -> backup restored over the VM's console, not the API (a scenario-scoped QEMU QMP `system_reset`
+     back into the loader, then the proven single-user-shell overwrite of `/conf/config.xml`)
+  -> alias absent again (re-observed over REST)
+  -> VM stopped
+  -> owned residue absent
+```
+
+Its two new checks, `backupRestored` and `stateReverted`, join the twelve the alias runner already
+records; the attestation is a new sibling file,
+[`docs/evidence/product3-restore-vm.json`](evidence/product3-restore-vm.json), produced by
+`node scripts/vm/product3-restore.mjs --attestation-out "$PWD/docs/evidence/product3-restore-vm.json"`
+and checked by the same verifier, which now reads both evidence files independently. As of this
+document the scenario is implemented and its deterministic seams are tested offline (Slice 2b.2); it
+has not yet been run against the real disposable VM, so this document does not count it as proved —
+only a real landing-sequence run does, the same rule every other VM claim in this section follows.
+
 These tests prove OPNsense configuration behavior for their exact scenarios. They do not prove live packet
 filtering, NAT forwarding, broad resource parity or production-firewall safety.
 
@@ -333,16 +395,17 @@ npm ci --ignore-scripts
 
 Important commands:
 
-| Command                                                    | Meaning                                                                               |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `npm run license:check`                                    | License-header gate                                                                   |
-| `npm run verify`                                           | Generated operations, format, lint, typecheck, license, build and deterministic tests |
-| `npm run test:conformance`                                 | Both pinned MCP protocol profiles                                                     |
-| `npm run provenance:verify`                                | Public migration-manifest integrity                                                   |
-| `npm run evidence:check`                                   | Sealed installed-package/OpenCode evidence                                            |
-| `npm run evidence:verify`                                  | Commit-bound Product 3 VM-attestation coherence                                       |
-| `npm run vm:doctor`                                        | Read-only host/VM prerequisite report                                                 |
-| `npm run vm:product3 -- --attestation-out <absolute-path>` | Real Product 3 producer; interactive secret input                                     |
+| Command                                                                  | Meaning                                                                                 |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| `npm run license:check`                                                  | License-header gate                                                                     |
+| `npm run verify`                                                         | Generated operations, format, lint, typecheck, license, build and deterministic tests   |
+| `npm run test:conformance`                                               | Both pinned MCP protocol profiles                                                       |
+| `npm run provenance:verify`                                              | Public migration-manifest integrity                                                     |
+| `npm run evidence:check`                                                 | Sealed installed-package/OpenCode evidence                                              |
+| `npm run evidence:verify`                                                | Commit-bound coherence of BOTH Product 3 VM attestations (alias + restore round-trip)   |
+| `npm run vm:doctor`                                                      | Read-only host/VM prerequisite report                                                   |
+| `npm run vm:product3 -- --attestation-out <absolute-path>`               | Real Product 3 alias-lifecycle producer; interactive secret input                       |
+| `node scripts/vm/product3-restore.mjs --attestation-out <absolute-path>` | Real Product 3 restore round-trip producer; interactive secret input; no npm script yet |
 
 Before a final code or documentation commit, run the exact gates required by `AGENTS.md`. Before publication,
 also ensure both evidence gates are coherent. Never infer success from a composed command's final line alone;
@@ -401,9 +464,14 @@ Those facts guide the clean-room design; they do not authorize copying implement
 
 - The workstation's default Node may be version 26. Always select Homebrew Node 22 before validation.
 - `npm run evidence:verify` intentionally becomes stale after non-evidence commits until the real VM producer
-  renews the evidence.
+  renews the evidence. Since Slice 2b it checks two independent evidence files (alias round-trip and
+  restore round-trip); either one being missing, malformed or incoherent is enough to fail it, and the
+  combined exit code favors "missing" (`1`) over "stale" (`2`) when both are wrong at once.
 - `.superpowers/sdd/progress.md` is tracked even though `.gitignore` lists its directory; use `git add -f`
-  when intentionally updating it.
+  when intentionally updating it. Since Slice 2b each dated plan directory under `.superpowers/sdd/`
+  keeps its own `progress.md` the same way — e.g.
+  `.superpowers/sdd/2026-08-18-p0c-slice2b-durable-mutation-state/progress.md` — rather than appending
+  to the one flat file; the flat file's own history stops at Slice 2a.
 - Some historical plans contain useful context but are explicitly superseded.
 - A test name containing “VM” does not prove the VM ran; require the real producer and lifecycle evidence.
 - The disposable VM answers on its API port well before the serial console prints `login:`; on the reference
@@ -440,10 +508,27 @@ Those facts guide the clean-room design; they do not authorize copying implement
   darwin that halves the targeted transient under staggered arrival, but darwin numbers characterize
   the mechanism and are not fix verification — the 2-vCPU Linux procedure above is what settles it.
   The trade is named in the module: a peer that dies between its own link and its own unlink while we
-  are retrying leaves residue this call will not sweep, and the next start collects it.
+  are retrying leaves residue this call will not sweep, and the next start collects it. Slice 2b
+  considered promoting the 2-vCPU Linux verification of this fix to an exit gate and deliberately did
+  not: it is a separate tracked errand (user adjudication, 2026-08-18), because the sweep-once fix
+  itself shipped in Slice 2a and is independent of 2b's durable-state work.
 - `canonicalizeOrigin` now rejects underscored hostnames (`https://a_b.example`), a common internal
   spelling, and every rejection returns the same opaque static sentence that never says which rule fired.
   Expect that report from users of underscored internal names.
+- Slice 2b's landing push is the first REAL execution, on Linux CI, of three paths this darwin
+  workstation could only fake or skip in its own tests: the kernel lock's `flock` branch (no
+  `/usr/bin/flock` exists here to test against, and `/dev/fd/<n>` reopens on Linux where darwin dups
+  it), the ancestor walk's spelled-path check over a genuine `/tmp` (this workstation's spelled walk
+  crosses a root-owned symlink hop first; Linux's does not), and the durable state root's real
+  platform-default directory (`vitest` here never actually creates `~/Library` or `~/.local/state`).
+  Watch those three CI legs specifically on the first post-landing push.
+- Any script that starts a real server or VM against a configured target without an explicit
+  `OPNSENSE_MCP_STATE_DIR` (and, on darwin, without overriding `HOME`) now touches the operator's own
+  durable state directory, because Slice 2b's composition root opens the real platform default rather
+  than a disposed-of tmpdir. `scripts/run-opencode-smoke.mjs` and the VM lifecycle scripts are exactly
+  this shape; stub a scratch state directory before running them for landing, or plan to clean up
+  `~/Library/Application Support/opnsense-mcp` (darwin) / `~/.local/state/opnsense-mcp` (Linux)
+  afterward.
 
 ## Immediate next-session objective
 
@@ -477,39 +562,77 @@ pause between them (0, 5, 10, 20, 40 then 50 ms, ±50 % derived from the pid and
 in all). The backoff, not the raised bound, is what fixes it: 10 attempts without a pause still failed
 29 % and 8 % of starters across two 2-vCPU Linux runs. Neither branch changed the error contract.
 
-P0-C Slice 2a (2026-08-18) is this branch. It reshaped the mutation envelope's interfaces and its
-composition root so Slice 2b can drop in durable services as pure swaps — R1–R5, R7 and R8 from the
-2026-08-17 review, plus the sweep-once fix, the version-drift test and the two stale comments — under
-a zero-behavior-change rule with exactly two plan-ordered carve-outs, both strictly fail-safe and both
-pinned by this branch's own tests: R5's bounding turns a lock or backup service that never answers
-into a `LOCK_UNAVAILABLE`/`BACKUP_FAILED` refusal at the capability's timeout, where the dispatch used
-to hang forever (the three "never answers" tests in `tests/capabilities/mutation-envelope.test.ts`),
-and R7's guard turns a mutation-service construction failure into a read-only server, where startup
-used to crash (the degrade test in `tests/app/default-application.test.ts`). Nothing else moved: the
-envelope's step-order event list (`lock.acquire`, `preflight`,
-`audit.intent`, `backup.create`, `preflight`, `handler`, `verify`, `audit.result`, `lock.release`) is
-the canary for that rule and is byte-identical to the one on `main`. What each refactor delivered,
-and what it deliberately left to 2b, is in Task 3 below.
+P0-C Slice 2a (2026-08-18) landed on `main` at `1d4f049`. It reshaped the mutation envelope's
+interfaces and its composition root so Slice 2b could drop in durable services as pure swaps —
+R1–R5, R7 and R8 from the 2026-08-17 review, plus the sweep-once fix, the version-drift test and the
+two stale comments — under a zero-behavior-change rule with exactly two plan-ordered carve-outs, both
+strictly fail-safe and both pinned by its own tests: R5's bounding turns a lock or backup service
+that never answers into a `LOCK_UNAVAILABLE`/`BACKUP_FAILED` refusal at the capability's timeout,
+where the dispatch used to hang forever (the three "never answers" tests in
+`tests/capabilities/mutation-envelope.test.ts`), and R7's guard turns a mutation-service construction
+failure into a read-only server, where startup used to crash (the degrade test in
+`tests/app/default-application.test.ts`). Nothing else moved: the envelope's step-order event list
+(`lock.acquire`, `preflight`, `audit.intent`, `backup.create`, `preflight`, `handler`, `verify`,
+`audit.result`, `lock.release`) is the canary for that rule. What 2a delivered is the list right
+below; what it deliberately left to Slice 2b is the AS-LANDED record under Task 3 further down —
+every one of those items is now implemented, reviewed and gated on `p0c/slice2b-durable-state`.
+
+P0-C Slice 2b (2026-08-18/19) is this branch. It replaces the process-lifetime backup, audit and lock
+behind those same interfaces with durable ones, adds the retention and ancestor-ownership work the
+2a reviews required as prerequisites, and closes with a live proof that a stored backup actually
+restores. The kernel's canary stays exactly the list above through every task — only Task 1
+(`transactionId` threading) and Task 7 (the lock's `release(signal)` and retain-hook) touch
+`executeMutationEnvelope` at all, and both re-prove the byte-identical success order. Tasks 4–6 and 9
+change modules that sit entirely behind the `BackupService`/`AuditSink`/`MutationLockManager`
+interfaces 2a cut, so the kernel — and its canary — never sees them change.
 
 The remaining ordered work:
 
-### Task 1 — land this branch
+### Task 1 — land `p0c/slice2b-durable-state`
 
-0.1.1 is published (see the npm note at the top), so nothing here waits on a release and no `Release`
-workflow needs dispatching. What remains is to land `p0c/slice2a-envelope-prep` with the Task 2
-evidence sequence. The clamped-`rowCount` failure on large service pages, which a user still on 0.1.0
-can hit (observed live in the 2026-08-10 session), is fixed for anyone on 0.1.1. Three things about
-that landing:
+0.1.1 is published (see the npm note at the top) and this slice bumps no version, so nothing here
+waits on a release and no `Release` workflow needs dispatching. Landing is a controller step, in
+this order:
 
-- **`npm run verify` is expected green on this branch.** Unlike the Slice 1.1 landing there is no
-  expected-RED assertion: the sealed fixture already records 0.1.1, and nothing in this slice touches
-  the version claim.
-- **The tarball digest moved.** This slice changed `src/**`, so the real `npm run smoke:opencode`
-  must reseal before the candidate commit. `evidence:check` and `evidence:verify` are stale on the
-  branch by design and are cleared only by their real producers, in the Task 2 order; hand-editing
-  either document would fabricate evidence and is forbidden.
-- **Check that the first green `main` run actually executed the `evidence-freshness` job**, rather
-  than reporting green because an earlier step failed and the job never ran.
+1. Commit the plan file itself —
+   `git add -f docs/superpowers/plans/2026-08-18-p0c-slice2b-durable-mutation-state.md` — the same
+   thing 2a's own plan skipped until its final review; do not repeat that omission.
+2. Use `superpowers:finishing-a-development-branch` to merge fast-forward to `main`.
+3. **The tarball digest moved again.** Slice 2b.1 (Tasks 1–10) changed `src/**`, so the real
+   `npm run smoke:opencode` must reseal before the candidate commit, exactly as it did for 2a; Slice
+   2b.2 (Tasks 11–13) touches no `src/**`, so it does not move the digest a second time. Confirm full
+   gates green on the resealed tree.
+4. **Before running any script that starts a real server or VM without an explicit
+   `OPNSENSE_MCP_STATE_DIR` and `HOME` override,** stub a scratch state directory or plan to clean up
+   afterward: `scripts/run-opencode-smoke.mjs` and the VM lifecycle scripts now spawn a server that,
+   with a configured target, opens the **durable** state root at its real platform default —
+   `~/Library/Application Support/opnsense-mcp` on the workstation that lands this — and a landing
+   run that skips this would write real durable state into the operator's own home directory rather
+   than a disposable one.
+5. Candidate fixture commit, then the real `npm run vm:product3` against it — this renews the now
+   twice-stale alias attestation (see "VM evidence state" at the top) — then its own attestation
+   commit.
+6. **Live restore proof.** Run the real restore producer —
+   `node scripts/vm/product3-restore.mjs --attestation-out "$PWD/docs/evidence/product3-restore-vm.json"` —
+   then commit `docs/evidence/product3-restore-vm.json` on its own, exactly as the alias producer's
+   evidence is committed alone. Then `npm run evidence:verify` **and** `npm run evidence:check` must
+   both return `0`. This is the first live run of the QMP-reset-and-console-overwrite mechanism
+   Task 11 could only prove through injected seams offline; if the live probe that the guest
+   re-imports `/conf/config.xml` on boot does not hold, the producer's own `failureStage` says so —
+   never hand-edit, synthesize or bypass the evidence.
+7. Push, then confirm all four CI jobs actually executed (`parallel`, `installed-package`,
+   `opencode-runner`, `evidence-freshness`) rather than reporting green because an earlier step
+   failed and a later job never ran. No release this slice — 0.1.1 is already on npm.
+8. Track the **sweep-once 2-vCPU Linux verification** (see the drift-test/sweep-once note under
+   Task 3 below) as a separate errand once landed; record its result in the Slice 2b ledger when it
+   lands, and do not shrink the identity-key retry budget before then.
+
+Watch three jobs on the landing push specifically, because each exercises a path this darwin
+workstation could only fake or skip: the kernel lock's `flock` branch (Task 6 — this host has no
+`/usr/bin/flock` to test against; `/dev/fd/<n>` also reopens on Linux where darwin dups it), the
+ancestor walk's spelled-path check under a **real** `/tmp` (Task 10 — this workstation's spelled walk
+crosses a root-owned symlink hop first; Linux's does not), and the durable state root's real platform
+default directory (Task 8 — `vitest` never truly creates `~/Library` or `~/.local/state`).
 
 ### Task 2 — evidence renewal sequence for any publishable candidate
 
@@ -527,7 +650,7 @@ git status --porcelain=v1 --untracked-files=all   # MUST be empty, the producer 
 npm run vm:product3 -- --attestation-out "$PWD/docs/evidence/product3-vm.json"
 git add docs/evidence/product3-vm.json
 git commit -m "docs: renew Product 3 VM attestation"
-npm run evidence:verify                       # MUST return 0
+npm run evidence:verify                       # 0 once every evidence file this repo tracks is fresh
 git push origin main
 ```
 
@@ -537,17 +660,21 @@ every path; never hand-edit, synthesize or bypass the evidence. CI runs both evi
 `evidence-freshness` job that nothing gates and that gates nothing, so a stale seal reddens that job
 alone and the conformance signal survives. `release.yml` runs both inline before publishing. A stale
 OpenCode seal therefore no longer passes CI silently — and CI cannot clear it either, because only
-the real `npm run smoke:opencode` can re-seal, so the reseal must land before the push.
+the real `npm run smoke:opencode` can re-seal, so the reseal must land before the push. Since Slice
+2b, `evidence:verify` checks every evidence file this repository tracks (two, as of this slice: the
+alias and restore round-trips), so a candidate that adds a scenario runs this sequence's VM-producer
+half once per scenario, each with its own attestation commit, before the final `evidence:verify`.
 
-### Task 3 — write the P0-C Slice 2b plan
+### Task 3 — P0-C Slice 2b: what landed
 
-The next vertical is P0-C Slice 2b: the durable backup root, the durable backup, audit and lock
-implementations behind the interfaces Slice 2a reshaped, and the inter-process kernel-backed lock.
-Write the plan with `superpowers:writing-plans` from the approved design in
-[`2026-07-25-post-cutover-p0-hardening-design.md`](superpowers/specs/2026-07-25-post-cutover-p0-hardening-design.md),
-then implement it TDD-first.
-
-Slice 2a already delivered, so the plan starts from these rather than repeating them:
+Slice 2b's plan —
+[`2026-08-18-p0c-slice2b-durable-mutation-state.md`](superpowers/plans/2026-08-18-p0c-slice2b-durable-mutation-state.md),
+written from the approved design in
+[`2026-07-25-post-cutover-p0-hardening-design.md`](superpowers/specs/2026-07-25-post-cutover-p0-hardening-design.md)
+— implemented the durable backup root, the durable backup, audit and lock behind the interfaces
+Slice 2a reshaped, and the inter-process kernel-backed lock, TDD-first across 12 reviewed
+implementation tasks (Tasks 1–12) plus this documentation task (Task 13). It started from what
+Slice 2a had already delivered:
 
 - R1 — the lock release left the `finally`. Every path assigns one `result` and breaks a single
   labeled block, so the release runs once, sequentially, after the terminal audit; a release that
@@ -572,58 +699,141 @@ Slice 2a already delivered, so the plan starts from these rather than repeating 
 - The identity-key sweep runs once per `ensureIdentityKey` call instead of once per retry; the
   version-drift test (`tests/foundation/version-drift.test.ts`) exists; both stale comments are true.
 
-The plan must carry these forward — they are requirements, not suggestions:
+Every one of the carry-overs Slice 2a's reviews demanded is now implemented, reviewed and gated on
+this branch:
 
-- **Unsafe-ancestor validation: decide it.** `ensurePrivateDirectory` validates the canonical path
-  and the leaf's owner and mode, but never walks ancestor ownership or writability. Slice 1.1 raised
-  the stakes rather than lowering them: at the new `openResolvedStateRoot` entry a symlinked
-  **ancestor** converts from fail-closed to fail-open — the path now resolves and the code proceeds,
-  so `identity.key` can land wherever a same-uid ancestor redirect points. Slice 2 must either
-  implement the ancestor walk or record an explicit scope ruling that weighs exactly that delta.
-- **R6 — the durable backup root** replacing the tmpdir store, together with the durable backup,
-  append-only audit and kernel-backed lock behind the interfaces above.
-- **Backup content is never verified — a prerequisite of R6, not a nicety.** `create` computes a
-  sha256 of the bytes it just wrote and discards it; nothing persists the digest or the length. So
-  `exists` proves presence and privacy only — id pattern, `O_RDONLY | O_NOFOLLOW` open, `fstat`,
-  `nlink === 1` — and never reads a byte, while the kernel treats `exists === true` as "backup
-  verified" (`kernel.ts:1751`; its false branch at `:1760-1764` is the `BACKUP_FAILED` refusal).
-  2b must persist the create-time digest and make the check read it, and must close the mode gap
-  too: `exists` skips the 0600 check, so a post-write `chmod` is invisible. Two red-if-fixed pins in
-  `tests/capabilities/envelope/config-backup.test.ts` record today's behavior and fail the moment it
-  improves.
-- **R9 — extend the audit `ALLOWED_KEYS`,** deliberately deferred to 2b alongside its durable
-  consumer, because widening the allow-list without one adds dead surface. The type extension point
-  is prepared by `BackupRequest`.
-- **`transactionId` is missing from both `BackupRequest` and `AuditRecord`** — the one spec field a
-  service cannot synthesize. 2b adds it to both, symmetrically.
-- **Separate target-reachability from write-availability in the catalogue.** `catalog.ts`, which
-  exposes the writes, and `opnsense/list.ts`, which reads, both key off the single
-  `aliasAdapter.available` flag, so R7's fail-closed degrade takes alias _reads_ down with the
-  writes. On win32 `openResolvedStateRoot` throws unconditionally, so in 2b that degrade becomes the
-  ordinary win32 path: shipping it unsplit hands every Windows operator a read regression — the exact
-  opposite of what R7 exists to buy. A red-if-fixed pin sits in the degrade test in
-  `tests/app/default-application.test.ts`.
-- **Canonicalize the origin seam.** R8 passes `parsed.url` verbatim; 2b must canonicalize it before
-  deriving a target id from it.
-- **Make `catalog.listAll` required.** Its optionality weakens two guards that fall back to an empty
-  list when it is absent: the holdings evidence at `kernel.ts:1989` and the
-  `sealUnavailableCapabilities` dedup.
-- **Require signal honouring in the service contracts.** `runBounded` bounds the wait, not the
-  operation, so a durable service that ignores its signal is still unbounded. `release()` takes no
-  signal at all and cannot be truly bounded. An `acquire` aborted after the manager granted the
-  handle leaks it, since the runner discards the value; use `runOperation`'s retain-hook precedent in
-  the 2b lock contract.
-- **Verify sweep-once on Linux.** The darwin stress characterizes the mechanism — targeted transients
-  roughly halved under staggered arrival — but darwin cannot reproduce this failure class at all, so
-  it is not fix verification. Re-running the 2-vCPU Linux retry-margin procedure against the
-  sweep-once tree is what settles it, and is a candidate for the 2b exit gate; the retry budget was
-  deliberately not shrunk before that evidence exists. Recorded and unimplemented: an inode-scoped
-  retry sweep, restricted to candidates that share the published key's inode, would recover
-  peer-crash-mid-publication residue without ever touching a live candidate.
-- **Drift-test scope.** It covers 6 files and 7 literals. The 0.1.1 bump touched 13 sites; the rest
-  are sealed evidence and client-identity pins, excluded on purpose, since re-pinning them would
-  erase the difference they exist to expose. The assertion is substring containment, so a site that
-  read `0.1.11` would satisfy version `0.1.1`.
+- **Unsafe-ancestor validation: implemented.** `openResolvedStateRoot` now walks every ancestor
+  directory, over BOTH the spelled path (checked pre-create, so a same-uid symlinked ancestor is
+  visible and a refusal there leaves nothing behind) and the canonical path (checked after
+  `realpathSync`, the far side of a tolerated root-owned symlink such as macOS's `tmpdir()` through
+  `/private`): each component must be a directory, not a symlink unless root-owned (the platform's
+  own layout), owned by root or the current uid, and not group/other-writable — with one deliberate,
+  disclosed exemption: a root-owned **sticky** world-writable directory (`/tmp`, `/var/tmp`,
+  `/dev/shm`) is tolerated, because the kernel already forbids renaming or removing an entry you do
+  not own there, and every component the walk visits is still ownership-checked regardless. This is
+  what keeps CI's `/tmp` (mode `1777`) usable without weakening the check anywhere it matters. The
+  comment above the walk in `src/state/state-root.ts` records this ruling and no longer says "decide
+  it". TOCTOU between the walk and the leaf's own creation is explicitly not closed — closing it needs
+  `configure.ts`-style fd-held revalidation, out of this slice's brief — and is bounded instead by the
+  leaf's own `O_NOFOLLOW` open, uid check and `0700` mode.
+- **R6 — the durable backup root: implemented.** The shutdown-scoped tmpdir store is gone. Durable
+  state now lives at `targets/<targetId>/{backups,audit,lock}` under the state root Slice 1
+  introduced — directories `0700`, files `0600` throughout — wired by the composition root's one
+  eager, fail-closed helper (`buildMutationServices`) that Slice 2a's R7 guard already made degrade
+  to read-only instead of crash on any construction fault. This surfaced a ship-gap the same review
+  caught and closed: `tsconfig.build.json` compiles only `src/**/*.ts`, so the kernel lock's waiter
+  (`lock-waiter.mjs`, already plain JavaScript) would never have reached `dist/` or the npm tarball —
+  an installed package would have refused every mutation while every in-repo test, which resolves the
+  waiter from `src/`, stayed green. `scripts/copy-runtime-assets.mjs` now copies `src/**/*.mjs` into
+  `dist/` after the TypeScript compile closes that gap.
+- **Backup content is now verified — the two red-if-fixed pins flipped.** `create` persists the
+  sha256 digest and byte length it computed, in a `metadata.json` sibling to `config.xml` inside
+  `<backupId>/`, published by writing and fsyncing both files into a private staging directory and
+  only then renaming that directory into place — atomic, so a crash anywhere before the rename leaves
+  residue, never a half-written backup. `exists` now reopens both files `O_RDONLY|O_NOFOLLOW`,
+  revalidates owner, `nlink === 1` and `0600` mode on each, and answers `true` only when the stored
+  bytes still hash to the stored digest — a truncated backup, a flipped byte, or a mode widened after
+  the write are each now `false`, closing the mode gap the old `exists` could not see. Any fault at
+  all is `false`; the configuration bytes and the backup id never cross the MCP boundary.
+- **Retention: implemented**, running inside `backup.create` rather than literally "before a new
+  intent" as the design spec's prose has it (a deliberate, adjudicated deviation — see below). It
+  keeps the newest 100 **and** the last 30 days of _resolved_ backups (a backup is resolved once its
+  transaction has a terminal `result` line anywhere in the audit trail; an unresolved one is never
+  purged, because it is exactly what a reconciliation would need), and audit segments for 365 days,
+  preserving any segment holding an unresolved transaction however old it is. Two retention corner
+  cases both retain rather than delete, by design, with no operator-visible cause: a backup that
+  resolves inside an audit segment already past the 365-day cutoff, and a backup directory holding
+  its `metadata.json` plus an unrelated stray file but no `config.xml`, are both kept forever rather
+  than risk destroying state retention cannot fully account for.
+- **R9 — `ALLOWED_KEYS` extended: implemented,** together with its durable consumer (the append-only
+  audit sink, next) — no dead surface, per the original deferral's own reasoning.
+- **`transactionId` on both `BackupRequest` and `AuditRecord`: implemented.** The kernel generates
+  one 128-bit (32-lowercase-hex) id per envelope run and threads the identical value into the intent
+  audit, the result audit and the backup request — pinned by a test asserting the same id reaches all
+  three and that two different dispatches never share one.
+- **Target-reachability is now separate from write-availability in the catalogue: implemented.**
+  `createProductCapabilityCatalog` takes a third parameter, `exposeAliasWrites`, defaulting to the
+  alias adapter's own `available` flag so the common case is unchanged; the composition root now
+  passes a **reachable** alias adapter with `exposeAliasWrites: false` whenever the target answers
+  but the local mutation machinery could not be built, so alias reads survive a failed backup root
+  instead of dying with the writes. On win32, where `openResolvedStateRoot` still throws
+  unconditionally, this degrade is now the **ordinary** path rather than a full read regression.
+- **The origin seam is now canonicalized before deriving a target id: implemented.**
+  `buildMutationServices` calls `deriveTargetId(ensureIdentityKey(root), canonicalizeOrigin(origin))`
+  at the seam, closing the gap where R8 had passed `parsed.url` verbatim.
+- **`catalog.listAll` is now required: implemented.** Both `?? []` fallbacks (the holdings evidence
+  and the `sealUnavailableCapabilities` dedup) are gone; a `CapabilityCatalogView` double without
+  `listAll` fails to compile rather than silently falling back to an empty list.
+- **Signal honouring in the service contracts: implemented.** `LockHandle.release(signal)` now takes
+  the release runner's own signal — both the in-process and the kernel-backed manager honour it — and
+  a late-granted lock (one whose `acquire` resolves just as its bound fires) is released rather than
+  leaked, mirroring `runOperation`'s retain-hook precedent. The success path is unchanged, so the
+  canary stayed byte-identical through this change too.
+- **A read-only server now writes to disk at startup, when a target is configured.**
+  `buildMutationServices` runs eagerly regardless of `READ_ONLY` — that eagerness predates 2b (R7) —
+  but it now runs against the **durable** state root instead of a process-scoped tmpdir, so a
+  read-only server with a configured target persists the identity key and creates the (empty) target
+  directory tree on every startup, even though it never intends to write a backup. Expected behavior,
+  not a defect.
+- **Operator-visible consequence of the ancestor ruling.** A state root behind an unsafe ancestor now
+  silently degrades the server to read-only with the same static message R7 already used for every
+  other construction fault — nothing distinguishes the cause. Named explicitly: an operator whose
+  **`$HOME` is itself a symlink** gets every write tool withheld with no explanation pointing at why.
+  Pinned, intended behavior (R7/Task 8), not a bug; a distinguishing diagnostic is Slice-3 territory,
+  below.
+- **Sweep-once on Linux: still open, and deliberately not a 2b gate.** The user adjudicated this on
+  2026-08-18 (Open Question 5): verifying the sweep-once identity-key fix under the 2-vCPU Linux
+  procedure that originally found the retry-margin flake is a **separate tracked errand**, not a
+  Slice 2b exit gate, because the sweep-once fix already landed in Slice 2a and is independent of
+  2b's durable work. The retry budget (10 attempts, jittered backoff) stays exactly as Slice 2a left
+  it until that Linux evidence exists; record the result in the Slice 2b implementation ledger when
+  it lands. Recorded and still unimplemented: an inode-scoped retry sweep, restricted to candidates
+  that share the published key's inode, would recover peer-crash-mid-publication residue without
+  ever touching a live candidate.
+- **Drift-test scope**, carried forward unchanged because Slice 2b ships no version bump and touches
+  none of its files: it covers 6 files and 7 literals. The 0.1.1 bump touched 13 sites; the rest are
+  sealed evidence and client-identity pins, excluded on purpose, since re-pinning them would erase
+  the difference they exist to expose. The assertion is substring containment, so a site that read
+  `0.1.11` would satisfy version `0.1.1`.
+
+**Deviations recorded honestly** (mirroring the 2a AS-LANDED convention — disclosed, not hidden):
+
+- **Retention runs inside `backup.create`**, not literally "before a new intent" as the design
+  spec's prose has it — adjudicated by the user (Open Question 4, 2026-08-18) specifically to keep
+  the mutation envelope's step-order canary byte-identical; the refusal-before-first-write guarantee
+  the spec cares about is preserved regardless of which step number performs it.
+- **The ancestor ruling, as implemented, includes one disclosed exemption**: a root-owned sticky
+  world-writable directory is tolerated (see above) — provisionally accepted because the strict
+  alternative reddens `/tmp`-based tests and CI tmpdirs on every platform that follows the POSIX
+  sticky-bit convention, and every component the walk visits is still ownership-checked regardless.
+- **Task 11's restore script drives its own bespoke REST session** instead of reusing
+  `product3-alias.mjs`'s `runInstalledAliasLifecycle` — endorsed, because that helper REST-deletes
+  the alias at the end of its cycle, which would make the restore scenario's `stateReverted` check
+  vacuous (unable to distinguish a state reverted by the restore from one deleted by the lifecycle
+  helper's own cleanup), and because the helper's environment cannot inject the scenario-owned
+  `OPNSENSE_MCP_STATE_DIR` the restore backup store needs.
+- **Task 12 widened Task 11's restore script by exactly one authorized wiring edit**: the live
+  attestation writer now defaults through the new `serializeVmRestoreAttestation` rather than the
+  alias serializer `writeVmAttestationAtomic` hard-codes, because no other seam exists for it. A plan
+  amendment the controller recorded explicitly, not scope creep.
+
+**Deferred, not forgotten:**
+
+- The backup metadata's TLS-context digest — the design spec names it, but persisting it needs a
+  `BackupRequest` field this slice's brief did not authorize adding; deferred until a slice that does.
+- The `reconcile --json` CLI, and reconciliation for unresolved transactions generally — no CLI
+  exists; the restore round-trip is this slice's exit-gate proof instead, per the plan's own
+  non-goals.
+- Restore as an MCP tool remains a non-goal and a future slice's architecture decision, not an
+  oversight — the `restore` feature flag already exists in `src/config/feature-flags.ts`, unused;
+  restore stays SSH/console-side.
+- The README's restore paragraph (next to the Product 3 attestation claims) carries no "does not
+  prove" sentence of its own — the controller kept the existing text this slice, because the sentence
+  immediately above it already targets the alias attestation and remains equally true of the restore
+  attestation. A follow-up nicety for whenever that paragraph is next touched, not a todo.
+- Evidence state for both attestations is recorded at the top of this document ("VM evidence state")
+  and under "What has been proved on the disposable VM" above; both files must be independently
+  renewed at landing.
 
 Deferred to Slice 3, where the refusal vocabulary is opened:
 
@@ -651,14 +861,95 @@ Deferred to Slice 3, where the refusal vocabulary is opened:
   leaves through `finishWith`" was checked by hand once, when the helper landed. Slice 3 must encode
   it as an execution-boundary source-text test, or the invariant decays the first time someone adds
   a branch — and the eleven-versus-nine drift above is what that decay looks like.
+- **`TARGET_UNAVAILABLE` is misleading once writes are sealed but the target is reachable.** With
+  Slice 2b's catalogue split, a caller who still forges or dispatches `opn_create` against a
+  sealed-but-reachable target is refused `TARGET_UNAVAILABLE` (`kernel.ts:1334`, hard-coded) — wrong:
+  the target IS available, the local mutation envelope is not. This is what a win32 operator, or any
+  operator whose backup root failed, now sees. Refusal vocabulary is Slice 3 territory; fold this in
+  rather than patching the single site.
+- **`'unconfirmed'` lock-release outcomes need teeth.** The kernel already records whether a release
+  was `'released'` or `'unconfirmed'` but does not act on it (R2, Slice 2a) — the kernel-backed
+  lock's own abort path can report `'unconfirmed'` even when the helper had, in fact, already
+  exited, which is conservative and today unreachable (the kernel always hands the release a fresh,
+  unfired signal). Slice 3 giving `'unconfirmed'` teeth needs this distinction to matter first.
+- **A diagnostic at the composition seam.** `default-application.ts`'s `buildMutationServices`
+  swallows every construction fault into one `catch { return undefined; }` (line 155), so the
+  operator-visible degrade above carries no cause. Slice 3 should add a diagnostic at that seam —
+  logged, never surfaced to the MCP caller — so "unsafe ancestor", "unwritable root", "no lock
+  helper" and "unsupported platform" stop being indistinguishable from the outside.
+
+**Slice 2b ledger entry, for this document's own record** (the full task-by-task history, including
+every review finding, is in the Slice 2b implementation ledger linked in "Read these files first"):
+
+What changed: the durable layout `targets/<targetId>/{backups,audit,lock}` (directories `0700`,
+files `0600`) replaced the shutdown-scoped tmpdir store; backups are staged, fsynced and renamed into
+place, then content-verified on every `exists` call; the audit trail is an append-only monthly JSONL
+log whose corruption polarity is the _opposite_ of the backup store's — a backup that cannot be
+verified is reported absent and the mutation is refused, while an audit line that is too large, or
+whose segment fails its integrity checks, _throws_, because a silently-incomplete audit trail is
+worse than a mutation that does not happen; the lock is now kernel-backed and inter-process
+(`/usr/bin/lockf -s -t 4 /dev/fd/3` on darwin, `/usr/bin/flock -x -w 4 /dev/fd/3` on Linux) held by a
+long-lived, argv-free and env-free waiter process that inherits only the validated lock descriptor,
+so neither the lock path nor the target ever appears in `ps` output; retention keeps the newest 100
+and last 30 days of resolved backups and 365 days of audit segments, never purging anything
+unresolved; the catalogue separates target-reachability from write-availability; the origin seam is
+canonicalized before a target id is derived from it; `catalog.listAll` is required; `transactionId`
+(32-hex) threads from one kernel-generated value through both audits and the backup request; the
+state root walks ancestor ownership both ways (spelled and canonical); and the restore round-trip
+scenario (`scripts/vm/product3-restore.mjs`) plus its evidence plumbing (the two-file-aware verifier,
+`buildVmRestoreAttestation`) prove a backup is actually restorable, not merely present.
+
+The canary — the mutation envelope's fixed success-path event list, `lock.acquire`, `preflight`,
+`audit.intent`, `backup.create`, `preflight`, `handler`, `verify`, `audit.result`, `lock.release` —
+stayed byte-identical (`7e6d085af5111f34ceace93ef780e473`) through all thirteen tasks; only Tasks 1
+and 7 touch `executeMutationEnvelope` at all, and both re-proved it.
+
+Lock probe facts worth keeping close to the code they explain: a contended `lockf -t 5` returns at
+~5011 ms, 11 ms past a 5000 ms watchdog, which is why the helper's own wait is `-t 4` — strictly
+inside the manager's 5 s bound, never equal to it; macOS SIGKILLs a platform binary that is copied
+instead of executed in place (System Integrity Protection), so the lock test's own trust-boundary
+control is a `#!/bin/sh` wrapper that `exec`s the real `lockf`, never a copy of it; `writeFileSync`'s
+mode argument is umask-masked, so a test that plants permission bits through it alone is silently
+testing nothing — `chmodSync` is required after; `/dev/fd/<n>` is a `dup` of the inherited descriptor
+on darwin but a fresh reopen on Linux, inverting a descriptor-ownership nuance the landing push's
+Linux CI run is the first real exercise of; and `os.homedir()` answers `''` when `HOME` is set to
+one, which would otherwise default the state root to a **relative** path rooted at whatever directory
+the server happened to start in — guarded explicitly, refusing rather than accepting it.
+
+The user adjudicated five open questions on 2026-08-18, all before implementation began, and the
+recommended option governed in every case: (1) implement the unsafe-ancestor walk; (2) the restore
+mechanism is a scenario-scoped QEMU QMP monitor plus `system_reset` and the proven single-user-console
+overwrite of `/conf/config.xml`, with a live probe that the guest re-imports it on boot; (3) a sibling
+`product3-restore.mjs` script with its own new evidence file, leaving the alias producer and its
+evidence untouched; (4) retention runs inside `backup.create`; (5) sweep-once Linux verification is a
+separate tracked errand, not a 2b exit gate. Two further adjudications arrived mid-implementation,
+both recorded under Deviations above: the sticky-directory ancestor exemption (provisionally
+accepted), and Task 11's bespoke REST session in place of the alias lifecycle helper (endorsed).
+
+Gates: `npm run license:check && npm run verify && npm run test:conformance && git diff --check` all
+exit `0` (1350 tests passed across 66 files at this document's own commit; `evidence:check` and
+`evidence:verify` are stale on this branch by design, restored only by the landing sequence's real
+producers, and live outside `verify`'s own test projects, so their staleness does not affect it).
 
 The two concurrent-first-start races that Slice 1 parked are **closed** by Slice 1.1 (ENOENT-tolerant
 sweep, bounded retry, and a real multi-process race test) and are no longer carried.
 
-**DeepEval write scenarios** remain the alternative vertical: extend `evals/` with the reversible
-alias lifecycle under deterministic MCP readback and the Elicitation-gated confirmation, per the
-written specification. Do not start both in the same worktree — they touch lifecycle, evidence and
-mutation contracts that need a clear ordering or isolated worktrees.
+### Task 4 — the next vertical, once 2b lands
+
+Two independent verticals remain, and only one should be started per worktree — they touch
+lifecycle, evidence and mutation contracts that need a clear ordering or isolated worktrees:
+
+- **P0-C Slice 3** — opens the refusal vocabulary the mutation envelope has kept closed since Slice
+  2: `AUDIT_RESULT_FAILED`/`LOCK_RELEASE_FAILED` semantics, hoisting the success audit out of the
+  parse `try`, distinguishing `EXECUTION_FAILED` from an upstream 403, deciding which steps a caller
+  abort should surface as `CANCELLED`, encoding R3's single-helper invariant as a source-text test,
+  and the three carries Slice 2b added — the misleading `TARGET_UNAVAILABLE` for sealed-but-reachable
+  writes, giving `'unconfirmed'` release outcomes teeth, and a diagnostic at the composition seam —
+  the full list is under "Deferred to Slice 3" above. It should also pick up reconciliation for
+  unresolved transactions (the `reconcile --json` CLI), indeterminate-write classification and exact
+  alias syntax, none of which 2b's brief authorized.
+- **DeepEval write scenarios** — extend `evals/` with the reversible alias lifecycle under
+  deterministic MCP readback and the Elicitation-gated confirmation, per the written specification.
 
 The serial-bootstrap fix (`7ad2684`) and the credential-free bootstrap are proved by direct
 measurement and recorded in `.superpowers/sdd/progress.md`; the superseded password-path
@@ -668,8 +959,8 @@ instructions found in older handoffs must not be executed.
 
 ```text
 Resume OPNSenseMCP. main is the published branch and carries P0-C Slice 1, its 1.1 hardening, the
-identity-key retry margin and the 0.1.1 version bump; p0c/slice2a-envelope-prep carries the P0-C
-Slice 2a envelope prep refactors and has not landed yet.
+identity-key retry margin, the 0.1.1 version bump and P0-C Slice 2a (envelope prep refactors);
+p0c/slice2b-durable-state carries P0-C Slice 2b, durable mutation state, and has not landed yet.
 
 Start by reading, in full:
 1. AGENTS.md
@@ -679,7 +970,8 @@ Start by reading, in full:
 5. docs/superpowers/specs/2026-07-28-deepeval-opnsense-agent-evaluation-design.md
 6. docs/provenance/migration-manifest.json
 7. docs/superpowers/plans/2026-07-19-private-provenance-contract-preflight.md
-8. .superpowers/sdd/progress.md
+8. .superpowers/sdd/progress.md (through Slice 2a) and
+   .superpowers/sdd/2026-08-18-p0c-slice2b-durable-mutation-state/progress.md (Slice 2b)
 
 Use Node >=22.19 and <23. On macOS with Homebrew that is PATH=/opt/homebrew/opt/node@22/bin:$PATH;
 elsewhere select an equivalent Node 22 and never validate with the default Node.
@@ -691,20 +983,25 @@ npm run vm:prepare-image does that step alone.
 Before changing anything, report:
 - current branch, HEAD, upstream and worktree status;
 - npm run evidence:verify AND npm run evidence:check exit statuses (CI runs both: evidence:verify in
-  the verify job, evidence:check in its own independent evidence-freshness job);
+  the verify job, evidence:check in its own independent evidence-freshness job); evidence:verify now
+  checks TWO evidence files (alias round-trip and restore round-trip) and fails if either is wrong;
 - which P0 increment is actually complete;
 - the exact provenance status of tests/agentic/**.
 
 0.1.1 is already published to npm (2026-08-18, GitHub Release v0.1.1 -> release.yml -> OIDC publish);
-do not dispatch a release for it. The open task is landing p0c/slice2a-envelope-prep. Follow
-"Immediate next-session objective / Task 1", using the Task 2 evidence renewal sequence for the
-candidate: gates, real smoke:opencode, evidence:check 0, commit the candidate, real vm:product3,
-commit only docs/evidence/product3-vm.json, evidence:verify 0, push. On p0c/slice2a-envelope-prep
-npm run verify is expected green; the two evidence gates are stale by design until their real
-producers run, and neither sealed document may be hand-edited.
+do not dispatch a release for it, and Slice 2b lands no version bump. The open task is landing
+p0c/slice2b-durable-state. Follow "Immediate next-session objective / Task 1": commit the plan file
+itself, finishing-a-development-branch merge to main, real smoke:opencode reseal (Slice 2b.1 changed
+src/**) with full gates green, stub a scratch state directory before running any script that starts a
+real server/VM without an explicit OPNSENSE_MCP_STATE_DIR, then run the Task 2 evidence sequence
+TWICE at landing — real vm:product3 (alias) with its own attestation commit, then the real restore
+producer (node scripts/vm/product3-restore.mjs --attestation-out ...) with its own attestation commit
+— until both evidence:verify and evidence:check return 0, then push and confirm all four CI jobs ran.
+Track the sweep-once 2-vCPU Linux verification as a separate errand, not a landing blocker.
 
-After that, write the P0-C Slice 2b plan with its required carry-overs, or take the DeepEval write
-scenarios — never both in the same worktree. A successful tool result without a changed VM must fail.
+After that, take P0-C Slice 3 (the refusal-vocabulary work listed under "Deferred to Slice 3" in this
+document) or the DeepEval write scenarios — never both in the same worktree. A successful tool result
+without a changed VM must fail.
 
 Do not restore legacy tests/agentic files, execute superseded plans, start implementation before
 written-spec approval, or claim a VM/agentic result without running its real producer and cleanup.

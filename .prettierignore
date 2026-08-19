@@ -7,6 +7,7 @@ package-lock.json
 docs/superpowers/
 .superpowers/
 docs/evidence/product3-vm.json
+docs/evidence/product3-restore-vm.json
 evals/.venv/
 .deepeval/
 evals/groundtruth/read-surface.jsonl
