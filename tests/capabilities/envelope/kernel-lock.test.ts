@@ -56,6 +56,10 @@ const BOUNDED_MS = 10_000;
 // This one has to be tight enough to MEAN something: it must sit well below the module's own
 // five-second release bound, or an implementation that ignored the signal would pass it too.
 const ABORTED_RELEASE_MS = 1_000;
+// Tighter still, and deliberately so: once the socket is closed there is nothing left to wait for,
+// so a second manager should win the flock almost immediately. A bound this close only fails if the
+// close never happened.
+const REACQUIRE_MS = 100;
 
 const signal = new AbortController().signal;
 
@@ -196,6 +200,26 @@ describe('kernel-backed mutation lock manager', () => {
       const exit = once(child, 'exit');
       child.kill('SIGKILL');
       await exit;
+    }
+  );
+
+  it.skipIf(noKernelHelper)(
+    'closes the socket before it consults an already-aborted signal',
+    async () => {
+      // The code comment's claim, pinned: even when there is no budget left to confirm the exit,
+      // the socket must already be closed by the time this resolves, or the helper is never told to
+      // let go and the lock it holds outlives the caller that gave up on confirming it.
+      const manager = createKernelMutationLockManager(lockPath);
+      const handle = await acquire(manager);
+      expect(handle).not.toBeNull();
+
+      const controller = new AbortController();
+      controller.abort();
+      expect(await handle?.release(controller.signal)).toBe('unconfirmed');
+
+      const startedAt = Date.now();
+      expect(await acquire(createKernelMutationLockManager(lockPath))).not.toBeNull();
+      expect(Date.now() - startedAt).toBeLessThan(REACQUIRE_MS);
     }
   );
 

@@ -594,25 +594,26 @@ The remaining ordered work:
 waits on a release and no `Release` workflow needs dispatching. Landing is a controller step, in
 this order:
 
-1. Commit the plan file itself —
-   `git add -f docs/superpowers/plans/2026-08-18-p0c-slice2b-durable-mutation-state.md` — the same
-   thing 2a's own plan skipped until its final review; do not repeat that omission.
+1. Verify the plan file is committed (it is, at `959de45`, the branch's first commit) — the same
+   thing 2a's own plan skipped until its final review; this slice did not repeat that omission.
 2. Use `superpowers:finishing-a-development-branch` to merge fast-forward to `main`.
-3. **The tarball digest moved again.** Slice 2b.1 (Tasks 1–10) changed `src/**`, so the real
-   `npm run smoke:opencode` must reseal before the candidate commit, exactly as it did for 2a; Slice
-   2b.2 (Tasks 11–13) touches no `src/**`, so it does not move the digest a second time. Confirm full
-   gates green on the resealed tree.
-4. **Before running any script that starts a real server or VM without an explicit
+3. **Before running any script that starts a real server or VM without an explicit
    `OPNSENSE_MCP_STATE_DIR` and `HOME` override,** stub a scratch state directory or plan to clean up
    afterward: `scripts/run-opencode-smoke.mjs` and the VM lifecycle scripts now spawn a server that,
    with a configured target, opens the **durable** state root at its real platform default —
    `~/Library/Application Support/opnsense-mcp` on the workstation that lands this — and a landing
    run that skips this would write real durable state into the operator's own home directory rather
    than a disposable one.
+4. **The tarball digest moved again.** Slice 2b.1 (Tasks 1–10) changed `src/**`, so the real
+   `npm run smoke:opencode` must reseal before the candidate commit, exactly as it did for 2a; Slice
+   2b.2 (Tasks 11–13) touches no `src/**`, so it does not move the digest a second time. Confirm full
+   gates green on the resealed tree.
 5. Candidate fixture commit, then the real `npm run vm:product3` against it — this renews the now
    twice-stale alias attestation (see "VM evidence state" at the top) — then its own attestation
    commit.
-6. **Live restore proof.** Run the real restore producer —
+6. **Live restore proof.** This step runs only once step 5's attestation commit has landed: like the
+   alias producer, the restore producer refuses on a dirty worktree, and step 5's commit is what
+   clears it. Run the real restore producer —
    `node scripts/vm/product3-restore.mjs --attestation-out "$PWD/docs/evidence/product3-restore-vm.json"` —
    then commit `docs/evidence/product3-restore-vm.json` on its own, exactly as the alias producer's
    evidence is committed alone. Then `npm run evidence:verify` **and** `npm run evidence:check` must
@@ -885,6 +886,11 @@ Deferred to Slice 3, where the refusal vocabulary is opened:
   operator-visible degrade above carries no cause. Slice 3 should add a diagnostic at that seam —
   logged, never surfaced to the MCP caller — so "unsafe ancestor", "unwritable root", "no lock
   helper" and "unsupported platform" stop being indistinguishable from the outside.
+- **`effectiveResourceScopes` is unbounded against the audit line's 4096-byte cap.** The durable
+  audit line is capped at 4096 bytes and `effectiveResourceScopes` is unbounded in the shared
+  validator; a capability whose scope set approaches the cap refuses every mutation as
+  `EXECUTION_FAILED` at the intent record — loud, fail-closed; revisit as a count bound at
+  authorization time when Slice 3 opens the vocabulary.
 
 **Slice 2b ledger entry, for this document's own record** (the full task-by-task history, including
 every review finding, is in the Slice 2b implementation ledger linked in "Read these files first"):

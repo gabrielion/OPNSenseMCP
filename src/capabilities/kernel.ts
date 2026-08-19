@@ -293,8 +293,10 @@ export interface CapabilityCatalogView {
   getByMcpName(name: string): CapabilityDefinition | undefined;
   listExposed(context: ExposureContext): readonly CapabilityDefinition[];
   /**
-   * Every capability the catalogue holds, exposed or not. Used ONLY by the construction-time
-   * envelope-services guard, which must not depend on the policy that can hide a write.
+   * Every capability the catalogue holds, exposed or not. Used by the construction-time
+   * envelope-services guard, which must not depend on the policy that can hide a write, and by
+   * `sealUnavailableCapabilities`, which must see every definition when it checks the newly sealed
+   * ones for id and name collisions.
    */
   listAll(): readonly CapabilityDefinition[];
 }

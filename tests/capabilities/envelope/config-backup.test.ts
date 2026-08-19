@@ -18,7 +18,27 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createOPNsenseConfigBackupService } from '../../../src/capabilities/envelope/config-backup.js';
+import type * as NodeFs from 'node:fs';
 import type { BackupRequest } from '../../../src/capabilities/types.js';
+
+// The durability guarantee is the whole point of the write path, and `fsyncSync` cannot be spied on
+// a node builtin namespace (ESM exports are not configurable). The module mock delegates every call
+// to the real filesystem and only counts the fsyncs — and, when armed, raises an errno whose message
+// carries a path, so a leaked message is caught by the assertions below.
+const fsync = vi.hoisted(() => ({ calls: 0, fault: false }));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFs>();
+  return {
+    ...actual,
+    default: actual,
+    fsyncSync(fd: number): void {
+      fsync.calls += 1;
+      if (fsync.fault) throw new Error('EIO: i/o error, fsync /private/state/backups/store');
+      actual.fsyncSync(fd);
+    }
+  };
+});
 
 const signal = new AbortController().signal;
 const CONFIG_XML =
@@ -58,9 +78,12 @@ let root: string;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'opnsense-config-backup-'));
+  fsync.calls = 0;
+  fsync.fault = false;
 });
 
 afterEach(() => {
+  fsync.fault = false;
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -105,6 +128,37 @@ describe('OPNsense configuration backup service', () => {
     expect(metadata.transactionId).toBe(REQUEST.transactionId);
     expect(metadata.byteLength).toBe(CONFIG_XML.length);
     expect(metadata.xmlSha256).toBe(createHash('sha256').update(CONFIG_XML).digest('hex'));
+  });
+
+  // The header comment's claim in one number: every fsync `publishBackup` performs before `create`
+  // resolves, pinned as an exact count so that deleting any one of them — either file, the staging
+  // directory, or the store — is a red test rather than a silent loss of durability. 4 = one fsync
+  // per file written (config.xml, metadata.json) plus one on the staging directory plus one on the
+  // store directory.
+  it('fsyncs both files, the staging directory and the store before create resolves', async () => {
+    const service = createOPNsenseConfigBackupService(source(), join(root, 'store'));
+    await service.create(REQUEST, signal);
+    expect(fsync.calls).toBe(4);
+  });
+
+  // The opposite polarity of the discipline above: a durability fsync that cannot complete must
+  // fail loudly rather than let `create` resolve over an unconfirmed write, and the store must hold
+  // no trace of the snapshot it could not durably confirm — whichever of the three fsyncs is the one
+  // that fails.
+  it('leaves no published backup behind when a write cannot be made durable', async () => {
+    const store = join(root, 'store');
+    const service = createOPNsenseConfigBackupService(source(), store);
+    fsync.fault = true;
+
+    let message = '';
+    try {
+      await service.create(REQUEST, signal);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toBe('Backup publication failed');
+    expect(message).not.toMatch(/\//u);
+    expect(readdirSync(store)).toEqual([]);
   });
 
   it('reports a missing or malformed backup id as absent', async () => {
