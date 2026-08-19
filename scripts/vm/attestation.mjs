@@ -28,6 +28,28 @@ export const VM_ATTESTATION_CHECK_KEYS = Object.freeze([
   'vmStopped',
   'writableSurface'
 ]);
+// The restore round-trip scenario's check set: every alias key above, plus the two checks that
+// only that scenario proves (backupRestored, stateReverted). Deliberately a second, independent
+// frozen set rather than a widened VM_ATTESTATION_CHECK_KEYS — the sealed alias evidence
+// (docs/evidence/product3-vm.json) was generated against, and must keep validating against,
+// exactly the 12-key set above; widening it would let the alias builder silently start accepting
+// a 14-key record it never sealed against.
+export const VM_RESTORE_ATTESTATION_CHECK_KEYS = Object.freeze([
+  'aliasAbsentAfter',
+  'aliasAbsentBefore',
+  'aliasCreated',
+  'aliasDeleted',
+  'aliasPresent',
+  'backupRestored',
+  'bootstrap',
+  'doctor',
+  'packageInstalled',
+  'residueFree',
+  'stateReverted',
+  'vmStarted',
+  'vmStopped',
+  'writableSurface'
+]);
 const SCENARIO_FLAGS = Object.freeze(['experimental-alias-write']);
 const SCENARIO_SCOPES = Object.freeze([
   'server.status',
@@ -117,7 +139,11 @@ function exactStringArray(value, expected) {
   return Object.freeze([...value]);
 }
 
-export function buildVmAttestation(input) {
+// Shared by every schema variant: everything but the `checks` record's own key set (schemaVersion
+// 2, image, scenario flags/scopes, clientVersion, node pattern) is pinned identically regardless of
+// which scenario produced the attestation — the restore round trip runs the same product profile,
+// it just proves a wider set of checks. `checkKeys` is the one axis that varies.
+function buildAttestationWithCheckKeys(input, checkKeys) {
   const source = recordWithExactKeys(input, TOP_LEVEL_KEYS);
   if (valueAt(source, 'schemaVersion') !== 2) invalid();
   const commit = patternedString(valueAt(source, 'commit'), GIT_OBJECT_PATTERN);
@@ -142,9 +168,9 @@ export function buildVmAttestation(input) {
     scopes: exactStringArray(valueAt(scenarioSource, 'scopes'), SCENARIO_SCOPES)
   });
 
-  const checksSource = recordWithExactKeys(valueAt(source, 'checks'), VM_ATTESTATION_CHECK_KEYS);
+  const checksSource = recordWithExactKeys(valueAt(source, 'checks'), checkKeys);
   const checks = {};
-  for (const key of VM_ATTESTATION_CHECK_KEYS) {
+  for (const key of checkKeys) {
     if (valueAt(checksSource, key) !== true) invalid();
     checks[key] = true;
   }
@@ -164,6 +190,18 @@ export function buildVmAttestation(input) {
   });
 }
 
+export function buildVmAttestation(input) {
+  return buildAttestationWithCheckKeys(input, VM_ATTESTATION_CHECK_KEYS);
+}
+
 export function serializeVmAttestation(input) {
   return `${JSON.stringify(buildVmAttestation(input))}\n`;
+}
+
+export function buildVmRestoreAttestation(input) {
+  return buildAttestationWithCheckKeys(input, VM_RESTORE_ATTESTATION_CHECK_KEYS);
+}
+
+export function serializeVmRestoreAttestation(input) {
+  return `${JSON.stringify(buildVmRestoreAttestation(input))}\n`;
 }

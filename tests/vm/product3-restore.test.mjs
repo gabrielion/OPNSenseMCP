@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import {
+  VM_RESTORE_ATTESTATION_CHECK_KEYS,
+  buildVmRestoreAttestation,
+  serializeVmAttestation,
+  serializeVmRestoreAttestation
+} from '../../scripts/vm/attestation.mjs';
 import {
   FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES,
   Product1bBootstrapError
@@ -20,7 +26,8 @@ import {
   deriveQmpQemuArguments,
   parseProduct3RestoreArguments,
   restoreOverConsole,
-  runProduct3Restore
+  runProduct3Restore,
+  writeVmRestoreAttestationAtomic
 } from '../../scripts/vm/product3-restore.mjs';
 
 const COMMIT = '1'.repeat(40);
@@ -32,11 +39,14 @@ const SENTINEL_BACKUP_XML =
   '<?xml version="1.0"?><opnsense><SENTINEL_RESTORE_CONFIG_SIGIL/></opnsense>';
 
 const socketRoots = [];
+const attestationRoots = [];
 
 afterEach(async () => {
   vi.useRealTimers();
   await Promise.all(
-    socketRoots.splice(0).map((root) => rm(root, { recursive: true, force: true }))
+    [...socketRoots.splice(0), ...attestationRoots.splice(0)].map((root) =>
+      rm(root, { recursive: true, force: true })
+    )
   );
 });
 
@@ -81,6 +91,33 @@ function completeChecks() {
     ...reobserveChecks(),
     vmStopped: true,
     residueFree: true
+  };
+}
+
+// Mirrors product3-alias.test.mjs's own `attestationInput()` field-for-field (same commit/tree,
+// image, scenario, node pattern — Task 12's brief pins every field but `checks` as shared,
+// unchanged, across the alias and restore scenarios), swapping in this file's own 14-key
+// `completeChecks()` for the `checks` field.
+function restoreAttestationInput(overrides = {}) {
+  return {
+    schemaVersion: 2,
+    commit: COMMIT,
+    tree: TREE,
+    node: '22.19.0',
+    host: 'macos',
+    protocolVersion: '2026-07-28',
+    clientVersion: '0.1.0',
+    image: {
+      release: '26.7',
+      sha256: '28d5e2f37e40d87468a924e3006ef10e2ddc6de485b85333d9e3958c84d0cb9d'
+    },
+    scenario: {
+      readOnly: false,
+      flags: ['experimental-alias-write'],
+      scopes: ['server.status', 'system.status', 'core.services', 'firewall.alias']
+    },
+    checks: completeChecks(),
+    ...overrides
   };
 }
 
@@ -823,5 +860,140 @@ describe('the console restore driver against an echoing single-user guest', () =
     ).rejects.toMatchObject({ code: 'PRODUCT3_RESTORE_CONSOLE_FAILED', stage: 'decode' });
 
     await new Promise((resolve) => server.close(resolve));
+  });
+});
+
+describe('Product 3 restore VM attestation schema', () => {
+  it('exports the restore check-key set as the alias set plus backupRestored and stateReverted, sorted and frozen', () => {
+    expect(VM_RESTORE_ATTESTATION_CHECK_KEYS).toEqual([
+      'aliasAbsentAfter',
+      'aliasAbsentBefore',
+      'aliasCreated',
+      'aliasDeleted',
+      'aliasPresent',
+      'backupRestored',
+      'bootstrap',
+      'doctor',
+      'packageInstalled',
+      'residueFree',
+      'stateReverted',
+      'vmStarted',
+      'vmStopped',
+      'writableSurface'
+    ]);
+    expect(Object.isFrozen(VM_RESTORE_ATTESTATION_CHECK_KEYS)).toBe(true);
+  });
+
+  it('accepts a 14-key all-true checks record and produces stable, recursively key-sorted canonical bytes', () => {
+    const reordered = restoreAttestationInput({
+      checks: {
+        stateReverted: true,
+        vmStopped: true,
+        residueFree: true,
+        writableSurface: true,
+        aliasPresent: true,
+        aliasDeleted: true,
+        bootstrap: true,
+        aliasAbsentAfter: true,
+        packageInstalled: true,
+        vmStarted: true,
+        aliasCreated: true,
+        aliasAbsentBefore: true,
+        backupRestored: true,
+        doctor: true
+      }
+    });
+
+    const canonical = serializeVmRestoreAttestation(reordered);
+
+    expect(canonical).toBe(serializeVmRestoreAttestation(restoreAttestationInput()));
+    expect(buildVmRestoreAttestation(reordered)).toEqual(JSON.parse(canonical));
+    expect(JSON.parse(canonical)).toMatchObject({ schemaVersion: 2, checks: completeChecks() });
+  });
+
+  it('rejects an input missing either new key (backupRestored or stateReverted)', () => {
+    const missingBackupRestored = completeChecks();
+    delete missingBackupRestored.backupRestored;
+    expect(() =>
+      serializeVmRestoreAttestation(restoreAttestationInput({ checks: missingBackupRestored }))
+    ).toThrow('VM_ATTESTATION_INVALID');
+
+    const missingStateReverted = completeChecks();
+    delete missingStateReverted.stateReverted;
+    expect(() =>
+      serializeVmRestoreAttestation(restoreAttestationInput({ checks: missingStateReverted }))
+    ).toThrow('VM_ATTESTATION_INVALID');
+  });
+
+  it('rejects the sealed alias serializer given a 14-key checks record — the alias shape must stay untouched', () => {
+    // The regression this task must not cause: widening the alias-only VM_ATTESTATION_CHECK_KEYS
+    // instead of adding a separate restore set would make this assertion fail (the sealed alias
+    // evidence's serializer would silently start accepting a shape it never sealed against).
+    expect(() => serializeVmAttestation(restoreAttestationInput())).toThrow(
+      'VM_ATTESTATION_INVALID'
+    );
+  });
+});
+
+describe('Product 3 restore VM attestation atomic writer', () => {
+  it('writes through serializeVmRestoreAttestation, accepting the 14-check shape', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opnsense-product3-restore-attestation-'));
+    attestationRoots.push(root);
+    const outputPath = join(root, 'product3-restore-vm.json');
+
+    await writeVmRestoreAttestationAtomic(outputPath, restoreAttestationInput());
+
+    expect(await readFile(outputPath, 'utf8')).toBe(
+      serializeVmRestoreAttestation(restoreAttestationInput())
+    );
+  });
+
+  it('rejects an alias-shaped 12-check attestation and a schemaVersion-3 attestation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opnsense-product3-restore-attestation-'));
+    attestationRoots.push(root);
+    const outputPath = join(root, 'product3-restore-vm.json');
+    const aliasShapedChecks = completeChecks();
+    delete aliasShapedChecks.backupRestored;
+    delete aliasShapedChecks.stateReverted;
+
+    // Validation runs (and throws VM_ATTESTATION_INVALID, via serializeVmRestoreAttestation)
+    // before any file-system mechanics start — mirroring writeVmAttestationAtomic's own
+    // established shape, where a shape rejection is distinct from an I/O failure.
+    await expect(
+      writeVmRestoreAttestationAtomic(
+        outputPath,
+        restoreAttestationInput({ checks: aliasShapedChecks })
+      )
+    ).rejects.toThrow('VM_ATTESTATION_INVALID');
+    await expect(
+      writeVmRestoreAttestationAtomic(outputPath, restoreAttestationInput({ schemaVersion: 3 }))
+    ).rejects.toThrow('VM_ATTESTATION_INVALID');
+  });
+});
+
+describe('Product 3 restore live default attestation writer wiring', () => {
+  it('wires the real default writer through serializeVmRestoreAttestation, not the sealed alias serializer', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opnsense-product3-restore-live-attestation-'));
+    attestationRoots.push(root);
+    const outputPath = join(root, 'product3-restore-vm.json');
+    const stdout = captureStream();
+    const deps = dependencies();
+    // Deleted, not overridden with a fake: this test's whole point is exercising the REAL default
+    // writer `runProduct3Restore` falls back to when the caller supplies none, never the
+    // always-faked `writeAttestation` every other test in this file injects.
+    delete deps.writeAttestation;
+
+    // If the default writer ever reverts to the sealed alias serializer (which hard-rejects any
+    // 14-key `checks` record), this run's own attestation stage throws internally, flipping
+    // `failureStage` to 'attestation' and the resolved exit code from 0 to 2 — so a correct result
+    // here is itself proof the wiring point is `serializeVmRestoreAttestation`, not merely a
+    // content assertion bolted on after the fact.
+    await expect(
+      runProduct3Restore({ ...deps, attestationPath: outputPath, stdout: stdout.stream })
+    ).resolves.toBe(0);
+
+    const written = await readFile(outputPath, 'utf8');
+    expect(written).toBe(serializeVmRestoreAttestation(JSON.parse(written)));
+    expect(JSON.parse(written)).toMatchObject({ schemaVersion: 2, checks: completeChecks() });
   });
 });

@@ -115,9 +115,54 @@ function vmAttestation(
   })}\n`;
 }
 
+// The restore round-trip's evidence shape: byte-for-byte the same pins as `vmAttestation` above
+// (schemaVersion, image, scenario, node pattern) — only the `checks` key set differs, the alias
+// set plus `backupRestored`/`stateReverted`.
+function restoreVmAttestation(
+  commit: string,
+  tree: string,
+  imageSha256 = '28d5e2f37e40d87468a924e3006ef10e2ddc6de485b85333d9e3958c84d0cb9d'
+): string {
+  return `${JSON.stringify({
+    checks: {
+      aliasAbsentAfter: true,
+      aliasAbsentBefore: true,
+      aliasCreated: true,
+      aliasDeleted: true,
+      aliasPresent: true,
+      backupRestored: true,
+      bootstrap: true,
+      doctor: true,
+      packageInstalled: true,
+      residueFree: true,
+      stateReverted: true,
+      vmStarted: true,
+      vmStopped: true,
+      writableSurface: true
+    },
+    clientVersion: '0.1.0',
+    commit,
+    host: 'linux',
+    image: {
+      release: '26.7',
+      sha256: imageSha256
+    },
+    node: '22.19.0',
+    protocolVersion: '2026-07-28',
+    scenario: {
+      flags: ['experimental-alias-write'],
+      readOnly: false,
+      scopes: ['server.status', 'system.status', 'core.services', 'firewall.alias']
+    },
+    schemaVersion: 2,
+    tree
+  })}\n`;
+}
+
 async function verifierFixture(): Promise<{
   readonly root: string;
   readonly evidencePath: string;
+  readonly restoreEvidencePath: string;
   readonly testedCommit: string;
   readonly testedTree: string;
 }> {
@@ -130,18 +175,36 @@ async function verifierFixture(): Promise<{
   const testedCommit = await git(root, ['rev-parse', 'HEAD']);
   const testedTree = await git(root, ['rev-parse', 'HEAD^{tree}']);
   const evidencePath = join(root, 'docs/evidence/product3-vm.json');
+  const restoreEvidencePath = join(root, 'docs/evidence/product3-restore-vm.json');
   await mkdir(join(root, 'docs/evidence'), { recursive: true });
   await writeFile(evidencePath, vmAttestation(testedCommit, testedTree), 'utf8');
-  return { root, evidencePath, testedCommit, testedTree };
+  await writeFile(restoreEvidencePath, restoreVmAttestation(testedCommit, testedTree), 'utf8');
+  return { root, evidencePath, restoreEvidencePath, testedCommit, testedTree };
 }
 
 async function runVerifier(root: string): Promise<CommandResult> {
   return runCommand(process.execPath, [VM_ATTESTATION_SCRIPT], { cwd: root });
 }
 
+// Commits BOTH evidence files together, in one commit: the ordinary "evidence just landed, worktree
+// fully clean" shape most fixtures below want. `commitEvidencePath` (below) drives the two-separate-
+// commits, either-order shape instead.
 async function commitVmEvidence(root: string): Promise<void> {
-  await git(root, ['add', 'docs/evidence/product3-vm.json']);
+  await git(root, [
+    'add',
+    'docs/evidence/product3-vm.json',
+    'docs/evidence/product3-restore-vm.json'
+  ]);
   await git(root, ['commit', '-qm', 'add VM evidence']);
+}
+
+async function commitEvidencePath(
+  root: string,
+  relativePath: string,
+  message: string
+): Promise<void> {
+  await git(root, ['add', relativePath]);
+  await git(root, ['commit', '-qm', message]);
 }
 
 function bashBlocks(document: string): readonly string[] {
@@ -336,6 +399,23 @@ describe('product documentation', () => {
       .not.toMatch(
         /\b(?:attest|claim|confirm|cover|demonstrate|establish|prove|show|support|validate|verify)s?\b[^.!?]{0,160}\b(?:production|durable|persistent|restore|rollback|public exposure|Internet-facing|outside `firewall\.alias`)\b/iu
       );
+  });
+
+  // Mirrors the existing Product 3 alias producer's own README documentation (a markdown link to
+  // its evidence file, plus the exact runnable command that produces it) for the restore
+  // round-trip producer. docs/evidence/product3-restore-vm.json does not exist on this branch —
+  // only the live VM runner creates it, at landing — so this pins the link and command text, not
+  // file content.
+  it('documents the restore round-trip attestation with a link and its producer command', async () => {
+    const readme = await readFile('README.md', 'utf8');
+    const prose = readme.replace(/\s+/gu, ' ');
+
+    expect(prose).toContain(
+      '[restore-round-trip Product 3 VM attestation](docs/evidence/product3-restore-vm.json)'
+    );
+    expect(prose).toContain(
+      'node scripts/vm/product3-restore.mjs --attestation-out "$PWD/docs/evidence/product3-restore-vm.json"'
+    );
   });
 
   it('publishes exact guarded contributor commands', async () => {
@@ -608,8 +688,7 @@ describe('commit-bound VM attestation verifier', () => {
 
   it('accepts replacement evidence when the tested commit contains older evidence', async () => {
     const fixture = await verifierFixture();
-    await git(fixture.root, ['add', 'docs/evidence/product3-vm.json']);
-    await git(fixture.root, ['commit', '-qm', 'add older VM evidence']);
+    await commitVmEvidence(fixture.root);
     await writeFile(join(fixture.root, 'tracked.txt'), 'later tested bytes\n', 'utf8');
     await git(fixture.root, ['add', 'tracked.txt']);
     await git(fixture.root, ['commit', '-qm', 'create later tested commit']);
@@ -617,15 +696,51 @@ describe('commit-bound VM attestation verifier', () => {
     const testedCommit = await git(fixture.root, ['rev-parse', 'HEAD']);
     const testedTree = await git(fixture.root, ['rev-parse', 'HEAD^{tree}']);
     await writeFile(fixture.evidencePath, vmAttestation(testedCommit, testedTree), 'utf8');
+    await writeFile(
+      fixture.restoreEvidencePath,
+      restoreVmAttestation(testedCommit, testedTree),
+      'utf8'
+    );
 
     const beforeCommit = await runVerifier(fixture.root);
     expect(beforeCommit).toEqual({ code: 0, stdout: '', stderr: '' });
 
-    await git(fixture.root, ['add', 'docs/evidence/product3-vm.json']);
-    await git(fixture.root, ['commit', '-qm', 'replace VM evidence']);
+    await commitVmEvidence(fixture.root);
 
     const afterCommit = await runVerifier(fixture.root);
     expect(afterCommit).toEqual({ code: 0, stdout: '', stderr: '' });
+  });
+
+  it('accepts the two evidence commits landing separately, in either order', async () => {
+    // The property the "sole path" -> "subset of the two evidence paths" widening exists for:
+    // from EITHER attestation's own point of view, the OTHER one's commit landing on top must
+    // still read as harmless evidence churn, not as a foreign, stale-making change — regardless
+    // of which of the two lands first.
+    const aliasFirst = await verifierFixture();
+    await commitEvidencePath(
+      aliasFirst.root,
+      'docs/evidence/product3-vm.json',
+      'add alias VM evidence'
+    );
+    await commitEvidencePath(
+      aliasFirst.root,
+      'docs/evidence/product3-restore-vm.json',
+      'add restore VM evidence'
+    );
+    expect(await runVerifier(aliasFirst.root)).toEqual({ code: 0, stdout: '', stderr: '' });
+
+    const restoreFirst = await verifierFixture();
+    await commitEvidencePath(
+      restoreFirst.root,
+      'docs/evidence/product3-restore-vm.json',
+      'add restore VM evidence'
+    );
+    await commitEvidencePath(
+      restoreFirst.root,
+      'docs/evidence/product3-vm.json',
+      'add alias VM evidence'
+    );
+    expect(await runVerifier(restoreFirst.root)).toEqual({ code: 0, stdout: '', stderr: '' });
   });
 
   it('rejects unrelated tracked or untracked changes in a pre-evidence state', async () => {
@@ -665,7 +780,15 @@ describe('commit-bound VM attestation verifier', () => {
   it('returns unreadable for a missing, malformed, or non-canonical document', async () => {
     const fixture = await verifierFixture();
     await unlink(fixture.evidencePath);
-    expect(await runVerifier(fixture.root)).toEqual({ code: 1, stdout: '', stderr: '' });
+    // The one sub-case where the file is genuinely absent (as opposed to present-but-invalid, the
+    // other three sub-cases below): the verifier names which evidence file, on stderr, so a
+    // maintainer running `evidence:verify` can tell "missing" apart from "stale"/"malformed"
+    // without inspecting either document.
+    expect(await runVerifier(fixture.root)).toEqual({
+      code: 1,
+      stdout: '',
+      stderr: 'Missing VM evidence file: docs/evidence/product3-vm.json\n'
+    });
 
     await writeFile(fixture.evidencePath, '{"schemaVersion":2}\n', 'utf8');
     expect(await runVerifier(fixture.root)).toEqual({ code: 1, stdout: '', stderr: '' });
@@ -684,6 +807,31 @@ describe('commit-bound VM attestation verifier', () => {
       'utf8'
     );
     expect(await runVerifier(wrongImage.root)).toEqual({ code: 1, stdout: '', stderr: '' });
+  });
+
+  it('reports the restore evidence file by name when only it is missing', async () => {
+    const fixture = await verifierFixture();
+    await unlink(fixture.restoreEvidencePath);
+
+    expect(await runVerifier(fixture.root)).toEqual({
+      code: 1,
+      stdout: '',
+      stderr: 'Missing VM evidence file: docs/evidence/product3-restore-vm.json\n'
+    });
+  });
+
+  it('reports both evidence files by name when neither is present', async () => {
+    const fixture = await verifierFixture();
+    await unlink(fixture.evidencePath);
+    await unlink(fixture.restoreEvidencePath);
+
+    expect(await runVerifier(fixture.root)).toEqual({
+      code: 1,
+      stdout: '',
+      stderr:
+        'Missing VM evidence file: docs/evidence/product3-vm.json\n' +
+        'Missing VM evidence file: docs/evidence/product3-restore-vm.json\n'
+    });
   });
 
   it('returns unreadable for pre-evidence and committed symlink documents', async () => {

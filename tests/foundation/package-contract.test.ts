@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
+import {
+  ALIAS_EVIDENCE_RELATIVE_PATH,
+  RESTORE_EVIDENCE_RELATIVE_PATH
+} from '../../scripts/verify-vm-attestation.mjs';
 
 interface PackageDocument {
   name: string;
@@ -181,6 +185,16 @@ describe('package contract', () => {
     expect(ignoredPaths.filter((path) => path === 'docs/evidence/product3-vm.json')).toEqual([
       'docs/evidence/product3-vm.json'
     ]);
+  });
+
+  // The restore round-trip's evidence path is a new contract surface the verifier depends on
+  // (scripts/verify-vm-attestation.mjs verifies both files by path), pinned here as an exported
+  // constant rather than by reading docs/evidence/product3-restore-vm.json directly — that file is
+  // producer-canonical output the live VM runner creates only at landing, never hand-authored, and
+  // does not exist on this branch.
+  it('pins the restore evidence path beside the existing alias evidence path', () => {
+    expect(ALIAS_EVIDENCE_RELATIVE_PATH).toBe('docs/evidence/product3-vm.json');
+    expect(RESTORE_EVIDENCE_RELATIVE_PATH).toBe('docs/evidence/product3-restore-vm.json');
   });
 
   it('gives repository agents the minimum runtime, safety, and gate contract', async () => {

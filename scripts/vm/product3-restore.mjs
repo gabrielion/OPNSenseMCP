@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { createConnection } from 'node:net';
 import { createHash, randomBytes } from 'node:crypto';
-import { readFile, readdir, unlink } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { mkdir, open, readFile, readdir, rename, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runHardenedStdioLifecycle } from '../testing/hardened-stdio-lifecycle.mjs';
+import { serializeVmRestoreAttestation } from './attestation.mjs';
 import {
   FIREWALL_ALIAS_BOOTSTRAP_PRIVILEGES,
   Product1bBootstrapError,
@@ -29,7 +31,7 @@ import {
   verifyProduct1bResidue
 } from './product1b-live.mjs';
 import { IMAGE_SPEC, doctorHost, prepareImage } from './product1b.mjs';
-import { inspectGitWorktree, writeVmAttestationAtomic } from './product3-alias.mjs';
+import { inspectGitWorktree } from './product3-alias.mjs';
 
 // This scenario reuses the alias-write ACL surface: the round trip's mutation is an alias create,
 // so it needs exactly the scopes and the feature flag product3-alias.mjs already needed.
@@ -91,6 +93,97 @@ export function parseProduct3RestoreArguments(arguments_) {
     throw new Product3RestoreError('USAGE', ATTESTATION_USAGE);
   }
   return Object.freeze({ attestationPath: arguments_[1] });
+}
+
+// ---------------------------------------------------------------------------------------------
+// Atomic attestation writer, restore-shaped. product3-alias.mjs's own `writeVmAttestationAtomic`
+// hard-codes the alias serializer (`serializeVmAttestation`) with no injection point, so it would
+// reject this scenario's 14-check restore attestation outright. Rather than editing that file
+// (out of scope here, and it is relied on unmodified by product3-alias.mjs's own sealed tests),
+// this duplicates its small atomic-write mechanics — same temp-file-then-rename discipline, same
+// directory fsync discipline — swapping in `serializeVmRestoreAttestation`.
+// ---------------------------------------------------------------------------------------------
+function compatibleDirectorySyncError(error) {
+  return (
+    error instanceof Error &&
+    'code' in error &&
+    ['EBADF', 'EINVAL', 'EISDIR', 'ENOTSUP'].includes(String(error.code))
+  );
+}
+
+async function syncParentDirectory(parentPath, openFile) {
+  let handle;
+  try {
+    handle = await openFile(parentPath, constants.O_RDONLY);
+    await handle.sync();
+  } catch (error) {
+    if (!compatibleDirectorySyncError(error)) throw error;
+  } finally {
+    if (handle !== undefined) await handle.close().catch(() => undefined);
+  }
+}
+
+function directorySyncPaths(parentPath, firstCreatedPath) {
+  if (firstCreatedPath === undefined) return [parentPath];
+  if (typeof firstCreatedPath !== 'string' || !isAbsolute(firstCreatedPath)) {
+    throw new Product3RestoreError('VM_ATTESTATION_WRITE_FAILED');
+  }
+  const createdRelative = relative(firstCreatedPath, parentPath);
+  if (
+    createdRelative === '..' ||
+    createdRelative.startsWith(`..${sep}`) ||
+    isAbsolute(createdRelative)
+  ) {
+    throw new Product3RestoreError('VM_ATTESTATION_WRITE_FAILED');
+  }
+  const boundary = dirname(firstCreatedPath);
+  const paths = [];
+  let current = parentPath;
+  for (;;) {
+    paths.push(current);
+    if (current === boundary) return paths;
+    const next = dirname(current);
+    if (next === current) throw new Product3RestoreError('VM_ATTESTATION_WRITE_FAILED');
+    current = next;
+  }
+}
+
+export async function writeVmRestoreAttestationAtomic(outputPath, attestation, options = {}) {
+  if (typeof outputPath !== 'string' || !isAbsolute(outputPath)) {
+    throw new Product3RestoreError('VM_ATTESTATION_WRITE_FAILED');
+  }
+  const serialized = serializeVmRestoreAttestation(attestation);
+  const openFile = options.openFile ?? open;
+  const makeDirectory = options.makeDirectory ?? mkdir;
+  const renameFile = options.renameFile ?? rename;
+  const syncDirectory = options.syncDirectory ?? ((path) => syncParentDirectory(path, openFile));
+  const unlinkFile = options.unlinkFile ?? unlink;
+  const nonce = (options.randomBytes ?? randomBytes)(16).toString('hex');
+  const parentPath = dirname(outputPath);
+  const temporaryPath = join(parentPath, `.${basename(outputPath)}.pending-${nonce}`);
+  let handle;
+  let temporaryExists = false;
+  try {
+    const firstCreatedPath = await makeDirectory(parentPath, { recursive: true });
+    const syncPaths = directorySyncPaths(parentPath, firstCreatedPath);
+    handle = await openFile(
+      temporaryPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600
+    );
+    temporaryExists = true;
+    await handle.writeFile(serialized, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await renameFile(temporaryPath, outputPath);
+    temporaryExists = false;
+    for (const syncPath of syncPaths) await syncDirectory(syncPath);
+  } catch {
+    if (handle !== undefined) await handle.close().catch(() => undefined);
+    if (temporaryExists) await unlinkFile(temporaryPath).catch(() => undefined);
+    throw new Product3RestoreError('VM_ATTESTATION_WRITE_FAILED');
+  }
 }
 
 // Single source of truth for where this scenario's QMP monitor socket lives: a sibling of the
@@ -859,7 +952,7 @@ export async function runProduct3Restore(options = {}) {
   const removeQmpSocket = options.removeQmpSocket ?? removeQmpSocketIfPresent;
   const verifyResidue = options.verifyResidue ?? verifyProduct1bResidue;
   const inspectGit = options.inspectGit ?? inspectGitWorktree;
-  const writeAttestation = options.writeAttestation ?? writeVmAttestationAtomic;
+  const writeAttestation = options.writeAttestation ?? writeVmRestoreAttestationAtomic;
   const nodeVersion = options.nodeVersion ?? process.versions.node;
   const checks = emptyChecks();
   let gitIdentity;
@@ -1064,10 +1157,10 @@ export async function runProduct3Restore(options = {}) {
           throw new Product3RestoreError('GIT_STATE_CHANGED');
         }
         const attestation = {
-          // Pinned to 2, matching alias's own generation: Task 12's adjudicated brief shares this
-          // schema version unchanged (the restore scenario runs the same product profile), and
-          // attestation.mjs's builder hard-rejects anything else — this writer wiring itself stays
-          // untouched here, since Task 12 owns swapping it for the restore-shaped serializer.
+          // Pinned to 2, matching alias's own generation: the adjudicated brief shares this schema
+          // version unchanged (the restore scenario runs the same product profile) — only the
+          // `checks` key set differs, which is why the default `writeAttestation` above is the
+          // restore-shaped `writeVmRestoreAttestationAtomic`, not alias's own writer.
           schemaVersion: 2,
           commit: gitIdentity.commit,
           tree: gitIdentity.tree,

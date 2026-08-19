@@ -270,6 +270,13 @@ pinned firmware image, policy inputs and fixed lifecycle checks without retainin
 credentials. The Product 3 attestation does not prove production use, durable state, durable backups, a
 durable audit trail, restore, or automatic rollback.
 
+The restore round-trip additionally reverts that same alias mutation directly over the disposable VM's
+console — not through the API — then re-observes the API to check the mutation is gone. The
+[restore-round-trip Product 3 VM attestation](docs/evidence/product3-restore-vm.json) records the tested
+commit and tree, the same pinned firmware image and policy inputs, the alias lifecycle checks, and the
+backup-restored and state-reverted checks, again without retaining firewall data or credentials, produced
+with `node scripts/vm/product3-restore.mjs --attestation-out "$PWD/docs/evidence/product3-restore-vm.json"`.
+
 **Disposable-account privileges.** The accounts are created with exactly these stock ACLs, and nothing
 else. Both ACL profiles now have live evidence only in their exact scenarios: the read-only profile in
 Product 1B and the alias-write profile in Product 3.
